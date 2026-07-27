@@ -65,6 +65,53 @@ body {
   border-color: var(--color-accent) !important;
 }
 
+/* Una herramienta que arrancó y todavía no devolvió: el punto late en el riel
+   de la cronología. Es el único movimiento continuo del panel, y sirve para
+   distinguir "sigue trabajando" de "terminó y no dijo nada". */
+@keyframes punto-latiendo {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in oklch, var(--color-warn) 60%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 5px color-mix(in oklch, var(--color-warn) 0%, transparent);
+  }
+}
+
+.punto-en-curso {
+  animation: punto-latiendo 1.4s ease-out infinite;
+}
+
+/* Las filas nuevas de la cronología entran desde abajo, en el sentido en que
+   avanza el tiempo. `@starting-style` evita el parpadeo del estado final que
+   deja una animación arrancada después del primer pintado. */
+@starting-style {
+  .fila-traza {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
+.fila-traza {
+  opacity: 1;
+  transform: translateY(0);
+  transition:
+    opacity 250ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 250ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Con la traza llegando por SSE hay decenas de filas por minuto: para quien
+   pidió menos movimiento, entran sin animar y el punto deja de latir. */
+@media (prefers-reduced-motion: reduce) {
+  .fila-traza {
+    transition: none;
+  }
+  .punto-en-curso,
+  .is-thinking {
+    animation: none;
+  }
+}
+
 /* Un paquete recorre la arista cuando un agente le escribe a otro. */
 .react-flow__edge.edge-active .react-flow__edge-path {
   stroke-width: 2.5;

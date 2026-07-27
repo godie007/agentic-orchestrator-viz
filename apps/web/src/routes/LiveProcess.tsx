@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { TraceEvent } from "@orq/shared";
 import { api, type CompanyBundle } from "../api.js";
@@ -585,63 +585,364 @@ function RoleDetail({
         </Button>
       }
     >
-      <div className="space-y-3 p-3 text-xs">
-        <div className="flex flex-wrap gap-x-4 gap-y-1 text-ink-dim">
-          <span>{role.title}</span>
-          <span>autoridad: {role.authority}</span>
-          <span>turnos: {activity?.turns ?? 0}</span>
-          <span>gasto: {money(activity?.costUsd ?? 0)}</span>
-          <span
-            title={`${(activity?.inputTokens ?? 0).toLocaleString("es-AR")} tokens de entrada · ${(activity?.outputTokens ?? 0).toLocaleString("es-AR")} de salida`}
-          >
-            tokens: ↓{tokens(activity?.inputTokens ?? 0)} ↑{tokens(activity?.outputTokens ?? 0)}
-            {(activity?.inputTokens ?? 0) > 0 &&
-              ` · caché ${Math.round((100 * (activity?.cachedInputTokens ?? 0)) / (activity?.inputTokens ?? 1))}%`}
-          </span>
-        </div>
+      {/* Tres bloques con un orden fijo: quién es, con qué cuenta, y qué hizo.
+          Lo de arriba ocupa lo que necesita; la cronología se queda con el
+          resto y hace su propio scroll. Antes los 22 chips de herramientas
+          empujaban la traza fuera de la pantalla y había que scrollear el panel
+          entero para ver el último paso, que es lo que uno viene a mirar. */}
+      <div className="flex h-full min-h-0 flex-col gap-3 p-3 text-xs">
+        <dl className="grid shrink-0 grid-cols-2 gap-x-4 gap-y-1.5 sm:grid-cols-4">
+          {[
+            { rotulo: "cargo", valor: role.title },
+            { rotulo: "autoridad", valor: role.authority },
+            { rotulo: "turnos", valor: String(activity?.turns ?? 0) },
+            { rotulo: "gasto", valor: money(activity?.costUsd ?? 0) },
+          ].map((dato) => (
+            <div key={dato.rotulo} className="min-w-0">
+              <dt className="text-[9px] tracking-wide text-ink-faint uppercase">{dato.rotulo}</dt>
+              <dd className="truncate text-[11px] text-ink">{dato.valor}</dd>
+            </div>
+          ))}
+          <div className="col-span-2 min-w-0 sm:col-span-4">
+            <dt className="text-[9px] tracking-wide text-ink-faint uppercase">tokens</dt>
+            <dd
+              className="truncate text-[11px] text-ink"
+              title={`${(activity?.inputTokens ?? 0).toLocaleString("es-AR")} de entrada · ${(activity?.outputTokens ?? 0).toLocaleString("es-AR")} de salida`}
+            >
+              ↓{tokens(activity?.inputTokens ?? 0)} ↑{tokens(activity?.outputTokens ?? 0)}
+              {(activity?.inputTokens ?? 0) > 0 && (
+                <span className="ml-1.5 text-ink-dim">
+                  caché{" "}
+                  {Math.round(
+                    (100 * (activity?.cachedInputTokens ?? 0)) / (activity?.inputTokens ?? 1),
+                  )}
+                  %
+                </span>
+              )}
+            </dd>
+          </div>
+        </dl>
 
         {selection && (
-          <div className="rounded border border-line bg-canvas p-2">
-            <div className="mb-1 text-[10px] font-semibold tracking-wide text-ink-dim uppercase">
+          // Plegado por defecto: son 22 nombres de herramienta y no es lo que
+          // se viene a mirar, pero cuando algo sale raro es lo primero que
+          // explica por qué el agente no usó la que correspondía.
+          <details className="shrink-0 rounded border border-line bg-canvas">
+            <summary className="cursor-pointer list-none px-2 py-1.5 text-[10px] font-semibold tracking-wide text-ink-dim uppercase hover:text-ink">
               Herramientas a mano
+              <span className="ml-1.5 font-mono normal-case text-ink-faint">
+                {selection.exposed.length} de {selection.candidates.length}
+              </span>
+            </summary>
+            <div className="border-t border-line/60 px-2 py-1.5">
+              <p className="mb-1.5 text-[11px] leading-4 text-ink-faint">{selection.reason}</p>
+              <div className="flex flex-wrap gap-1">
+                {selection.exposed.map((tool) => (
+                  <span
+                    key={tool}
+                    className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[10px] text-ink-dim"
+                  >
+                    {tool.replace(/^mcp__/, "")}
+                  </span>
+                ))}
+              </div>
             </div>
-            <p className="mb-1.5 text-[11px] text-ink-faint">{selection.reason}</p>
-            <div className="flex flex-wrap gap-1">
-              {selection.exposed.map((tool) => (
-                <span
-                  key={tool}
-                  className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[10px] text-ink-dim"
-                >
-                  {tool.replace(/^mcp__/, "")}
-                </span>
-              ))}
-            </div>
-          </div>
+          </details>
         )}
 
         {activity?.lastSummary && (
-          <div className="rounded border border-line bg-canvas p-2">
+          <div className="shrink-0 rounded border border-line bg-canvas p-2">
             <div className="mb-1 text-[10px] font-semibold tracking-wide text-ink-dim uppercase">
               Último razonamiento
             </div>
-            <p className="whitespace-pre-wrap text-[11px] text-ink-dim">{activity.lastSummary}</p>
+            <p className="line-clamp-4 whitespace-pre-wrap text-[11px] leading-4 text-ink-dim">
+              {activity.lastSummary}
+            </p>
           </div>
         )}
 
-        <div>
-          <div className="mb-1 text-[10px] font-semibold tracking-wide text-ink-dim uppercase">
-            Su traza
-          </div>
-          <ul className="space-y-1">
-            {own.reverse().map((event) => (
-              <li key={event.id} className="text-[11px]">
-                {renderEvent(event, (id) => company.roles.find((r) => r.id === id)?.name ?? "?")}
-              </li>
-            ))}
-          </ul>
-        </div>
+        <Cronologia
+          events={own}
+          nameOf={(id) => company.roles.find((r) => r.id === id)?.name ?? "?"}
+        />
       </div>
     </Panel>
+  );
+}
+
+// --- Cronología de un agente -------------------------------------------------
+
+/** Una fila de la cronología, ya resuelta a lo que se dibuja. */
+interface Fila {
+  id: string;
+  at: number;
+  /** Color del punto en el riel. */
+  punto: string;
+  titulo: ReactNode;
+  detalle?: string | null;
+  /** Una herramienta que arrancó y todavía no terminó. */
+  enCurso?: boolean;
+}
+
+/**
+ * Arma la traza de un agente como una línea de tiempo legible.
+ *
+ * Dos decisiones que cambian todo respecto de volcar los eventos crudos:
+ *
+ * 1. **Va en orden, de lo viejo a lo nuevo.** Antes se mostraba al revés y
+ *    leer lo que hizo un agente obligaba a recorrer su razonamiento hacia
+ *    atrás, que es justo como no se entiende una secuencia de trabajo.
+ * 2. **Una llamada a herramienta es una fila, no dos.** `tool.start` y
+ *    `tool.end` son el mismo hecho: mostrarlos separados duplicaba la lista y
+ *    escondía el resultado —lo único que importa— dos renglones más abajo.
+ *    Mientras la llamada no termina, la fila queda latiendo.
+ */
+function armarCronologia(
+  events: TraceEvent[],
+  nameOf: (id: string | null) => string,
+): Array<{ tick: number; filas: Fila[] }> {
+  const filas: Fila[] = [];
+  const porTick = new Map<number, Fila[]>();
+  const abiertas = new Map<string, Fila>();
+
+  const push = (tick: number, fila: Fila) => {
+    filas.push(fila);
+    porTick.set(tick, [...(porTick.get(tick) ?? []), fila]);
+  };
+
+  for (const event of events) {
+    switch (event.type) {
+      case "agent.thinking":
+        push(event.tick, {
+          id: event.id,
+          at: event.at,
+          punto: "bg-accent",
+          titulo: (
+            <span className="text-ink-dim">
+              piensa
+              <span className="ml-1.5 font-mono text-[10px] text-ink-faint">
+                iteración {event.iteration} · {event.modelSlug.split("/").pop()}
+              </span>
+            </span>
+          ),
+        });
+        break;
+
+      case "tool.start": {
+        const fila: Fila = {
+          id: event.id,
+          at: event.at,
+          punto: "bg-warn",
+          enCurso: true,
+          titulo: (
+            <span className="font-mono text-[11px] text-ink">
+              {event.toolName.replace(/^mcp__/, "")}
+            </span>
+          ),
+        };
+        abiertas.set(event.callId, fila);
+        push(event.tick, fila);
+        break;
+      }
+
+      case "tool.end": {
+        // Se completa la fila que abrió su `tool.start`. Si no aparece —la
+        // traza puede venir recortada— se agrega sola, para no perder el
+        // resultado.
+        const fila = abiertas.get(event.callId);
+        const cuerpo: Partial<Fila> = {
+          punto: event.ok ? "bg-ok" : "bg-danger",
+          enCurso: false,
+          detalle: event.error ?? event.preview,
+          titulo: (
+            <span className="flex items-baseline gap-1.5">
+              <span className={`font-mono text-[11px] ${event.ok ? "text-ink" : "text-danger"}`}>
+                {event.toolName.replace(/^mcp__/, "")}
+              </span>
+              <span className="text-[10px] text-ink-faint">{event.durationMs}ms</span>
+            </span>
+          ),
+        };
+        if (fila) {
+          Object.assign(fila, cuerpo);
+          abiertas.delete(event.callId);
+        } else {
+          push(event.tick, { id: event.id, at: event.at, punto: "bg-ok", ...cuerpo } as Fila);
+        }
+        break;
+      }
+
+      case "agent.message":
+        push(event.tick, {
+          id: event.id,
+          at: event.at,
+          punto: "bg-request",
+          titulo: (
+            <span>
+              <span style={{ color: MESSAGE_COLOR[event.messageType] }}>
+                {MESSAGE_LABEL[event.messageType] ?? event.messageType}
+              </span>
+              <span className="text-ink-dim"> → {nameOf(event.toRoleId)}</span>
+            </span>
+          ),
+          detalle: event.subject,
+        });
+        break;
+
+      case "artifact.created":
+        push(event.tick, {
+          id: event.id,
+          at: event.at,
+          punto: "bg-ok",
+          titulo: (
+            <span className="text-ok">
+              entregable <span className="text-ink">{event.title}</span>{" "}
+              <span className="text-ink-faint">v{event.version}</span>
+            </span>
+          ),
+        });
+        break;
+
+      case "task.changed":
+        push(event.tick, {
+          id: event.id,
+          at: event.at,
+          punto: "bg-ink-faint",
+          titulo: (
+            <span className="text-ink-dim">
+              {event.created ? "nueva tarea" : "tarea"} <span className="text-ink">{event.title}</span>{" "}
+              <span className="text-ink-faint">→ {event.status}</span>
+            </span>
+          ),
+        });
+        break;
+
+      case "approval.changed":
+        push(event.tick, {
+          id: event.id,
+          at: event.at,
+          punto: "bg-approval",
+          titulo: <span className="text-approval">aprobación {event.status}</span>,
+          detalle: event.reason,
+        });
+        break;
+
+      case "log":
+        push(event.tick, {
+          id: event.id,
+          at: event.at,
+          punto: event.level === "error" ? "bg-danger" : "bg-warn",
+          titulo: (
+            <span className={event.level === "error" ? "text-danger" : "text-warn"}>
+              {event.message}
+            </span>
+          ),
+        });
+        break;
+
+      default:
+        break;
+    }
+  }
+
+  return [...porTick.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([tick, propias]) => ({ tick, filas: propias.sort((a, b) => a.at - b.at) }));
+}
+
+const hora = (at: number): string =>
+  new Date(at).toLocaleTimeString("es-AR", { hour12: false });
+
+function Cronologia({
+  events,
+  nameOf,
+}: {
+  events: TraceEvent[];
+  nameOf: (id: string | null) => string;
+}) {
+  const ciclos = armarCronologia(events, nameOf);
+  const scroll = useRef<HTMLDivElement>(null);
+  const pegadoAlFondo = useRef(true);
+
+  // La cronología sigue al presente, pero sólo si ya lo estabas mirando. Si
+  // scrolleaste para atrás a leer algo, saltar al final en cada evento nuevo
+  // —llegan por SSE, varios por segundo— hace imposible leer nada.
+  useEffect(() => {
+    const caja = scroll.current;
+    if (caja && pegadoAlFondo.current) caja.scrollTop = caja.scrollHeight;
+  }, [events.length]);
+
+  if (ciclos.length === 0) {
+    return (
+      <div>
+        <div className="mb-1 text-[10px] font-semibold tracking-wide text-ink-dim uppercase">
+          Cronología
+        </div>
+        <p className="text-[11px] text-ink-faint">Todavía no hizo nada en esta corrida.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="mb-1 flex shrink-0 items-baseline justify-between">
+        <span className="text-[10px] font-semibold tracking-wide text-ink-dim uppercase">
+          Cronología
+        </span>
+        <span className="text-[10px] text-ink-faint">de lo primero a lo último</span>
+      </div>
+
+      <div
+        ref={scroll}
+        onScroll={(event) => {
+          const caja = event.currentTarget;
+          pegadoAlFondo.current =
+            caja.scrollHeight - caja.scrollTop - caja.clientHeight < 40;
+        }}
+        className="min-h-40 flex-1 overflow-auto rounded border border-line bg-canvas"
+      >
+        {ciclos.map(({ tick, filas }) => (
+          <section key={tick}>
+            <header className="sticky top-0 z-10 flex items-baseline justify-between border-b border-line/60 bg-canvas/95 px-2 py-1 backdrop-blur">
+              <span className="font-mono text-[10px] font-semibold text-ink-dim">ciclo {tick}</span>
+              <span className="text-[10px] text-ink-faint">
+                {filas.length} {filas.length === 1 ? "paso" : "pasos"}
+              </span>
+            </header>
+
+            <ol className="relative px-2 py-1.5">
+              {/* El riel: una sola línea vertical detrás de todos los puntos. */}
+              <span
+                aria-hidden
+                className="absolute top-0 bottom-0 left-[0.6875rem] w-px bg-line/60"
+              />
+              {filas.map((fila) => (
+                <li key={fila.id} className="fila-traza relative flex gap-2 py-1 pl-6">
+                  <span
+                    className={`absolute left-1.5 top-2 size-2 rounded-full ring-2 ring-canvas ${fila.punto} ${
+                      fila.enCurso ? "punto-en-curso" : ""
+                    }`}
+                  />
+                  <span className="min-w-0 flex-1">
+                    <span className="flex items-baseline justify-between gap-2">
+                      <span className="min-w-0 text-[11px]">{fila.titulo}</span>
+                      <span className="shrink-0 font-mono text-[10px] text-ink-faint">
+                        {hora(fila.at)}
+                      </span>
+                    </span>
+                    {fila.detalle && (
+                      <span className="mt-0.5 line-clamp-2 text-[10px] leading-4 text-ink-faint">
+                        {fila.detalle}
+                      </span>
+                    )}
+                  </span>
+                </li>
+              ))}
+            </ol>
+          </section>
+        ))}
+      </div>
+    </div>
   );
 }
 

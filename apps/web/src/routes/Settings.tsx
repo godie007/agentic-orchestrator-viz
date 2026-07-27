@@ -386,13 +386,6 @@ function RoleEditor({
 
   const providerModels = models.filter((model) => model.providerId === draft.model.providerId);
 
-  // Habilidades arriba: es lo que el rol sabe producir, y con varios MCP
-  // conectados quedaban enterradas al final de una lista de decenas.
-  const ordenadas = (tools: CompanyBundle["tools"]): CompanyBundle["tools"] => {
-    const peso: Record<string, number> = { skill: 0, capability: 1, mcp: 2, coordination: 3 };
-    return [...tools].sort((a, b) => (peso[a.origin] ?? 9) - (peso[b.origin] ?? 9));
-  };
-
   return (
     <Panel
       title={`${draft.name} — ${draft.title}`}
@@ -577,61 +570,237 @@ function RoleEditor({
           </Field>
         </div>
 
-        <Field
-          label="Herramientas asignadas"
-          hint="Las de coordinación las tiene siempre. Acá elegís sus habilidades —producir un Word o un PDF— y sus accesos de capacidad y MCP."
-        >
-          <div className="max-h-72 space-y-1 overflow-auto rounded border border-line bg-canvas p-2">
-            {company.tools.length === 0 && (
-              <p className="text-xs text-ink-faint">
-                No hay herramientas registradas. Conectá un servidor MCP desde el Hub.
-              </p>
-            )}
-            {ordenadas(company.tools).map((tool) => {
-              // Las de coordinación el motor se las da a todos los roles
-              // (registry.ts las agrega sin mirar `toolIds`). Mostrarlas como
-              // una casilla desmarcada era mentira: parecía que el agente no
-              // podía escribirle a nadie, y destildarla no hacía nada.
-              const fija = tool.origin === "coordination";
-              return (
-                <label
-                  key={tool.id}
-                  className={`flex items-start gap-2 rounded px-1 py-0.5 ${
-                    fija ? "opacity-60" : "cursor-pointer hover:bg-surface-2"
-                  } ${tool.origin === "skill" ? "border-l-2 border-approval/60 pl-2" : ""}`}
-                >
-                  <input
-                    type="checkbox"
-                    checked={fija || draft.toolIds.includes(tool.id)}
-                    onChange={() => !fija && toggleTool(tool.id)}
-                    disabled={fija}
-                    className="mt-0.5 accent-accent"
-                  />
-                  <span className="min-w-0">
-                    <span className="block font-mono text-[11px] text-ink">
-                      {tool.name}
-                      {fija && (
-                        <span className="ml-1.5 font-sans text-[10px] text-ink-faint">
-                          siempre disponible
-                        </span>
-                      )}
-                      {tool.origin === "skill" && (
-                        <span className="ml-1.5 font-sans text-[10px] text-approval">
-                          habilidad
-                        </span>
-                      )}
-                    </span>
-                    <span className="block truncate text-[10px] text-ink-faint">
-                      {tool.description}
-                    </span>
-                  </span>
-                </label>
-              );
-            })}
-          </div>
-        </Field>
+        <AsignacionDeHerramientas
+          tools={company.tools}
+          mcpServers={company.mcpServers}
+          asignadas={draft.toolIds}
+          onToggle={toggleTool}
+          onGrupo={(ids, marcar) =>
+            update(
+              "toolIds",
+              marcar
+                ? [...new Set([...draft.toolIds, ...ids])]
+                : draft.toolIds.filter((id) => !ids.includes(id)),
+            )
+          }
+        />
       </div>
     </Panel>
+  );
+}
+
+/**
+ * Asignación de herramientas, agrupada por lo que significan para el rol.
+ *
+ * Antes era una lista plana: con dos servidores MCP conectados son cuarenta
+ * casillas seguidas donde una habilidad —lo que el rol sabe **producir**— se ve
+ * igual que el decimoquinto acceso de lectura de un servidor. Nadie encuentra
+ * nada así, y la decisión que se está tomando ahí es de las importantes.
+ *
+ * Ahora cada grupo dice qué es, cuántas hay asignadas y se puede marcar entero.
+ * Las de coordinación no son casillas: el motor se las da a todos los roles sin
+ * mirar `toolIds`, así que dibujarlas como algo que se puede quitar es mentira.
+ */
+function AsignacionDeHerramientas({
+  tools,
+  mcpServers,
+  asignadas,
+  onToggle,
+  onGrupo,
+}: {
+  tools: CompanyBundle["tools"];
+  mcpServers: CompanyBundle["mcpServers"];
+  asignadas: string[];
+  onToggle: (toolId: string) => void;
+  onGrupo: (toolIds: string[], marcar: boolean) => void;
+}) {
+  const [filtro, setFiltro] = useState("");
+
+  const coincide = (tool: CompanyBundle["tools"][number]): boolean => {
+    const aguja = filtro.trim().toLowerCase();
+    if (!aguja) return true;
+    return (
+      tool.name.toLowerCase().includes(aguja) || tool.description.toLowerCase().includes(aguja)
+    );
+  };
+
+  const visibles = tools.filter(coincide);
+  const de = (origin: string) => visibles.filter((tool) => tool.origin === origin);
+
+  const coordinacion = de("coordination");
+  const grupos: Array<{
+    clave: string;
+    titulo: string;
+    detalle: string;
+    tools: CompanyBundle["tools"];
+  }> = [
+    {
+      clave: "skill",
+      titulo: "Habilidades",
+      detalle: "Lo que este rol sabe producir.",
+      tools: de("skill"),
+    },
+    {
+      clave: "capability",
+      titulo: "Capacidades",
+      detalle: "Accesos generales, como buscar en la web.",
+      tools: de("capability"),
+    },
+    // Un grupo por servidor: mezclar dos MCP en una sola lista hace que el
+    // nombre de la herramienta sea lo único que distingue de dónde sale.
+    ...mcpServers.map((server) => ({
+      clave: `mcp:${server.id}`,
+      titulo: server.name,
+      detalle: "Servidor MCP conectado.",
+      tools: de("mcp").filter((tool) => tool.mcpServerId === server.id),
+    })),
+    {
+      clave: "mcp:sueltas",
+      titulo: "Otras herramientas MCP",
+      detalle: "De un servidor que ya no está configurado.",
+      tools: de("mcp").filter(
+        (tool) => !mcpServers.some((server) => server.id === tool.mcpServerId),
+      ),
+    },
+  ];
+
+  const total = tools.filter((tool) => tool.origin !== "coordination").length;
+  const puestas = asignadas.length;
+
+  return (
+    <Field
+      label="Herramientas asignadas"
+      hint="Las de coordinación las tiene siempre. Acá elegís qué sabe producir y a qué accede."
+    >
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          <input
+            value={filtro}
+            onChange={(event) => setFiltro(event.target.value)}
+            placeholder="Buscar herramienta…"
+            className={inputClass}
+          />
+          <span className="shrink-0 rounded border border-line bg-canvas px-2 py-1.5 font-mono text-[11px] text-ink-dim">
+            {puestas}/{total}
+          </span>
+        </div>
+
+        <div className="max-h-80 space-y-3 overflow-auto rounded border border-line bg-canvas p-2">
+          {tools.length === 0 && (
+            <p className="text-xs text-ink-faint">
+              No hay herramientas registradas. Conectá un servidor MCP desde el Hub.
+            </p>
+          )}
+
+          {grupos
+            .filter((grupo) => grupo.tools.length > 0)
+            .map((grupo) => {
+              const ids = grupo.tools.map((tool) => tool.id);
+              const marcadas = ids.filter((id) => asignadas.includes(id)).length;
+              const todas = marcadas === ids.length;
+              return (
+                <section key={grupo.clave}>
+                  <header className="mb-1 flex items-baseline justify-between gap-2 border-b border-line/60 pb-1">
+                    <div className="min-w-0">
+                      <h4 className="truncate text-[11px] font-semibold tracking-wide text-ink uppercase">
+                        {grupo.titulo}
+                      </h4>
+                      <p className="truncate text-[10px] text-ink-faint">{grupo.detalle}</p>
+                    </div>
+                    <div className="flex shrink-0 items-baseline gap-2">
+                      <span className="font-mono text-[10px] text-ink-faint">
+                        {marcadas}/{ids.length}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => onGrupo(ids, !todas)}
+                        className="rounded px-1 text-[10px] text-accent hover:bg-surface-2"
+                      >
+                        {todas ? "ninguna" : "todas"}
+                      </button>
+                    </div>
+                  </header>
+
+                  <div className="space-y-0.5">
+                    {grupo.tools.map((tool) => {
+                      const puesta = asignadas.includes(tool.id);
+                      return (
+                        <label
+                          key={tool.id}
+                          className={`flex cursor-pointer items-start gap-2 rounded px-1.5 py-1 transition-colors hover:bg-surface-2 ${
+                            puesta ? "bg-surface-2/50" : ""
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={puesta}
+                            onChange={() => onToggle(tool.id)}
+                            className="mt-0.5 accent-accent"
+                          />
+                          <span className="min-w-0 flex-1">
+                            <span className="flex items-baseline gap-1.5">
+                              <span
+                                className={`truncate font-mono text-[11px] ${puesta ? "text-ink" : "text-ink-dim"}`}
+                              >
+                                {tool.name.replace(/^mcp__[^_]+__/, "")}
+                              </span>
+                              {tool.requiresApproval && (
+                                <span className="shrink-0 rounded bg-warn/15 px-1 text-[9px] text-warn">
+                                  pide aprobación
+                                </span>
+                              )}
+                              {/* Sólo donde el dato es cierto. En MCP `readOnly`
+                                  sale de una anotación que casi ningún servidor
+                                  manda, y por defecto es `false`: rotular
+                                  "escribe" a un `read_file` es peor que no
+                                  decir nada. */}
+                              {tool.origin !== "mcp" && !tool.readOnly && (
+                                <span className="shrink-0 text-[9px] text-ink-faint">escribe</span>
+                              )}
+                            </span>
+                            <span className="mt-0.5 line-clamp-2 text-[10px] leading-4 text-ink-faint">
+                              {tool.description}
+                            </span>
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </section>
+              );
+            })}
+
+          {coordinacion.length > 0 && (
+            <section>
+              <header className="mb-1 flex items-baseline justify-between gap-2 border-b border-line/60 pb-1">
+                <div>
+                  <h4 className="text-[11px] font-semibold tracking-wide text-ink-dim uppercase">
+                    Coordinación
+                  </h4>
+                  <p className="text-[10px] text-ink-faint">
+                    Cómo habla con el resto. Las tiene siempre, no se asignan.
+                  </p>
+                </div>
+                <span className="shrink-0 font-mono text-[10px] text-ink-faint">
+                  {coordinacion.length}
+                </span>
+              </header>
+              <div className="flex flex-wrap gap-1">
+                {coordinacion.map((tool) => (
+                  <span
+                    key={tool.id}
+                    title={tool.description}
+                    className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[10px] text-ink-faint"
+                  >
+                    {tool.name}
+                  </span>
+                ))}
+              </div>
+            </section>
+          )}
+        </div>
+      </div>
+    </Field>
   );
 }
 
