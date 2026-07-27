@@ -98,7 +98,7 @@ describe("agente atascado en la misma llamada fallida", () => {
     expect(result.iterations).toBeLessThan(agente.maxTurns);
 
     const aviso = eventos.find(
-      (event) => event.type === "log" && event.message.includes("misma llamada fallida"),
+      (event) => event.type === "log" && event.message.includes("mismo error"),
     );
     expect(aviso).toBeDefined();
 
@@ -134,10 +134,12 @@ describe("agente atascado en la misma llamada fallida", () => {
     expect(run.id).toBeTruthy();
   });
 
-  it("no corta cuando el agente cambia de argumentos", async () => {
+  it("le da aire al que cambia de argumentos, pero no infinito", async () => {
     const { agente, run, state, bus, tools } = escenario();
 
-    // Reintentar con otra ruta es corregirse, no atascarse: hay que dejarlo.
+    // Probar rutas distintas es exploración legítima, así que no se corta a la
+    // tercera como con la llamada idéntica. Pero si el error es siempre el
+    // mismo, la pared no se mueve: a la quinta se lo frena igual.
     let i = 0;
     const provider = new FakeProvider(() => {
       i++;
@@ -158,7 +160,82 @@ describe("agente atascado en la misma llamada fallida", () => {
       maxTicks: 5,
     });
 
-    expect(result.iterations).toBe(6);
+    expect(result.iterations).toBeGreaterThan(4);
+    expect(result.iterations).toBeLessThanOrEqual(7);
     expect(run.id).toBeTruthy();
   });
+});
+
+/**
+ * El ciclo termina cuando termina el último agente, así que un turno lento
+ * bloquea a todos. Medimos una llamada de 649 segundos que dejó a tres agentes
+ * esperando once minutos: sin corte por tiempo, un proveedor colgado le cuesta
+ * a la empresa entera.
+ */
+describe("una llamada lenta no puede bloquear el ciclo", () => {
+  /** Proveedor que nunca responde hasta que lo aborten. */
+  function proveedorColgado(): ProviderRegistry & { intentos: () => number } {
+    let intentos = 0;
+    const provider = new FakeProvider(() => ({ text: "nunca llega" }));
+
+    provider.chat = async function* (req) {
+      intentos++;
+      await new Promise((_, reject) => {
+        req.signal?.addEventListener("abort", () => reject(new Error("The operation was aborted")), {
+          once: true,
+        });
+      });
+      yield { type: "text_delta", text: "" } as never;
+    } as typeof provider.chat;
+
+    const registry = new ProviderRegistry();
+    registry.register(provider);
+    return Object.assign(registry, { intentos: () => intentos });
+  }
+
+  it("corta y reintenta en vez de esperar para siempre", async () => {
+    const { agente, state, bus, tools } = escenario([]);
+    const providers = proveedorColgado();
+
+    const inicio = Date.now();
+    await expect(
+      runAgentTurn(state, agente, {
+        bus,
+        providers,
+        tools,
+        ledger: new RunLedger(10),
+        objective: "x",
+        maxTicks: 5,
+        llmTimeoutMs: 60,
+      }),
+    ).rejects.toThrow();
+
+    // Cortó por tiempo, no se quedó colgado.
+    expect(Date.now() - inicio).toBeLessThan(20_000);
+    // Y reintentó: un timeout es recuperable, a diferencia de un stop humano.
+    expect(providers.intentos()).toBeGreaterThan(1);
+  }, 30_000);
+
+  it("un stop de la persona no se reintenta", async () => {
+    const { agente, state, bus, tools } = escenario([]);
+    const providers = proveedorColgado();
+    const abort = new AbortController();
+    setTimeout(() => abort.abort(), 50);
+
+    await expect(
+      runAgentTurn(state, agente, {
+        bus,
+        providers,
+        tools,
+        ledger: new RunLedger(10),
+        objective: "x",
+        maxTicks: 5,
+        llmTimeoutMs: 10_000,
+        signal: abort.signal,
+      }),
+    ).rejects.toThrow();
+
+    // Detener la corrida significa detenerla, no reintentar cuatro veces.
+    expect(providers.intentos()).toBe(1);
+  }, 30_000);
 });

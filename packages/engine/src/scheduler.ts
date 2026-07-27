@@ -63,6 +63,21 @@ export class Orchestrator {
 
     try {
       this.state.tick += 1;
+
+      // Antes de decidir si queda trabajo: los pedidos que quedaron sin
+      // respuesta vuelven a la bandeja de quien los debía contestar.
+      const reencolados = this.state.reencolarSolicitudesSinResponder();
+      if (reencolados > 0) {
+        this.deps.bus.emit({
+          type: "log",
+          runId: this.run.id,
+          tick: this.state.tick,
+          level: "warn",
+          roleId: null,
+          message: `${reencolados} pedido(s) quedaron sin respuesta y se reenviaron.`,
+        });
+      }
+
       const activeRoleIds = this.state.rolesWithWork();
 
       this.deps.bus.emit({
@@ -200,7 +215,11 @@ export class Orchestrator {
   }
 
   private async runTurns(roleIds: string[]): Promise<void> {
-    const concurrency = Math.max(1, this.deps.concurrency ?? 4);
+    // Nadie espera un lugar: el ciclo termina cuando termina el último, así que
+    // dejar a un agente en cola no ahorra nada y alarga el ciclo entero. Con 5
+    // roles y un tope de 4, uno arrancaba recién cuando otro terminaba.
+    // El tope configurado se respeta como piso, no como techo.
+    const concurrency = Math.max(1, this.deps.concurrency ?? 4, roleIds.length);
     const queue = [...roleIds];
 
     const worker = async (): Promise<void> => {

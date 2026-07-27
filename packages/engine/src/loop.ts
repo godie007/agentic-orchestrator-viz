@@ -36,6 +36,14 @@ export interface TurnDeps {
   objective: string;
   /** Límite de ciclos de la corrida, para calcular la presión de cierre. */
   maxTicks: number;
+  /**
+   * Cuánto se espera una respuesta del modelo antes de cortarla y reintentar.
+   *
+   * Sin esto una sola llamada lenta bloquea el ciclo entero: medimos una de
+   * **649 segundos** que dejó a los otros tres agentes esperando once minutos.
+   * El ciclo avanza cuando terminan todos, así que el más lento manda.
+   */
+  llmTimeoutMs?: number;
   signal?: AbortSignal;
 }
 
@@ -127,7 +135,13 @@ export async function runAgentTurn(
   // directorio permitido, por ejemplo— reintenta lo mismo hasta agotar
   // `maxTurns`, y el turno se pierde entero sin haber hecho nada.
   const fallosRepetidos = new Map<string, number>();
-  const TOLERANCIA = 3;
+  // Dos tolerancias distintas porque son dos situaciones distintas. Repetir la
+  // llamada **idéntica** es estar trabado: se corta enseguida. Cambiar los
+  // argumentos y seguir chocando con el **mismo error** puede ser exploración
+  // legítima —probar rutas hasta encontrar la buena—, así que se le da más aire
+  // antes de asumir que la pared no se mueve.
+  const TOLERANCIA_IDENTICA = 3;
+  const TOLERANCIA_MOTIVO = 5;
 
   // `try/finally`: si el turno falla —proveedor saturado, red caída— el evento
   // de cierre igual se emite. Sin esto el nodo del organigrama se queda
@@ -149,6 +163,8 @@ export async function runAgentTurn(
     });
 
     const startedAt = Date.now();
+    const timeoutMs = deps.llmTimeoutMs ?? 120_000;
+
     const result = await withRetry(
       () =>
         collect(
@@ -163,7 +179,9 @@ export async function runAgentTurn(
             ...(role.model.temperature != null ? { temperature: role.model.temperature } : {}),
             maxOutputTokens: role.model.maxOutputTokens,
             ...(nativeWebSearch ? { webSearch: { enabled: true, maxResults: 5 } } : {}),
-            ...(deps.signal ? { signal: deps.signal } : {}),
+            // El corte por tiempo se suma al del usuario: cualquiera de los dos
+            // aborta la llamada.
+            signal: conTimeout(deps.signal, timeoutMs),
           }),
         ),
       (attempt, delayMs, error) =>
@@ -234,7 +252,8 @@ export async function runAgentTurn(
     const atascado = results.failures.filter((huella) => {
       const veces = (fallosRepetidos.get(huella) ?? 0) + 1;
       fallosRepetidos.set(huella, veces);
-      return veces >= TOLERANCIA;
+      const tope = huella.includes("::") ? TOLERANCIA_MOTIVO : TOLERANCIA_IDENTICA;
+      return veces >= tope;
     });
 
     if (atascado.length > 0) {
@@ -243,10 +262,10 @@ export async function runAgentTurn(
       conversation.push({
         role: "user",
         content:
-          `Frená. Ya intentaste ${TOLERANCIA} veces exactamente lo mismo y falló ` +
-          `siempre igual: ${atascado.join("; ")}. No lo repitas: el resultado va a ` +
-          `ser el mismo. Resolvé lo que puedas con lo que ya tenés, o pedí lo que ` +
-          `te falta con send_message o request_context, y cerrá el turno.`,
+          `Frená. Ya chocaste varias veces contra lo mismo y va a seguir fallando: ` +
+          `${atascado.join("; ")}. No insistas. Resolvé lo que puedas con lo que ya ` +
+          `tenés, o pedí lo que te falta con send_message o request_context, y cerrá ` +
+          `el turno.`,
       });
       bus.emit({
         type: "log",
@@ -255,11 +274,19 @@ export async function runAgentTurn(
         level: "warn",
         roleId: role.id,
         message:
-          `${role.name} repitió ${TOLERANCIA} veces la misma llamada fallida ` +
-          `(${atascado[0]}). Se le pidió cambiar de enfoque.`,
+          `${role.name} viene chocando con el mismo error (${atascado[0]}). ` +
+          `Se le pidió cambiar de enfoque.`,
       });
       // Una sola advertencia por turno: si vuelve a insistir, se corta.
-      if (atascado.some((huella) => (fallosRepetidos.get(huella) ?? 0) > TOLERANCIA)) break;
+      if (
+        atascado.some(
+          (huella) =>
+            (fallosRepetidos.get(huella) ?? 0) >
+            (huella.includes("::") ? TOLERANCIA_MOTIVO : TOLERANCIA_IDENTICA),
+        )
+      ) {
+        break;
+      }
     }
   }
 
@@ -291,6 +318,17 @@ export async function runAgentTurn(
 }
 
 /**
+ * Combina el corte del usuario con uno por tiempo.
+ *
+ * `AbortSignal.any` deja que cualquiera de los dos aborte, y el timeout se
+ * descarta solo cuando la llamada termina.
+ */
+function conTimeout(signal: AbortSignal | undefined, ms: number): AbortSignal {
+  const porTiempo = AbortSignal.timeout(ms);
+  return signal ? AbortSignal.any([signal, porTiempo]) : porTiempo;
+}
+
+/**
  * Reintenta los errores que el proveedor marca como recuperables.
  *
  * Con modelos gratuitos el 429 es lo normal, no la excepción: sin reintentos la
@@ -310,8 +348,14 @@ async function withRetry<T>(
       return await operation();
     } catch (error) {
       lastError = error;
-      const retryable = error instanceof LlmError && error.retryable;
+      // Un corte por tiempo es reintentable; uno pedido por la persona no. Se
+      // distinguen por el signal del usuario: si no está abortado, el que cortó
+      // fue nuestro timeout.
+      const porTimeout = esAborto(error) && !signal?.aborted;
+      const retryable = porTimeout || (error instanceof LlmError && error.retryable);
       if (!retryable || attempt === maxAttempts || signal?.aborted) break;
+
+      if (porTimeout) lastError = new Error("El modelo no respondió a tiempo.");
 
       const delayMs = Math.min(2000 * 2 ** (attempt - 1), 20_000);
       onRetry(attempt, delayMs, error as Error);
@@ -319,6 +363,17 @@ async function withRetry<T>(
     }
   }
   throw lastError;
+}
+
+/** ¿La llamada se cortó, sea por el usuario o por el timeout? */
+function esAborto(error: unknown): boolean {
+  const nombre = (error as { name?: string } | null)?.name ?? "";
+  const mensaje = error instanceof Error ? error.message : String(error);
+  return (
+    nombre === "AbortError" ||
+    nombre === "TimeoutError" ||
+    /abort|timed?\s*out/i.test(mensaje)
+  );
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -354,13 +409,13 @@ async function executeCalls(
   );
   for (const entry of parallel) {
     messages.push(entry.message);
-    if (entry.failure) failures.push(entry.failure);
+    if (entry.failure) failures.push(...entry.failure);
   }
 
   for (const call of mutating) {
     const entry = await executeOne(call, byName, ctx, state, bus);
     messages.push(entry.message);
-    if (entry.failure) failures.push(entry.failure);
+    if (entry.failure) failures.push(...entry.failure);
     if (entry.awaitingApproval) awaitingApproval = true;
   }
 
@@ -379,13 +434,30 @@ function huellaDeFallo(name: string, args: Record<string, unknown>): string {
   return `${name}(${claves.map((clave) => `${clave}=${JSON.stringify(args[clave])}`).join(",")})`;
 }
 
+/**
+ * Segunda huella, por **motivo** del fallo y no por argumentos.
+ *
+ * Cuando el modelo agota `maxOutputTokens` escribiendo un documento largo, los
+ * argumentos llegan cortados en un lugar distinto cada vez: la huella por
+ * argumentos nunca coincide y el agente reintenta hasta agotar el turno.
+ * Medimos cuatro `write_artifact` seguidos fallando por lo mismo. Agrupar por
+ * el motivo sí lo detecta.
+ */
+function huellaDeMotivo(name: string, detalle: string): string {
+  const motivo = detalle
+    .replace(/"[^"]*"/g, "…")
+    .replace(/\d+/g, "#")
+    .slice(0, 120);
+  return `${name}::${motivo}`;
+}
+
 async function executeOne(
   call: ToolCall,
   byName: Map<string, RegisteredTool>,
   ctx: ToolContext,
   state: RunState,
   bus: EventBus,
-): Promise<{ message: ChatMessage; awaitingApproval: boolean; failure: string | null }> {
+): Promise<{ message: ChatMessage; awaitingApproval: boolean; failure: string[] | null }> {
   const tool = byName.get(call.name);
   const callId = call.id || ids.toolCall();
 
@@ -401,7 +473,7 @@ async function executeOne(
         content: `ERROR: la herramienta "${call.name}" no existe. Disponibles: ${available}`,
       },
       awaitingApproval: false,
-      failure: huellaDeFallo(call.name, call.arguments),
+      failure: [huellaDeFallo(call.name, call.arguments)],
     };
   }
 
@@ -483,7 +555,9 @@ async function executeOne(
     return {
       message: { role: "tool", toolCallId: callId, name: tool.name, content: result.content },
       awaitingApproval: false,
-      failure: result.ok ? null : huellaDeFallo(tool.name, call.arguments),
+      failure: result.ok
+        ? null
+        : [huellaDeFallo(tool.name, call.arguments), huellaDeMotivo(tool.name, result.content)],
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -503,7 +577,7 @@ async function executeOne(
         content: `ERROR: ${message}`,
       },
       awaitingApproval: false,
-      failure: huellaDeFallo(tool.name, call.arguments),
+      failure: [huellaDeFallo(tool.name, call.arguments), huellaDeMotivo(tool.name, message)],
     };
   }
 }

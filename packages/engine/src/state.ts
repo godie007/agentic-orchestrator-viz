@@ -546,6 +546,40 @@ export class RunState {
     return messages;
   }
 
+  /**
+   * Vuelve a poner en la bandeja los pedidos que nadie contestó.
+   *
+   * Leer un mensaje lo saca de la bandeja, así que un agente que se queda sin
+   * turnos antes de responder hace desaparecer el pedido: la bandeja queda
+   * vacía y el motor da la corrida por terminada. Pasó tal cual —Andrés delegó
+   * tres pedidos, los tres se quedaron sin turno, y la corrida se cerró en el
+   * ciclo 3 sin entregable—. Un pedido abierto es trabajo pendiente hasta que
+   * alguien lo responde.
+   *
+   * Se reencola con tope: si después de `REENVIOS_MAX` insistencias el
+   * destinatario sigue sin contestar, se abandona. Sin ese tope un agente mudo
+   * mantendría la corrida viva para siempre.
+   */
+  reencolarSolicitudesSinResponder(): number {
+    let reencolados = 0;
+    for (const message of this.messages) {
+      if (message.type !== "request" || message.status === "answered") continue;
+      if (!message.toRoleId || !this.inboxes.has(message.toRoleId)) continue;
+      const cola = this.inboxes.get(message.toRoleId)!;
+      if (cola.includes(message.id)) continue; // todavía sin leer: ya cuenta
+
+      const enviados = this.reenvios.get(message.id) ?? 0;
+      if (enviados >= RunState.REENVIOS_MAX) continue;
+      this.reenvios.set(message.id, enviados + 1);
+      cola.push(message.id);
+      reencolados++;
+    }
+    return reencolados;
+  }
+
+  private reenvios = new Map<string, number>();
+  private static readonly REENVIOS_MAX = 2;
+
   /** Roles con trabajo pendiente: bandeja con algo, o tareas sin terminar. */
   rolesWithWork(): string[] {
     const active = new Set<string>();
