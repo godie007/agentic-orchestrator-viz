@@ -81,6 +81,9 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE TABLE IF NOT EXISTS artifacts (
   id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL,
+  -- Los entregables son de la empresa, no de la corrida: con esta columna
+  -- sobreviven a que se borre la corrida que los produjo.
+  company_id TEXT,
   data TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS approvals (
@@ -143,6 +146,25 @@ export class Store {
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("foreign_keys = ON");
     this.db.exec(SCHEMA);
+    this.migrarArtefactosAEmpresa();
+  }
+
+  /**
+   * Da de alta `artifacts.company_id` en bases que ya existían y la completa.
+   *
+   * Es idempotente y barata: sin ella, borrar una corrida se llevaría los
+   * entregables que produjo, que son el trabajo de la empresa.
+   */
+  private migrarArtefactosAEmpresa(): void {
+    const columnas = this.db.prepare("PRAGMA table_info(artifacts)").all() as Array<{ name: string }>;
+    if (!columnas.some((columna) => columna.name === "company_id")) {
+      this.db.exec("ALTER TABLE artifacts ADD COLUMN company_id TEXT");
+    }
+    this.db.exec(
+      `UPDATE artifacts SET company_id = (SELECT r.company_id FROM runs r WHERE r.id = artifacts.run_id)
+       WHERE company_id IS NULL`,
+    );
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_artifacts_company ON artifacts(company_id)");
   }
 
   /** Tablas del esquema con su cantidad de filas, para inspeccionar la base. */
@@ -312,8 +334,11 @@ export class Store {
     return this.many<Task>("SELECT data FROM tasks WHERE run_id = ?", runId);
   }
 
-  saveArtifact(artifact: Artifact): void {
+  saveArtifact(artifact: Artifact, companyId?: string): void {
     this.upsertRunScoped("artifacts", artifact.id, artifact.runId, artifact);
+    if (companyId) {
+      this.db.prepare("UPDATE artifacts SET company_id = ? WHERE id = ?").run(companyId, artifact.id);
+    }
   }
   listArtifacts(runId: string): Artifact[] {
     return this.many<Artifact>("SELECT data FROM artifacts WHERE run_id = ?", runId);
@@ -328,12 +353,26 @@ export class Store {
    * artefactos solo guarda `run_id`.
    */
   listArtifactsByCompany(companyId: string): Artifact[] {
-    return this.many<Artifact>(
-      `SELECT a.data FROM artifacts a
-       JOIN runs r ON r.id = a.run_id
-       WHERE r.company_id = ?`,
-      companyId,
-    );
+    // Por `company_id` y no por join con `runs`: así siguen apareciendo aunque
+    // se haya borrado la corrida que los creó.
+    return this.many<Artifact>("SELECT data FROM artifacts WHERE company_id = ?", companyId);
+  }
+
+  /**
+   * Borra una corrida y su rastro, conservando los entregables.
+   *
+   * Limpiar la lista de corridas no puede costarle a la empresa el trabajo que
+   * produjo: los mensajes, tareas y eventos son el registro de *cómo* se llegó,
+   * y eso sí se descarta.
+   */
+  deleteRun(runId: string): void {
+    const tx = this.db.transaction(() => {
+      for (const tabla of ["events", "messages", "tasks", "approvals", "ledger"]) {
+        this.db.prepare(`DELETE FROM ${tabla} WHERE run_id = ?`).run(runId);
+      }
+      this.db.prepare("DELETE FROM runs WHERE id = ?").run(runId);
+    });
+    tx();
   }
 
   saveApproval(approval: ApprovalRequest): void {

@@ -82,6 +82,17 @@ agota `max_tokens` a mitad del JSON. El markdown se parsea una sola vez a bloque
 neutros (`markdown.ts`) y de ahí salen las dos salidas; el `SkillStorage` lo
 inyecta el servidor, así que `packages/tools` no decide dónde van los archivos.
 
+Los documentos se arman para que alguien los abra: portada con quién firma,
+encabezado y pie con numeración, tablas con bordes y encabezado repetido, listas
+numeradas de verdad y control de huérfanos. La portada la compone el sistema con
+datos que ya tiene (`DocumentMeta`), no el modelo. **La fecha entra formateada
+desde el llamador**: el render no tiene reloj, y así los tests son deterministas.
+
+Dos trampas de pdfkit que ya costaron caro: escribir debajo del margen inferior
+**agrega una página** —el pie duplicaba el documento— así que se baja
+`page.margins.bottom` mientras se dibuja; y en texto `continued` la posición y el
+ancho van solo en el primer tramo, o cada negrita parte el párrafo.
+
 Los entregables son **de la empresa, no de la corrida**: al arrancar se cargan
 los de corridas anteriores (`listArtifactsByCompany`), así un área lee lo que
 otra escribió y lo versiona en vez de reiniciar en v1. Los previos no se
@@ -149,8 +160,23 @@ las `maxTurns` enteras y la corrida se queda sin entregable.
 del ciclo *siguiente*. Modela que nadie contesta en el mismo instante y evita ida
 y vuelta infinito dentro de un tick.
 
+**Los entregables sobreviven a que se borre su corrida.** `artifacts.company_id`
+existe para eso, y `listArtifactsByCompany` filtra por ahí en vez de unir con
+`runs`. `deleteRun` se lleva eventos, mensajes, tareas, aprobaciones y ledger
+—el registro de *cómo* se llegó— pero nunca los artefactos. Limpiar la lista de
+corridas no puede costarle a la empresa el trabajo que produjo.
+
+**Los controles de la corrida se muestran según su estado.** Ofrecer "pausar"
+sobre una corrida terminada obliga a adivinar cuál sirve; cada botón dice qué
+hace y su `title` explica cuándo conviene. Solo una corrida `running` no se puede
+borrar, y al borrarla hay que soltarla del runtime (`olvidarCorrida`) o queda un
+orquestador vivo escribiendo eventos de algo que ya no existe.
+
 ## Trampas conocidas
 
+- **`active.run` queda viejo.** El estado autoritativo de una corrida es
+  `orchestrator.snapshot`; `active.run` no se actualiza al pausar o detener, y
+  leerlo hacía que una corrida ya detenida dijera "está en curso".
 - **Las corridas no sobreviven a un reinicio del servidor.** El estado vivo está
   en memoria; la traza queda persistida, así que podés reproducir una corrida
   vieja pero no continuarla.

@@ -199,6 +199,10 @@ export const api = {
     request<Run[]>(`/runs${companyId ? `?companyId=${companyId}` : ""}`),
   run: (id: string) => request<RunBundle>(`/runs/${id}`),
   runEvents: (id: string) => request<TraceEvent[]>(`/runs/${id}/events`),
+  /** Borra una corrida y su rastro. Los entregables se conservan. */
+  deleteRun: (id: string) => request<{ ok: boolean }>(`/runs/${id}`, { method: "DELETE" }),
+  limpiarCorridas: (companyId: string) =>
+    request<{ borradas: number }>(`/companies/${companyId}/runs/terminadas`, { method: "DELETE" }),
   createRun: (input: CreateRunInput) =>
     request<Run>("/runs", { method: "POST", body: JSON.stringify(input) }),
   tick: (id: string) =>

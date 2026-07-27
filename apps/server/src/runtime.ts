@@ -87,6 +87,33 @@ export class Runtime {
     return runtime;
   }
 
+  /**
+   * ¿Está avanzando ahora mismo? Es lo único que impide borrarla.
+   *
+   * El estado se lee del orquestador y no de `active.run`, que queda viejo: al
+   * detener una corrida se persiste el snapshot pero esa referencia no se
+   * actualiza, y una corrida ya detenida seguía respondiendo "está en curso".
+   */
+  estaViva(runId: string): boolean {
+    const activa = this.runs.get(runId);
+    return activa != null && activa.orchestrator.snapshot.status === "running";
+  }
+
+  /**
+   * Suelta una corrida de la memoria del servidor.
+   *
+   * Al borrarla de la base hay que sacarla también de acá: si no, queda un
+   * orquestador vivo que se puede seguir avanzando y que escribe eventos de una
+   * corrida que ya no existe.
+   */
+  olvidarCorrida(runId: string): void {
+    const activa = this.runs.get(runId);
+    if (!activa) return;
+    activa.orchestrator.stop();
+    this.runs.delete(runId);
+    this.runSubscribers.delete(runId);
+  }
+
   mcpHealth(companyId: string): McpServerHealth[] {
     const runtime = this.companies.get(companyId);
     return runtime ? [...runtime.health.values()] : [];
@@ -207,7 +234,7 @@ export class Runtime {
     const state = new RunState(run.id, config, {
       saveMessage: (message) => this.store.saveMessage(message),
       saveTask: (task) => this.store.saveTask(task),
-      saveArtifact: (artifact) => this.store.saveArtifact(artifact),
+      saveArtifact: (artifact) => this.store.saveArtifact(artifact, company.id),
       saveApproval: (approval) => this.store.saveApproval(approval),
       saveLearning: (learning) => this.store.saveLearning(learning),
       saveRequest: (request) => this.store.saveRequest(request),

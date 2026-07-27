@@ -412,6 +412,33 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
 
   // --- Corridas ------------------------------------------------------------
 
+  /**
+   * Borra una corrida y su rastro. Los entregables quedan: son de la empresa,
+   * y limpiar la lista no puede costarle el trabajo producido.
+   */
+  app.delete("/api/runs/:id", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    if (runtime.estaViva(id)) {
+      reply.code(409);
+      return { error: "La corrida está avanzando. Pausala o terminala antes de borrarla." };
+    }
+    runtime.olvidarCorrida(id);
+    store.deleteRun(id);
+    return { ok: true };
+  });
+
+  /** Limpieza en lote: saca de la lista todo lo que ya terminó. */
+  app.delete("/api/companies/:companyId/runs/terminadas", async (request) => {
+    const { companyId } = request.params as { companyId: string };
+    const terminadas = store.listRuns(companyId).filter((run) => !runtime.estaViva(run.id));
+
+    for (const run of terminadas) {
+      runtime.olvidarCorrida(run.id);
+      store.deleteRun(run.id);
+    }
+    return { borradas: terminadas.length };
+  });
+
   app.post("/api/runs", async (request, reply) => {
     const parsed = createRunSchema.safeParse(request.body);
     if (!parsed.success) return invalid(reply, parsed.error);

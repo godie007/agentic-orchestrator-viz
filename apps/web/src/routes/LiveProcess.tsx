@@ -33,10 +33,20 @@ export function LiveProcess({ company }: { company: CompanyBundle }) {
     refetchIntervalInBackground: true,
   });
 
-  // Al entrar, se engancha a la corrida más reciente para que la pantalla no
-  // arranque vacía si ya hay algo pasando.
+  // Al entrar se engancha a la corrida más reciente, para que la pantalla no
+  // arranque vacía si ya hay algo pasando. Y si la que estaba seleccionada dejó
+  // de existir —se limpió la lista— se suelta: sin esto quedaba en pantalla una
+  // corrida fantasma, con su estado y sus mensajes, que ya no estaba en la base.
   useEffect(() => {
-    if (!runId && runs.data?.[0]) setRunId(runs.data[0].id);
+    const lista = runs.data;
+    if (!lista) return;
+
+    if (runId && !lista.some((item) => item.id === runId)) {
+      setRunId(lista[0]?.id ?? null);
+      setScrub(null);
+      return;
+    }
+    if (!runId && lista[0]) setRunId(lista[0].id);
   }, [runs.data, runId]);
 
   const { events: liveEvents, connected } = useRunStream(runId);
@@ -116,6 +126,31 @@ export function LiveProcess({ company }: { company: CompanyBundle }) {
     },
   });
 
+  /** Corridas que ya no van a avanzar: son las que se pueden limpiar. */
+  const terminadas = (runs.data ?? []).filter(
+    (item) => !["running", "idle", "paused"].includes(item.status),
+  ).length;
+
+  const trasBorrar = (): void => {
+    setRunId(null);
+    setScrub(null);
+    // Se descarta lo cacheado de la corrida borrada, no solo la lista: si no,
+    // sus mensajes y su estado siguen dibujados hasta el próximo refetch.
+    queryClient.removeQueries({ queryKey: ["run"] });
+    queryClient.removeQueries({ queryKey: ["run-events"] });
+    void queryClient.invalidateQueries({ queryKey: ["runs", company.company.id] });
+  };
+
+  const borrarCorrida = useMutation({
+    mutationFn: () => api.deleteRun(runId!),
+    onSuccess: trasBorrar,
+  });
+
+  const limpiarTerminadas = useMutation({
+    mutationFn: () => api.limpiarCorridas(company.company.id),
+    onSuccess: trasBorrar,
+  });
+
   // `nuevoEncargo` fuerza el formulario aunque ya existan corridas. Sin esto
   // sólo se podía arrancar la empresa la primera vez: después el selector
   // listaba las corridas viejas y no había forma de darle un encargo nuevo.
@@ -171,18 +206,15 @@ export function LiveProcess({ company }: { company: CompanyBundle }) {
             {connected ? "● en vivo" : "○ desconectado"}
           </span>
 
-          <div className="ml-auto flex gap-1.5">
-            <Button onClick={() => control.mutate("tick")} disabled={control.isPending}>
-              ▶ un ciclo
-            </Button>
-            <Button variant="primary" onClick={() => control.mutate("resume")}>
-              ▶▶ continuo
-            </Button>
-            <Button onClick={() => control.mutate("pause")}>❚❚</Button>
-            <Button variant="danger" onClick={() => control.mutate("stop")}>
-              ■
-            </Button>
-          </div>
+          <Controles
+            estado={run?.status}
+            pendiente={control.isPending}
+            onAccion={(accion) => control.mutate(accion)}
+            onBorrar={() => borrarCorrida.mutate()}
+            onLimpiar={() => limpiarTerminadas.mutate()}
+            limpiando={limpiarTerminadas.isPending || borrarCorrida.isPending}
+            terminadas={terminadas}
+          />
         </div>
 
         {run?.stopReason && (
@@ -903,5 +935,133 @@ function aplanar(
     hijo.kind === "folder"
       ? aplanar(hijo)
       : [{ filename: hijo.name, path: hijo.path, sizeBytes: hijo.sizeBytes }],
+  );
+}
+
+/**
+ * Controles de la corrida.
+ *
+ * Se muestran según el estado, no todos siempre: ofrecer "pausar" sobre una
+ * corrida terminada, o "continuo" sobre una que ya está corriendo, obliga a
+ * adivinar cuál sirve. Cada botón dice qué hace y su `title` explica cuándo
+ * conviene usarlo, que era lo que faltaba.
+ */
+function Controles({
+  estado,
+  pendiente,
+  onAccion,
+  onBorrar,
+  onLimpiar,
+  limpiando,
+  terminadas,
+}: {
+  estado: string | undefined;
+  pendiente: boolean;
+  onAccion: (accion: "tick" | "resume" | "pause" | "stop") => void;
+  onBorrar: () => void;
+  onLimpiar: () => void;
+  limpiando: boolean;
+  terminadas: number;
+}) {
+  const [confirmando, setConfirmando] = useState<"una" | "todas" | null>(null);
+
+  const corriendo = estado === "running";
+  const detenible = corriendo || estado === "paused" || estado === "idle";
+  // Una corrida terminada no vuelve: lo único que queda es leerla o sacarla.
+  const finalizada = estado != null && !detenible;
+
+  if (confirmando) {
+    const todas = confirmando === "todas";
+    return (
+      <div className="ml-auto flex items-center gap-1.5">
+        <span className="text-[11px] text-warn">
+          {todas
+            ? `¿Borrar ${terminadas} corridas terminadas? Los entregables se conservan.`
+            : "¿Borrar esta corrida? Los entregables se conservan."}
+        </span>
+        <Button
+          variant="danger"
+          onClick={() => {
+            (todas ? onLimpiar : onBorrar)();
+            setConfirmando(null);
+          }}
+        >
+          sí, borrar
+        </Button>
+        <Button variant="ghost" onClick={() => setConfirmando(null)}>
+          cancelar
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="ml-auto flex flex-wrap items-center gap-1.5">
+      {!corriendo && detenible && (
+        <>
+          <Button
+            onClick={() => onAccion("tick")}
+            disabled={pendiente}
+            title="Avanza un solo ciclo y se detiene. Para mirar paso a paso qué hace cada agente."
+          >
+            ▶ un ciclo
+          </Button>
+          <Button
+            variant="primary"
+            onClick={() => onAccion("resume")}
+            title="Sigue ciclo tras ciclo sin parar, hasta terminar el trabajo o agotar el presupuesto."
+          >
+            ▶▶ seguir sin parar
+          </Button>
+        </>
+      )}
+
+      {corriendo && (
+        <>
+          <Button
+            onClick={() => onAccion("pause")}
+            disabled={pendiente}
+            title="Frena al terminar el ciclo en curso. Podés retomarla donde quedó."
+          >
+            ❚❚ pausar
+          </Button>
+          <Button
+            variant="danger"
+            onClick={() => onAccion("stop")}
+            title="Termina la corrida. No se puede retomar: para eso está pausar."
+          >
+            ■ terminar
+          </Button>
+        </>
+      )}
+
+      {finalizada && (
+        <span className="text-[11px] text-ink-faint">
+          terminada · abrí <b>+ encargo</b> para darle trabajo nuevo
+        </span>
+      )}
+
+      {finalizada && (
+        <Button
+          variant="ghost"
+          onClick={() => setConfirmando("una")}
+          disabled={limpiando}
+          title="Saca esta corrida de la lista. Los entregables que produjo se conservan."
+        >
+          borrar
+        </Button>
+      )}
+
+      {terminadas > 1 && (
+        <Button
+          variant="ghost"
+          onClick={() => setConfirmando("todas")}
+          disabled={limpiando}
+          title="Saca de la lista todas las corridas terminadas. Los entregables se conservan."
+        >
+          limpiar {terminadas}
+        </Button>
+      )}
+    </div>
   );
 }

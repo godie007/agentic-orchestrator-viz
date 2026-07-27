@@ -117,3 +117,75 @@ describe("borrar un rol", () => {
     expect(store.listRequests(companyId)).toHaveLength(0);
   });
 });
+
+describe("borrar una corrida", () => {
+  const run = (id: string) => ({
+    id,
+    companyId,
+    objective: "x",
+    status: "completed" as const,
+    mode: "manual" as const,
+    tick: 1,
+    maxTicks: 10,
+    budgetUsd: 1,
+    spentUsd: 0,
+    cronIntervalMs: 60_000,
+    stopReason: null,
+    startedAt: Date.now(),
+    endedAt: Date.now(),
+  });
+
+  const artefacto = (id: string, runId: string) => ({
+    id,
+    runId,
+    key: "informe",
+    title: "Informe",
+    contentType: "markdown" as const,
+    content: "contenido",
+    version: 1,
+    authorRoleId: "rol_1",
+    tick: 1,
+    createdAt: Date.now(),
+  });
+
+  it("conserva los entregables: son de la empresa, no de la corrida", () => {
+    store.saveRun(run("run_1"));
+    store.saveArtifact(artefacto("art_1", "run_1"), companyId);
+
+    store.deleteRun("run_1");
+
+    expect(store.listRuns(companyId)).toHaveLength(0);
+    // Lo que la empresa produjo sobrevive a que se limpie la lista de corridas.
+    expect(store.listArtifactsByCompany(companyId).map((a) => a.id)).toEqual(["art_1"]);
+  });
+
+  it("se lleva el rastro de cómo se llegó", () => {
+    store.saveRun(run("run_2"));
+    store.saveMessage({
+      id: "msg_1",
+      runId: "run_2",
+      fromRoleId: null,
+      toRoleId: "rol_1",
+      toDepartmentId: null,
+      type: "human",
+      subject: "s",
+      body: "b",
+      threadId: "thr_1",
+      inReplyTo: null,
+      status: "pending",
+      tick: 0,
+      createdAt: Date.now(),
+    });
+
+    store.deleteRun("run_2");
+    expect(store.listMessages("run_2")).toHaveLength(0);
+  });
+
+  it("no toca las otras corridas", () => {
+    store.saveRun(run("run_3"));
+    store.saveRun(run("run_4"));
+
+    store.deleteRun("run_3");
+    expect(store.listRuns(companyId).map((r) => r.id)).toEqual(["run_4"]);
+  });
+});
