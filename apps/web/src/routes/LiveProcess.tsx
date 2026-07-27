@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { TraceEvent } from "@orq/shared";
 import { api, type CompanyBundle } from "../api.js";
@@ -408,150 +408,94 @@ function Timeline({
         className="h-1 flex-1 cursor-pointer appearance-none rounded bg-line accent-accent"
       />
       <span className="w-40 shrink-0 truncate text-right font-mono text-[11px] text-ink-faint">
-        {cut}/{events.length} · {current ? `ciclo ${current.tick} · ${current.type}` : "—"}
+        {cut}/{events.length} · {current ? `ciclo ${current.tick} · ${enCriollo(current)}` : "—"}
       </span>
     </div>
   );
 }
 
+/**
+ * Un evento dicho en una palabra, para la etiqueta del timeline.
+ *
+ * Ahí salía el `type` crudo —"run.status", "tool.end", "cost.updated"—, que es
+ * el nombre que le pusimos nosotros al evento y no algo que se pueda leer.
+ */
+function enCriollo(event: TraceEvent): string {
+  switch (event.type) {
+    case "run.status":
+      return `la corrida ${ESTADO_CORRIDA[event.status] ?? event.status}`;
+    case "tick.start":
+      return "arranca el ciclo";
+    case "tick.end":
+      return "termina el ciclo";
+    case "agent.thinking":
+      return "un agente piensa";
+    case "agent.turn_end":
+      return "un agente cierra su turno";
+    case "agent.message":
+      return `mensaje: ${MESSAGE_LABEL[event.messageType] ?? event.messageType}`;
+    case "tool.selection":
+      return "se eligen herramientas";
+    case "tool.start":
+      return `ejecuta ${event.toolName.replace(/^mcp__/, "")}`;
+    case "tool.end":
+      return `${event.ok ? "terminó" : "falló"} ${event.toolName.replace(/^mcp__/, "")}`;
+    case "mcp.status":
+      return `servidor ${event.serverName} ${ESTADO_MCP[event.status] ?? event.status}`;
+    case "task.changed":
+      return "cambia una tarea";
+    case "artifact.created":
+      return "hay un entregable nuevo";
+    case "request.created":
+      return "un agente pide algo";
+    case "approval.changed":
+      return `aprobación ${ESTADO_APROBACION[event.status] ?? event.status}`;
+    case "cost.updated":
+      return "se registra el gasto";
+    case "log":
+      return event.level === "error" ? "un error" : "un aviso";
+  }
+}
+
 // --- Feed de actividad -------------------------------------------------------
 
+/**
+ * Qué está haciendo la empresa, con la misma forma que la traza de un agente.
+ *
+ * Antes era un volcado: cada evento, un renglón, con su nombre técnico cuando
+ * no había nada lindo que mostrar. En pantalla se leía "tick.end",
+ * "cost.updated", "agent.turn_end" —tres de cada cinco renglones sin una sola
+ * palabra para una persona—, y una llamada a herramienta pesaba lo mismo que
+ * el final de la corrida.
+ *
+ * Ahora es la misma cronología del panel del agente: por ciclo, en orden, con
+ * las herramientas colgadas de quien las usó. Que las dos pantallas se lean
+ * igual es la mitad de que se entiendan.
+ */
 function Activity({ events, company }: { events: TraceEvent[]; company: CompanyBundle }) {
-  const nameOf = (id: string | null): string =>
-    company.roles.find((role) => role.id === id)?.name ?? (id ? "?" : "persona");
+  const nameOf = useCallback(
+    (id: string | null): string =>
+      company.roles.find((role) => role.id === id)?.name ?? (id ? "?" : "la persona"),
+    [company.roles],
+  );
 
-  const rows = events.slice(-200).reverse();
+  // Se dibuja una ventana del final: la traza completa de una corrida larga son
+  // miles de eventos y el panel no tiene por qué sostenerlos todos en el DOM.
+  const ventana = useMemo(() => events.slice(-400), [events]);
 
   return (
     <Panel title="Actividad">
-      {rows.length === 0 ? (
-        <Empty>Todavía no pasó nada. Ejecutá un ciclo para ver a la empresa trabajar.</Empty>
-      ) : (
-        <ul className="divide-y divide-line/60">
-          {rows.map((event) => (
-            <li key={event.id} className="px-3 py-1.5 text-xs">
-              {renderEvent(event, nameOf)}
-            </li>
-          ))}
-        </ul>
-      )}
+      <div className="flex h-full min-h-0 flex-col p-2">
+        <Cronologia
+          events={ventana}
+          nameOf={nameOf}
+          conAutor
+          titulo="Lo que viene pasando"
+          vacio="Todavía no pasó nada. Ejecutá un ciclo para ver a la empresa trabajar."
+        />
+      </div>
     </Panel>
   );
-}
-
-function renderEvent(event: TraceEvent, nameOf: (id: string | null) => string) {
-  const tick = <span className="mr-2 font-mono text-[10px] text-ink-faint">c{event.tick}</span>;
-
-  switch (event.type) {
-    case "agent.thinking":
-      return (
-        <div>
-          {tick}
-          <span className="text-accent">{nameOf(event.roleId)}</span>
-          <span className="text-ink-dim"> piensa · </span>
-          <span className="font-mono text-[10px] text-ink-faint">
-            {event.modelSlug.split("/").pop()}
-          </span>
-        </div>
-      );
-    case "agent.message":
-      return (
-        <div>
-          {tick}
-          <span style={{ color: MESSAGE_COLOR[event.messageType] }}>
-            {MESSAGE_LABEL[event.messageType] ?? event.messageType}
-          </span>
-          <span className="text-ink-dim">
-            {" "}
-            {nameOf(event.fromRoleId)} → {nameOf(event.toRoleId)}
-          </span>
-          <div className="mt-0.5 truncate pl-6 text-ink-faint">{event.subject}</div>
-        </div>
-      );
-    case "tool.start":
-      return (
-        <div>
-          {tick}
-          <span className="text-ink-dim">{nameOf(event.roleId)} ejecuta </span>
-          <span className="font-mono text-[11px] text-warn">{event.toolName}</span>
-        </div>
-      );
-    case "tool.end":
-      return (
-        <div>
-          {tick}
-          <span className={event.ok ? "text-ok" : "text-danger"}>{event.ok ? "✓" : "✗"}</span>
-          <span className="ml-1 font-mono text-[11px] text-ink-dim">{event.toolName}</span>
-          <span className="ml-1 text-[10px] text-ink-faint">{event.durationMs}ms</span>
-          <div className="mt-0.5 truncate pl-6 text-ink-faint">{event.error ?? event.preview}</div>
-        </div>
-      );
-    case "tool.selection":
-      return (
-        <div title={event.reason}>
-          {tick}
-          <span className="text-ink-dim">
-            {nameOf(event.roleId)} · {event.exposed.length} de {event.candidates.length} herramientas
-          </span>
-          <div className="mt-0.5 truncate pl-6 text-[10px] text-ink-faint">{event.reason}</div>
-        </div>
-      );
-    case "artifact.created":
-      return (
-        <div>
-          {tick}
-          <span className="text-ok">📄 entregable </span>
-          <span className="text-ink">{event.title}</span>
-          <span className="text-ink-faint"> v{event.version}</span>
-        </div>
-      );
-    case "task.changed":
-      return (
-        <div>
-          {tick}
-          <span className="text-ink-dim">{event.created ? "nueva tarea" : "tarea"} · </span>
-          <span className="text-ink">{event.title}</span>
-          <span className="text-ink-faint"> → {event.status}</span>
-        </div>
-      );
-    case "approval.changed":
-      return (
-        <div>
-          {tick}
-          <span className="text-approval">aprobación {event.status}</span>
-          <div className="mt-0.5 truncate pl-6 text-ink-faint">{event.reason}</div>
-        </div>
-      );
-    case "run.status":
-      return (
-        <div>
-          {tick}
-          <span className="text-ink">corrida → {event.status}</span>
-          {event.reason && <div className="pl-6 text-ink-faint">{event.reason}</div>}
-        </div>
-      );
-    case "tick.start":
-      return (
-        <div className="text-ink-faint">
-          {tick}
-          <span>── ciclo {event.tick} · {event.activeRoleIds.length} agentes activos ──</span>
-        </div>
-      );
-    case "log":
-      return (
-        <div className={event.level === "error" ? "text-danger" : "text-warn"}>
-          {tick}
-          {event.message}
-        </div>
-      );
-    default:
-      return (
-        <div className="text-ink-faint">
-          {tick}
-          {event.type}
-        </div>
-      );
-  }
 }
 
 // --- Detalle de un agente ----------------------------------------------------
@@ -572,7 +516,11 @@ function RoleDetail({
   const role = company.roles.find((candidate) => candidate.id === roleId);
   const activity = state.roles.get(roleId);
   const selection = state.toolSelections.get(roleId);
-  const own = events.filter((event) => "roleId" in event && event.roleId === roleId).slice(-60);
+  const own = events.filter((event) => "roleId" in event && event.roleId === roleId).slice(-120);
+  const nombreDeRol = useCallback(
+    (id: string | null): string => company.roles.find((r) => r.id === id)?.name ?? "?",
+    [company.roles],
+  );
 
   if (!role) return <Panel title="Agente">{<Empty>Rol no encontrado.</Empty>}</Panel>;
 
@@ -661,21 +609,30 @@ function RoleDetail({
           </div>
         )}
 
-        <Cronologia
-          events={own}
-          nameOf={(id) => company.roles.find((r) => r.id === id)?.name ?? "?"}
-        />
+        <Cronologia events={own} nameOf={nombreDeRol} titulo="Su cronología" vacio="Todavía no hizo nada en esta corrida." />
       </div>
     </Panel>
   );
 }
 
-// --- Cronología de un agente -------------------------------------------------
+// --- La traza, en un solo lenguaje -------------------------------------------
 
-/** Una fila de la cronología, ya resuelta a lo que se dibuja. */
+/**
+ * Una fila de la traza, ya resuelta a lo que se dibuja.
+ *
+ * `nivel` es lo que hace legible el conjunto: no todo lo que pasa está al
+ * mismo nivel. Que termine la corrida y que un agente haya leído un archivo
+ * son cosas de escala distinta, y mostrarlas con el mismo peso obliga a leer
+ * cada renglón para saber si importa.
+ *
+ *   0 — la corrida: arranca, se detiene, se traba esperando una aprobación.
+ *   1 — lo que hace un agente: piensa, escribe, entrega, escala.
+ *   2 — con qué lo hizo: cada llamada a herramienta, colgada del agente.
+ */
 interface Fila {
   id: string;
   at: number;
+  nivel: 0 | 1 | 2;
   /** Color del punto en el riel. */
   punto: string;
   titulo: ReactNode;
@@ -684,44 +641,108 @@ interface Fila {
   enCurso?: boolean;
 }
 
+/** Un ciclo con lo que pasó adentro y su resumen. */
+interface Ciclo {
+  tick: number;
+  agentes: number | null;
+  mensajes: number | null;
+  costoUsd: number | null;
+  filas: Fila[];
+}
+
 /**
- * Arma la traza de un agente como una línea de tiempo legible.
+ * Arma la traza como una línea de tiempo legible.
  *
- * Dos decisiones que cambian todo respecto de volcar los eventos crudos:
+ * Tres decisiones que cambian todo respecto de volcar los eventos crudos:
  *
  * 1. **Va en orden, de lo viejo a lo nuevo.** Antes se mostraba al revés y
- *    leer lo que hizo un agente obligaba a recorrer su razonamiento hacia
- *    atrás, que es justo como no se entiende una secuencia de trabajo.
+ *    seguir lo que hizo la empresa obligaba a leer hacia atrás, que es justo
+ *    como no se entiende una secuencia de trabajo.
  * 2. **Una llamada a herramienta es una fila, no dos.** `tool.start` y
  *    `tool.end` son el mismo hecho: mostrarlos separados duplicaba la lista y
  *    escondía el resultado —lo único que importa— dos renglones más abajo.
  *    Mientras la llamada no termina, la fila queda latiendo.
+ * 3. **Lo que es contabilidad no es una fila.** `cost.updated`, `tick.end` y
+ *    `agent.turn_end` salían impresos con su nombre técnico y sin nada que
+ *    leer —"tick.end", "cost.updated"—: ocupaban la mitad del panel para no
+ *    decir nada. El costo ya está en la cabecera, y lo que aportaban los otros
+ *    dos pasó al encabezado de su ciclo.
  */
 function armarCronologia(
   events: TraceEvent[],
   nameOf: (id: string | null) => string,
-): Array<{ tick: number; filas: Fila[] }> {
-  const filas: Fila[] = [];
-  const porTick = new Map<number, Fila[]>();
+  opciones: { conAutor: boolean },
+): Ciclo[] {
+  const ciclos = new Map<number, Ciclo>();
   const abiertas = new Map<string, Fila>();
 
-  const push = (tick: number, fila: Fila) => {
-    filas.push(fila);
-    porTick.set(tick, [...(porTick.get(tick) ?? []), fila]);
+  const cicloDe = (tick: number): Ciclo => {
+    const existente = ciclos.get(tick);
+    if (existente) return existente;
+    const nuevo: Ciclo = { tick, agentes: null, mensajes: null, costoUsd: null, filas: [] };
+    ciclos.set(tick, nuevo);
+    return nuevo;
   };
+  const push = (tick: number, fila: Fila) => cicloDe(tick).filas.push(fila);
+
+  /** El nombre del agente, sólo donde no se sobreentiende. */
+  const autor = (roleId: string | null): ReactNode =>
+    opciones.conAutor ? <span className="text-accent">{nameOf(roleId)} </span> : null;
+
+  /**
+   * Quién ejecutó la herramienta.
+   *
+   * En el panel de un agente sobra: todo lo que se ve es suyo. En el feed
+   * general no, y ahí importa: los turnos corren en paralelo, así que dos
+   * agentes intercalan sus llamadas dentro del mismo ciclo y la sangría sola
+   * hacía parecer que la herramienta colgaba del agente del renglón de arriba,
+   * que puede ser otro.
+   */
+  const herramientaDe = (roleId: string | null): ReactNode =>
+    opciones.conAutor ? (
+      <span className="shrink-0 text-[10px] text-ink-faint">{nameOf(roleId)}</span>
+    ) : null;
 
   for (const event of events) {
     switch (event.type) {
+      case "run.status":
+        push(event.tick, {
+          id: event.id,
+          at: event.at,
+          nivel: 0,
+          punto: event.status === "failed" ? "bg-danger" : "bg-ink",
+          titulo: (
+            <span className="font-medium text-ink">
+              la corrida {ESTADO_CORRIDA[event.status] ?? event.status}
+            </span>
+          ),
+          detalle: event.reason,
+        });
+        break;
+
+      // Los dos límites del ciclo no son filas: son el encabezado del ciclo.
+      case "tick.start":
+        cicloDe(event.tick).agentes = event.activeRoleIds.length;
+        break;
+      case "tick.end": {
+        const ciclo = cicloDe(event.tick);
+        ciclo.mensajes = event.messagesEmitted;
+        ciclo.costoUsd = event.costUsd;
+        break;
+      }
+
       case "agent.thinking":
         push(event.tick, {
           id: event.id,
           at: event.at,
+          nivel: 1,
           punto: "bg-accent",
           titulo: (
             <span className="text-ink-dim">
+              {autor(event.roleId)}
               piensa
               <span className="ml-1.5 font-mono text-[10px] text-ink-faint">
-                iteración {event.iteration} · {event.modelSlug.split("/").pop()}
+                vuelta {event.iteration} · {event.modelSlug.split("/").pop()}
               </span>
             </span>
           ),
@@ -732,11 +753,15 @@ function armarCronologia(
         const fila: Fila = {
           id: event.id,
           at: event.at,
+          nivel: 2,
           punto: "bg-warn",
           enCurso: true,
           titulo: (
-            <span className="font-mono text-[11px] text-ink">
-              {event.toolName.replace(/^mcp__/, "")}
+            <span className="flex items-baseline gap-1.5">
+              {herramientaDe(event.roleId)}
+              <span className="truncate font-mono text-[11px] text-ink-dim">
+                {event.toolName.replace(/^mcp__/, "")}
+              </span>
             </span>
           ),
         };
@@ -750,16 +775,19 @@ function armarCronologia(
         // traza puede venir recortada— se agrega sola, para no perder el
         // resultado.
         const fila = abiertas.get(event.callId);
-        const cuerpo: Partial<Fila> = {
+        const cuerpo = {
           punto: event.ok ? "bg-ok" : "bg-danger",
           enCurso: false,
           detalle: event.error ?? event.preview,
           titulo: (
             <span className="flex items-baseline gap-1.5">
-              <span className={`font-mono text-[11px] ${event.ok ? "text-ink" : "text-danger"}`}>
+              {herramientaDe(event.roleId)}
+              <span
+                className={`truncate font-mono text-[11px] ${event.ok ? "text-ink-dim" : "text-danger"}`}
+              >
                 {event.toolName.replace(/^mcp__/, "")}
               </span>
-              <span className="text-[10px] text-ink-faint">{event.durationMs}ms</span>
+              <span className="shrink-0 text-[10px] text-ink-faint">{event.durationMs}ms</span>
             </span>
           ),
         };
@@ -767,7 +795,7 @@ function armarCronologia(
           Object.assign(fila, cuerpo);
           abiertas.delete(event.callId);
         } else {
-          push(event.tick, { id: event.id, at: event.at, punto: "bg-ok", ...cuerpo } as Fila);
+          push(event.tick, { id: event.id, at: event.at, nivel: 2, ...cuerpo } as Fila);
         }
         break;
       }
@@ -776,13 +804,18 @@ function armarCronologia(
         push(event.tick, {
           id: event.id,
           at: event.at,
+          nivel: 1,
           punto: "bg-request",
           titulo: (
             <span>
               <span style={{ color: MESSAGE_COLOR[event.messageType] }}>
                 {MESSAGE_LABEL[event.messageType] ?? event.messageType}
               </span>
-              <span className="text-ink-dim"> → {nameOf(event.toRoleId)}</span>
+              <span className="text-ink-dim">
+                {" "}
+                {opciones.conAutor ? `${nameOf(event.fromRoleId)} → ` : "→ "}
+                {nameOf(event.toRoleId)}
+              </span>
             </span>
           ),
           detalle: event.subject,
@@ -793,10 +826,13 @@ function armarCronologia(
         push(event.tick, {
           id: event.id,
           at: event.at,
+          nivel: 1,
           punto: "bg-ok",
           titulo: (
-            <span className="text-ok">
-              entregable <span className="text-ink">{event.title}</span>{" "}
+            <span>
+              {autor(event.authorRoleId)}
+              <span className="text-ok">entregó </span>
+              <span className="text-ink">{event.title}</span>{" "}
               <span className="text-ink-faint">v{event.version}</span>
             </span>
           ),
@@ -807,13 +843,32 @@ function armarCronologia(
         push(event.tick, {
           id: event.id,
           at: event.at,
+          nivel: 1,
           punto: "bg-ink-faint",
           titulo: (
             <span className="text-ink-dim">
-              {event.created ? "nueva tarea" : "tarea"} <span className="text-ink">{event.title}</span>{" "}
-              <span className="text-ink-faint">→ {event.status}</span>
+              {event.created ? "nueva tarea " : "tarea "}
+              <span className="text-ink">{event.title}</span>{" "}
+              <span className="text-ink-faint">→ {ESTADO_TAREA[event.status] ?? event.status}</span>
             </span>
           ),
+        });
+        break;
+
+      case "request.created":
+        push(event.tick, {
+          id: event.id,
+          at: event.at,
+          nivel: 1,
+          punto: "bg-warn",
+          titulo: (
+            <span>
+              {autor(event.requestedByRoleId)}
+              <span className="text-warn">te pide algo</span>
+              <span className="ml-1.5 text-[10px] text-ink-faint">{event.summary}</span>
+            </span>
+          ),
+          detalle: event.reason,
         });
         break;
 
@@ -821,9 +876,35 @@ function armarCronologia(
         push(event.tick, {
           id: event.id,
           at: event.at,
+          nivel: 0,
           punto: "bg-approval",
-          titulo: <span className="text-approval">aprobación {event.status}</span>,
+          titulo: (
+            <span className="text-approval">
+              aprobación {ESTADO_APROBACION[event.status] ?? event.status}
+              {event.toolName && (
+                <span className="ml-1.5 font-mono text-[10px] text-ink-faint">
+                  {event.toolName}
+                </span>
+              )}
+            </span>
+          ),
           detalle: event.reason,
+        });
+        break;
+
+      case "mcp.status":
+        push(event.tick, {
+          id: event.id,
+          at: event.at,
+          nivel: 0,
+          punto: event.status === "ready" ? "bg-ok" : "bg-danger",
+          titulo: (
+            <span className="text-ink-dim">
+              servidor <span className="text-ink">{event.serverName}</span>{" "}
+              {ESTADO_MCP[event.status] ?? event.status}
+            </span>
+          ),
+          detalle: event.error,
         });
         break;
 
@@ -831,6 +912,7 @@ function armarCronologia(
         push(event.tick, {
           id: event.id,
           at: event.at,
+          nivel: 1,
           punto: event.level === "error" ? "bg-danger" : "bg-warn",
           titulo: (
             <span className={event.level === "error" ? "text-danger" : "text-warn"}>
@@ -840,31 +922,85 @@ function armarCronologia(
         });
         break;
 
+      // `agent.turn_end`, `tool.selection` y `cost.updated` no se dibujan: el
+      // primero no agrega nada sobre las filas del turno, el segundo vive en el
+      // panel del agente —"Herramientas a mano"— y el tercero en la cabecera.
       default:
         break;
     }
   }
 
-  return [...porTick.entries()]
-    .sort((a, b) => a[0] - b[0])
-    .map(([tick, propias]) => ({ tick, filas: propias.sort((a, b) => a.at - b.at) }));
+  return [...ciclos.values()]
+    .sort((a, b) => a.tick - b.tick)
+    .map((ciclo) => ({ ...ciclo, filas: ciclo.filas.sort((a, b) => a.at - b.at) }));
 }
 
-const hora = (at: number): string =>
-  new Date(at).toLocaleTimeString("es-AR", { hour12: false });
+/** Los estados, dichos como los diría una persona. */
+const ESTADO_CORRIDA: Record<string, string> = {
+  idle: "está lista para arrancar",
+  running: "arrancó",
+  paused: "quedó en pausa",
+  completed: "terminó",
+  stopped: "se detuvo",
+  failed: "falló",
+  budget_exceeded: "se quedó sin presupuesto",
+  awaiting_approval: "espera una aprobación",
+};
+
+const ESTADO_TAREA: Record<string, string> = {
+  pending: "pendiente",
+  in_progress: "en curso",
+  done: "terminada",
+  blocked: "trabada",
+  cancelled: "cancelada",
+};
+
+const ESTADO_APROBACION: Record<string, string> = {
+  pending: "pendiente",
+  granted: "otorgada",
+  denied: "denegada",
+};
+
+const ESTADO_MCP: Record<string, string> = {
+  connecting: "conectando",
+  ready: "conectado",
+  error: "con problemas",
+  reconnecting: "reconectando",
+  disabled: "desactivado",
+};
+
+const hora = (at: number): string => new Date(at).toLocaleTimeString("es-AR", { hour12: false });
+
+const dinero = (usd: number): string => (usd < 0.01 ? `US$${usd.toFixed(4)}` : `US$${usd.toFixed(3)}`);
+
+/** Sangría y tamaño según el nivel: lo que cuelga de algo se ve que cuelga. */
+const SANGRIA: Record<0 | 1 | 2, string> = {
+  0: "pl-6",
+  1: "pl-6",
+  2: "pl-11",
+};
 
 function Cronologia({
   events,
   nameOf,
+  conAutor = false,
+  titulo = "Cronología",
+  vacio = "Todavía no pasó nada.",
 }: {
   events: TraceEvent[];
   nameOf: (id: string | null) => string;
+  conAutor?: boolean;
+  titulo?: string;
+  vacio?: string;
 }) {
-  const ciclos = armarCronologia(events, nameOf);
+  const ciclos = useMemo(
+    () => armarCronologia(events, nameOf, { conAutor }),
+    [events, nameOf, conAutor],
+  );
   const scroll = useRef<HTMLDivElement>(null);
   const pegadoAlFondo = useRef(true);
 
-  // La cronología sigue al presente, pero sólo si ya lo estabas mirando. Si
+  // La traza sigue al presente, pero sólo si ya lo estabas mirando. Si
   // scrolleaste para atrás a leer algo, saltar al final en cada evento nuevo
   // —llegan por SSE, varios por segundo— hace imposible leer nada.
   useEffect(() => {
@@ -872,13 +1008,14 @@ function Cronologia({
     if (caja && pegadoAlFondo.current) caja.scrollTop = caja.scrollHeight;
   }, [events.length]);
 
-  if (ciclos.length === 0) {
+  const conFilas = ciclos.filter((ciclo) => ciclo.filas.length > 0);
+  if (conFilas.length === 0) {
     return (
-      <div>
-        <div className="mb-1 text-[10px] font-semibold tracking-wide text-ink-dim uppercase">
-          Cronología
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div className="mb-1 shrink-0 text-[10px] font-semibold tracking-wide text-ink-dim uppercase">
+          {titulo}
         </div>
-        <p className="text-[11px] text-ink-faint">Todavía no hizo nada en esta corrida.</p>
+        <p className="text-[11px] text-ink-faint">{vacio}</p>
       </div>
     );
   }
@@ -887,7 +1024,7 @@ function Cronologia({
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="mb-1 flex shrink-0 items-baseline justify-between">
         <span className="text-[10px] font-semibold tracking-wide text-ink-dim uppercase">
-          Cronología
+          {titulo}
         </span>
         <span className="text-[10px] text-ink-faint">de lo primero a lo último</span>
       </div>
@@ -896,17 +1033,30 @@ function Cronologia({
         ref={scroll}
         onScroll={(event) => {
           const caja = event.currentTarget;
-          pegadoAlFondo.current =
-            caja.scrollHeight - caja.scrollTop - caja.clientHeight < 40;
+          pegadoAlFondo.current = caja.scrollHeight - caja.scrollTop - caja.clientHeight < 40;
         }}
         className="min-h-40 flex-1 overflow-auto rounded border border-line bg-canvas"
       >
-        {ciclos.map(({ tick, filas }) => (
-          <section key={tick}>
-            <header className="sticky top-0 z-10 flex items-baseline justify-between border-b border-line/60 bg-canvas/95 px-2 py-1 backdrop-blur">
-              <span className="font-mono text-[10px] font-semibold text-ink-dim">ciclo {tick}</span>
-              <span className="text-[10px] text-ink-faint">
-                {filas.length} {filas.length === 1 ? "paso" : "pasos"}
+        {conFilas.map((ciclo) => (
+          <section key={ciclo.tick}>
+            {/* El encabezado del ciclo dice de un vistazo qué tan movido fue:
+                cuántos trabajaron, cuánto se hablaron y cuánto costó. Eso es lo
+                que antes salía como dos renglones ilegibles al final. */}
+            <header className="sticky top-0 z-10 flex items-baseline justify-between gap-2 border-b border-line/60 bg-canvas/95 px-2 py-1 backdrop-blur">
+              <span className="font-mono text-[10px] font-semibold text-ink-dim">
+                ciclo {ciclo.tick}
+              </span>
+              <span className="truncate text-[10px] text-ink-faint">
+                {[
+                  ciclo.agentes != null &&
+                    `${ciclo.agentes} ${ciclo.agentes === 1 ? "agente" : "agentes"}`,
+                  ciclo.mensajes != null &&
+                    ciclo.mensajes > 0 &&
+                    `${ciclo.mensajes} ${ciclo.mensajes === 1 ? "mensaje" : "mensajes"}`,
+                  ciclo.costoUsd != null && ciclo.costoUsd > 0 && dinero(ciclo.costoUsd),
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
               </span>
             </header>
 
@@ -916,22 +1066,29 @@ function Cronologia({
                 aria-hidden
                 className="absolute top-0 bottom-0 left-[0.6875rem] w-px bg-line/60"
               />
-              {filas.map((fila) => (
-                <li key={fila.id} className="fila-traza relative flex gap-2 py-1 pl-6">
+              {ciclo.filas.map((fila) => (
+                <li
+                  key={fila.id}
+                  className={`fila-traza relative flex gap-2 py-1 ${SANGRIA[fila.nivel]}`}
+                >
                   <span
-                    className={`absolute left-1.5 top-2 size-2 rounded-full ring-2 ring-canvas ${fila.punto} ${
-                      fila.enCurso ? "punto-en-curso" : ""
-                    }`}
+                    className={`absolute top-2 rounded-full ring-2 ring-canvas ${
+                      fila.nivel === 2 ? "left-7 size-1.5" : "left-1.5 size-2"
+                    } ${fila.punto} ${fila.enCurso ? "punto-en-curso" : ""}`}
                   />
                   <span className="min-w-0 flex-1">
                     <span className="flex items-baseline justify-between gap-2">
-                      <span className="min-w-0 text-[11px]">{fila.titulo}</span>
+                      <span
+                        className={`min-w-0 ${fila.nivel === 0 ? "text-[11.5px]" : "text-[11px]"}`}
+                      >
+                        {fila.titulo}
+                      </span>
                       <span className="shrink-0 font-mono text-[10px] text-ink-faint">
                         {hora(fila.at)}
                       </span>
                     </span>
                     {fila.detalle && (
-                      <span className="mt-0.5 line-clamp-2 text-[10px] leading-4 text-ink-faint">
+                      <span className="mt-0.5 line-clamp-2 block text-[10px] leading-4 text-ink-faint">
                         {fila.detalle}
                       </span>
                     )}
