@@ -1,0 +1,15 @@
+{
+  "name": "@orq/llm",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Interfaz LlmProvider y adaptadores intercambiables (OpenRouter, Anthropic, OpenAI, Ollama).",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.68.0",
+    "@orq/shared": "*",
+    "openai": "^6.10.0"
+  }
+}

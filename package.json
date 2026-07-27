@@ -1,0 +1,37 @@
+{
+  "name": "orquestador-agentico",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Plataforma para modelar y operar una empresa completa con agentes LLM, con MCP visible y proceso observable en vivo.",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "tsc --build",
+    "dev": "concurrently -n server,web -c cyan,magenta \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "npm run dev --workspace @orq/server",
+    "dev:web": "npm run dev --workspace @orq/web",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:migrate": "npm run db:migrate --workspace @orq/server",
+    "db:seed": "npm run db:seed --workspace @orq/server",
+    "check:llm": "tsx --env-file-if-exists=.env scripts/check-llm.ts",
+    "check:models": "tsx --env-file-if-exists=.env scripts/check-models.ts"
+  },
+  "auditNotes": {
+    "GHSA-frvp-7c67-39w9": "npm audit reporta @hono/node-server <2.0.5 (path traversal en serve-static, solo Windows), arrastrado por @modelcontextprotocol/sdk. No es alcanzable: el SDK solo referencia hono desde dist/esm/server/ y dist/esm/examples/server/, y este proyecto importa exclusivamente el lado cliente (client/index, client/stdio, client/streamableHttp) — verificado con grep sobre el paquete instalado. No se aplica un override porque la corrección está en la línea 2.x y el SDK depende de ^1.x: forzar ese salto de major puede romper el SDK, un riesgo real frente a una vulnerabilidad inalcanzable. Revisar al subir @modelcontextprotocol/sdk (última revisión: 1.29.0)."
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "concurrently": "^9.1.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.10"
+  }
+}

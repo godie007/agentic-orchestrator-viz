@@ -1,0 +1,15 @@
+{
+  "name": "@orq/engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Agent loop, bus de mensajes, scheduler y bus de eventos. Sin HTTP ni base de datos.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@orq/llm": "*",
+    "@orq/shared": "*",
+    "@orq/tools": "*"
+  }
+}

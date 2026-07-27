@@ -1,0 +1,101 @@
+@import "tailwindcss";
+@import "@xyflow/react/dist/style.css";
+
+/**
+ * Sistema visual: herramienta profesional densa, no landing page.
+ *
+ * Paleta oscura de base neutra con un acento por tipo de señal. El color acá
+ * es información —qué clase de mensaje viaja, en qué estado está un servidor—
+ * así que se usa con moderación para que signifique algo.
+ */
+@theme {
+  --color-canvas: oklch(0.16 0.005 260);
+  --color-surface: oklch(0.2 0.006 260);
+  --color-surface-2: oklch(0.245 0.007 260);
+  --color-line: oklch(0.32 0.008 260);
+  --color-ink: oklch(0.95 0.003 260);
+  --color-ink-dim: oklch(0.72 0.006 260);
+  --color-ink-faint: oklch(0.55 0.006 260);
+
+  --color-accent: oklch(0.72 0.15 235);
+  --color-ok: oklch(0.75 0.16 155);
+  --color-warn: oklch(0.8 0.15 85);
+  --color-danger: oklch(0.68 0.19 25);
+  --color-request: oklch(0.72 0.15 235);
+  --color-response: oklch(0.75 0.16 155);
+  --color-escalation: oklch(0.78 0.16 60);
+  --color-approval: oklch(0.72 0.16 300);
+
+  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-feature-settings: "cv02", "cv03", "cv04";
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Scrollbars discretos: en una UI densa, la barra por defecto de macOS pesa. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line) transparent;
+}
+
+/* El nodo de un agente pulsa mientras piensa: es la señal de "acá está pasando
+   algo" que hace legible el proceso de un vistazo. */
+@keyframes think-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in oklch, var(--color-accent) 55%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 10px color-mix(in oklch, var(--color-accent) 0%, transparent);
+  }
+}
+
+.is-thinking {
+  animation: think-pulse 1.4s ease-out infinite;
+  border-color: var(--color-accent) !important;
+}
+
+/* Un paquete recorre la arista cuando un agente le escribe a otro. */
+.react-flow__edge.edge-active .react-flow__edge-path {
+  stroke-width: 2.5;
+  filter: drop-shadow(0 0 6px currentColor);
+}
+
+@keyframes dash-flow {
+  to {
+    stroke-dashoffset: -24;
+  }
+}
+
+.react-flow__edge.edge-active .react-flow__edge-path {
+  stroke-dasharray: 6 6;
+  animation: dash-flow 0.6s linear infinite;
+}
+
+/* Destello del enlace servidor→agente en el MCP Hub al invocar una tool. */
+@keyframes flash {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0.25;
+  }
+}
+
+.mcp-flash {
+  animation: flash 1s ease-out;
+}
+
+.react-flow__attribution {
+  display: none;
+}

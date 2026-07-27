@@ -1,0 +1,19 @@
+{
+  "name": "@orq/tools",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Registro de herramientas, tools de coordinación y capacidad, y puente MCP con telemetría.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.22.0",
+    "@orq/shared": "*",
+    "docx": "^9.7.1",
+    "pdfkit": "^0.19.1"
+  },
+  "devDependencies": {
+    "@types/pdfkit": "^0.17.6"
+  }
+}

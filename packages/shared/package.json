@@ -1,0 +1,15 @@
+{
+  "name": "@orq/shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Modelo de dominio y esquemas Zod compartidos entre servidor y web.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./schema": "./src/schema.ts",
+    "./events": "./src/events.ts"
+  },
+  "dependencies": {
+    "zod": "^3.24.1"
+  }
+}
