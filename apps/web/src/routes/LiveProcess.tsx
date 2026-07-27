@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { TraceEvent } from "@orq/shared";
 import { api, type CompanyBundle } from "../api.js";
 import { useRunStream } from "../lib/stream.js";
-import { derive, MESSAGE_COLOR, MESSAGE_LABEL, recentFlows } from "../lib/derive.js";
+import { derive, MESSAGE_COLOR, MESSAGE_LABEL, porcentajeCache, recentFlows } from "../lib/derive.js";
 import { Button, Empty, Field, Panel, Status, inputClass, money, relativeTime, tokens } from "../lib/ui.js";
 import { OrgGraph } from "./OrgGraph.js";
 
@@ -204,9 +204,21 @@ export function LiveProcess({ company }: { company: CompanyBundle }) {
           </span>
           <span
             className="text-xs text-ink-dim"
-            title={`${state.inputTokens.toLocaleString("es-AR")} tokens de entrada · ${state.outputTokens.toLocaleString("es-AR")} de salida`}
+            title={
+              `${state.inputTokens.toLocaleString("es-AR")} tokens de entrada · ` +
+              `${state.outputTokens.toLocaleString("es-AR")} de salida · ` +
+              `${state.cachedInputTokens.toLocaleString("es-AR")} servidos desde caché`
+            }
           >
             ↓{tokens(state.inputTokens)} ↑{tokens(state.outputTokens)}
+            {state.inputTokens > 0 && (
+              // El caché es lo que decide la factura: sin él cada iteración
+              // vuelve a pagar todo el contexto.
+              <span className={porcentajeCache(state) >= 50 ? " text-ok" : " text-warn"}>
+                {" "}
+                ⚡{porcentajeCache(state)}%
+              </span>
+            )}
           </span>
           <span className={`text-xs ${connected ? "text-ok" : "text-ink-faint"}`}>
             {connected ? "● en vivo" : "○ desconectado"}
@@ -583,6 +595,8 @@ function RoleDetail({
             title={`${(activity?.inputTokens ?? 0).toLocaleString("es-AR")} tokens de entrada · ${(activity?.outputTokens ?? 0).toLocaleString("es-AR")} de salida`}
           >
             tokens: ↓{tokens(activity?.inputTokens ?? 0)} ↑{tokens(activity?.outputTokens ?? 0)}
+            {(activity?.inputTokens ?? 0) > 0 &&
+              ` · caché ${Math.round((100 * (activity?.cachedInputTokens ?? 0)) / (activity?.inputTokens ?? 1))}%`}
           </span>
         </div>
 

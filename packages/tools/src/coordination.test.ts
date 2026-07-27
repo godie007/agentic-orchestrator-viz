@@ -388,3 +388,157 @@ describe("auditar lo que los agentes hicieron", () => {
     expect(tool("check_activity").readOnly).toBe(true);
   });
 });
+
+/**
+ * Corregir un entregable no puede costar reescribirlo entero.
+ *
+ * Medido sobre una corrida real: v16→v19 del mismo documento cambiaron el 4% de
+ * las líneas y reescribieron las 184 cada vez, el 21% de todos los tokens de
+ * salida. Además es la vía más común a la llamada truncada.
+ */
+describe("editar un entregable por reemplazo", () => {
+  const documento =
+    "# Paquete comercial\n\n## Estado\n\n| Rol | Tests |\n| --- | --- |\n" +
+    "| director | 100/100 |\n| inspector | 92/92 |\n| admin | 92/92 |\n\n## Riesgos\n\nNinguno declarado.\n";
+
+  function conArtefacto(contenido = documento) {
+    const guardados: Array<{ key: string; content: string }> = [];
+    const workspace = {
+      ...strictWorkspace,
+      readArtifact: async () => ({
+        id: "art_1",
+        runId: "run_test",
+        companyId: "cmp_1",
+        key: "paquete",
+        title: "Paquete comercial",
+        contentType: "markdown" as const,
+        content: contenido,
+        version: 16,
+        authorRoleId: "rol_1",
+        createdAt: 0,
+      }),
+      listArtifacts: async () => [],
+      writeArtifact: async (input: { key: string; content: string }) => {
+        guardados.push(input);
+        return { ...input, version: 17, title: "Paquete comercial" };
+      },
+    } as unknown as AgentWorkspace;
+    return { workspace, guardados };
+  }
+
+  it("aplica el cambio y versiona sin recibir el documento entero", async () => {
+    const { workspace, guardados } = conArtefacto();
+    const result = await tool("edit_artifact").execute(
+      { key: "paquete", cambios: [{ buscar: "| director | 100/100 |", reemplazar: "| director | 86/86 |" }] },
+      { ...ctx, workspace },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(guardados[0]!.content).toContain("| director | 86/86 |");
+    expect(guardados[0]!.content).not.toContain("100/100");
+    // Y lo que no se tocó sigue igual: no se regeneró el resto.
+    expect(guardados[0]!.content).toContain("| inspector | 92/92 |");
+  });
+
+  it("rechaza un texto ambiguo en vez de tocar el lugar equivocado", async () => {
+    const { workspace, guardados } = conArtefacto();
+    const result = await tool("edit_artifact").execute(
+      // "92/92" está en dos filas: reemplazar a ciegas tocaría la equivocada.
+      { key: "paquete", cambios: [{ buscar: "92/92", reemplazar: "78/92" }] },
+      { ...ctx, workspace },
+    );
+    expect(result.ok).toBe(false);
+    expect(result.content).toContain("2 veces");
+    expect(guardados).toHaveLength(0);
+  });
+
+  it("si un cambio no aplica, no deja el documento a medias", async () => {
+    const { workspace, guardados } = conArtefacto();
+    const result = await tool("edit_artifact").execute(
+      {
+        key: "paquete",
+        cambios: [
+          { buscar: "Ninguno declarado.", reemplazar: "Ver tabla." },
+          { buscar: "texto que no existe", reemplazar: "algo" },
+        ],
+      },
+      { ...ctx, workspace },
+    );
+    expect(result.ok).toBe(false);
+    expect(guardados).toHaveLength(0);
+  });
+
+  it("no crea una versión nueva si nada cambió", async () => {
+    const { workspace, guardados } = conArtefacto();
+    const result = await tool("edit_artifact").execute(
+      { key: "paquete", cambios: [{ buscar: "## Riesgos", reemplazar: "## Riesgos" }] },
+      { ...ctx, workspace },
+    );
+    expect(result.ok).toBe(false);
+    expect(guardados).toHaveLength(0);
+  });
+});
+
+/**
+ * Los modelos copian el texto a buscar aplanando los saltos de línea: una tabla
+ * markdown vuelve como una sola línea con pipes. Medido en una corrida real:
+ * era la causa de 3 de los 5 rechazos de edit_artifact.
+ */
+describe("editar tolerando cómo quedó partido el espacio", () => {
+  const conTabla =
+    "# Informe\n\n## Deuda\n\n| # | Deuda | Severidad |\n|---|-------|-----------|\n" +
+    "| 1 | BUG-016 | Media |\n\n## Cierre\n\nNada más.\n";
+
+  function workspaceCon(contenido: string) {
+    const guardados: Array<{ content: string }> = [];
+    const workspace = {
+      ...strictWorkspace,
+      readArtifact: async () => ({
+        key: "informe",
+        title: "Informe",
+        contentType: "markdown" as const,
+        content: contenido,
+        version: 3,
+      }),
+      listArtifacts: async () => [],
+      writeArtifact: async (input: { content: string }) => {
+        guardados.push(input);
+        return { ...input, version: 4, title: "Informe" };
+      },
+    } as unknown as AgentWorkspace;
+    return { workspace, guardados };
+  }
+
+  it("encuentra la tabla aunque venga en una sola línea", async () => {
+    const { workspace, guardados } = workspaceCon(conTabla);
+    const result = await tool("edit_artifact").execute(
+      {
+        key: "informe",
+        cambios: [
+          {
+            // Tal como lo mandó el modelo: sin los saltos de línea originales.
+            buscar: "| 1 | BUG-016 | Media |",
+            reemplazar: "| 1 | BUG-016 | Alta |",
+          },
+        ],
+      },
+      { ...ctx, workspace },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(guardados[0]!.content).toContain("| 1 | BUG-016 | Alta |");
+    // Y el resto del documento quedó intacto, saltos de línea incluidos.
+    expect(guardados[0]!.content).toContain("|---|-------|-----------|\n");
+  });
+
+  it("sigue rechazando si al aflojar el espacio hay más de un candidato", async () => {
+    const repetido = "## A\n\n| x | 1 |\n\n## B\n\n| x | 1 |\n";
+    const { workspace, guardados } = workspaceCon(repetido);
+    const result = await tool("edit_artifact").execute(
+      { key: "informe", cambios: [{ buscar: "| x | 1 |", reemplazar: "| x | 2 |" }] },
+      { ...ctx, workspace },
+    );
+    expect(result.ok).toBe(false);
+    expect(guardados).toHaveLength(0);
+  });
+});

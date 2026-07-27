@@ -17,6 +17,7 @@ export interface RoleActivity {
   turns: number;
   costUsd: number;
   inputTokens: number;
+  cachedInputTokens: number;
   outputTokens: number;
   lastSummary: string | null;
 }
@@ -55,6 +56,7 @@ export interface DerivedState {
    * turno caro por escribir mucho.
    */
   inputTokens: number;
+  cachedInputTokens: number;
   outputTokens: number;
   status: string;
   stopReason: string | null;
@@ -71,6 +73,7 @@ function emptyRole(): RoleActivity {
     costUsd: 0,
     inputTokens: 0,
     outputTokens: 0,
+    cachedInputTokens: 0,
     lastSummary: null,
   };
 }
@@ -88,6 +91,7 @@ export function derive(events: TraceEvent[], upTo = events.length): DerivedState
   let budgetUsd = 0;
   let inputTokens = 0;
   let outputTokens = 0;
+  let cachedInputTokens = 0;
   let status = "idle";
   let stopReason: string | null = null;
 
@@ -173,12 +177,14 @@ export function derive(events: TraceEvent[], upTo = events.length): DerivedState
         budgetUsd = event.budgetUsd;
         inputTokens += event.inputTokens;
         outputTokens += event.outputTokens;
+        cachedInputTokens += event.cachedInputTokens;
         // El evento trae el rol que gastó, así que el desglose por agente sale
         // del mismo lugar que el total: no hay dos fuentes que puedan diferir.
         if (event.roleId) {
           const role = roleOf(event.roleId);
           role.inputTokens += event.inputTokens;
           role.outputTokens += event.outputTokens;
+          role.cachedInputTokens += event.cachedInputTokens;
         }
         break;
       }
@@ -196,6 +202,7 @@ export function derive(events: TraceEvent[], upTo = events.length): DerivedState
     budgetUsd,
     inputTokens,
     outputTokens,
+    cachedInputTokens,
     status,
     stopReason,
     eventsPerTick,
@@ -235,3 +242,12 @@ export const MESSAGE_LABEL: Record<string, string> = {
   broadcast: "anuncio",
   human: "persona",
 };
+
+/** Qué porcentaje de la entrada vino del caché. Redondeado, para mostrar. */
+export function porcentajeCache(state: {
+  inputTokens: number;
+  cachedInputTokens: number;
+}): number {
+  if (state.inputTokens === 0) return 0;
+  return Math.round((100 * state.cachedInputTokens) / state.inputTokens);
+}

@@ -250,6 +250,7 @@ export class Runtime {
         tick: record.tick,
         inputTokens: record.usage.inputTokens,
         outputTokens: record.usage.outputTokens,
+        cachedInputTokens: record.usage.cachedInputTokens ?? 0,
         costUsd: record.costUsd,
         latencyMs: record.latencyMs,
         createdAt: record.at,

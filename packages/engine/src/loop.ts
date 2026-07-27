@@ -76,9 +76,16 @@ export async function runAgentTurn(
 
   // El turno responde al primer pedido pendiente de la bandeja; el resto queda
   // como contexto. Sin esto `reply` no sabría a quién contestar.
-  const pending = inbox.find(
-    (message) => message.type === "request" || message.type === "escalation",
-  );
+  //
+  // Si no hay un pedido formal se contesta el primer mensaje que haya. Antes se
+  // exigía `request` o `escalation`, y entonces **nadie podía contestarle a la
+  // persona**: el encargo que se inyecta desde la UI es de tipo `human`, así que
+  // `reply` devolvía "no hay ningún mensaje que responder". En una corrida real
+  // se comió 14 de 25 llamadas a `reply` —el coordinador insistía en acusar
+  // recibo del encargo—, y cada intento gastaba una iteración entera.
+  const pending =
+    inbox.find((message) => message.type === "request" || message.type === "escalation") ??
+    inbox[0];
 
   // Vista ligada a este rol: el actor viaja por el closure, no por un campo
   // compartido que los turnos paralelos se pisarían entre sí.
@@ -186,6 +193,8 @@ export async function runAgentTurn(
   // directorio permitido, por ejemplo— reintenta lo mismo hasta agotar
   // `maxTurns`, y el turno se pierde entero sin haber hecho nada.
   const fallosRepetidos = new Map<string, number>();
+  /** Lecturas ya resueltas en este turno, para no repetirlas. */
+  const lecturasDelTurno = new Map<string, string>();
   // Dos tolerancias distintas porque son dos situaciones distintas. Repetir la
   // llamada **idéntica** es estar trabado: se corta enseguida. Cambiar los
   // argumentos y seguir chocando con el **mismo error** puede ser exploración
@@ -276,6 +285,7 @@ export async function runAgentTurn(
       budgetUsd: ledger.budgetUsd,
       inputTokens: result.usage.inputTokens,
       outputTokens: result.usage.outputTokens,
+      cachedInputTokens: result.usage.cachedInputTokens ?? 0,
     });
 
     if (result.message.content.trim()) summary = result.message.content.trim();
@@ -297,7 +307,7 @@ export async function runAgentTurn(
 
     // Las de solo lectura pueden ir en paralelo; las que mutan van en serie,
     // porque el orden en que se envían mensajes y se cambian tareas importa.
-    const results = await executeCalls(calls, byName, ctx, state, bus);
+    const results = await executeCalls(calls, byName, ctx, state, bus, lecturasDelTurno);
     conversation.push(...results.messages);
     // Avance = al menos una herramienta de esta vuelta hizo algo. Es lo que
     // habilita a estirar el turno más allá de la base.
@@ -478,6 +488,7 @@ async function executeCalls(
   ctx: ToolContext,
   state: RunState,
   bus: EventBus,
+  memo: Map<string, string>,
 ): Promise<{ messages: ChatMessage[]; awaitingApproval: boolean; failures: string[] }> {
   const messages: ChatMessage[] = [];
   const failures: string[] = [];
@@ -487,7 +498,35 @@ async function executeCalls(
   const mutating = calls.filter((call) => byName.get(call.name)?.readOnly !== true);
 
   const parallel = await Promise.all(
-    readOnly.map((call) => executeOne(call, byName, ctx, state, bus)),
+    readOnly.map(async (call) => {
+      // Una lectura idéntica ya hecha en este mismo turno se contesta con lo
+      // que devolvió la primera vez. Los agentes releen el mismo archivo dos y
+      // tres veces por turno —lo vimos con `read_text_file` y `list_directory`
+      // sobre la misma ruta— y cada relectura vuelve a pagar el ida y vuelta
+      // al servidor MCP y a meter el contenido entero en el contexto.
+      const huella = huellaDeFallo(call.name, call.arguments);
+      const cacheado = memo.get(huella);
+      if (cacheado != null) {
+        bus.emit({
+          type: "log",
+          runId: ctx.runId,
+          tick: ctx.tick,
+          level: "info",
+          roleId: ctx.actor.id,
+          message: `${call.name}: misma lectura que ya hizo en este turno, se reusa el resultado.`,
+        });
+        return {
+          message: { role: "tool" as const, toolCallId: call.id || ids.toolCall(), name: call.name, content: cacheado },
+          awaitingApproval: false,
+          failure: null,
+        };
+      }
+      const entry = await executeOne(call, byName, ctx, state, bus);
+      // Sólo se memoriza lo que salió bien: un error puede ser transitorio y
+      // repetirlo cacheado le sacaría al agente la chance de reintentar.
+      if (!entry.failure) memo.set(huella, entry.message.content);
+      return entry;
+    }),
   );
   for (const entry of parallel) {
     messages.push(entry.message);
@@ -499,6 +538,9 @@ async function executeCalls(
     messages.push(entry.message);
     if (entry.failure) failures.push(...entry.failure);
     if (entry.awaitingApproval) awaitingApproval = true;
+    // Algo cambió: lo leído antes puede haber quedado viejo. Un `list_output`
+    // después de escribir un archivo tiene que ver el archivo nuevo.
+    memo.clear();
   }
 
   return { messages, awaitingApproval, failures };

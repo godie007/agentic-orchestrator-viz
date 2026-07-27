@@ -156,7 +156,17 @@ const reply: RegisteredTool = {
     }
     const original = ctx.workspace.roles.find((role) => role.id === ctx.replyToRoleId);
     if (!original) {
-      return fail("No se pudo identificar a quién responder.");
+      // El encargo lo escribió la persona, que no es un rol y no tiene bandeja.
+      // Antes esto devolvía "no hay ningún mensaje que responder" y el agente
+      // reintentaba: en una corrida real se comió 14 de 25 llamadas a `reply`,
+      // una iteración entera cada una, para acusar recibo de algo que nadie iba
+      // a leer. La respuesta correcta es que no hace falta, y cuál es el canal
+      // que sí llega.
+      return fail(
+        "Ese mensaje lo escribió la persona a cargo, no un rol: no hace falta acusar " +
+          "recibo ni tiene dónde llegar la respuesta. Poneté con el trabajo. Si te falta " +
+          "un dato que sólo ella tiene, pedíselo con request_context, que sí le llega.",
+      );
     }
     await ctx.workspace.sendMessage({
       toRoleId: original.id,
@@ -421,6 +431,8 @@ const writeArtifact: RegisteredTool = {
     "Guarda un entregable —propuesta, análisis, informe, decisión— para que otros roles " +
     "lo lean y para poder exportarlo a Word o PDF. Escribir con la misma 'key' crea una " +
     "versión nueva.\n\n" +
+    "Si el entregable ya existe y sólo vas a corregir partes, usá edit_artifact: escribís " +
+    "los cambios y no el documento entero.\n\n" +
     "Escribilo como el documento que va a leer un cliente, no como una nota interna:\n" +
     "- Empezá con '# Título' y organizá con '## Secciones' con nombre propio.\n" +
     "- Usá tablas markdown para comparar cosas y listas para enumerarlas. Un párrafo con " +
@@ -498,6 +510,181 @@ const writeArtifact: RegisteredTool = {
     );
   },
 };
+
+/**
+ * Edita un entregable por reemplazo, en vez de reescribirlo entero.
+ *
+ * Medido sobre una corrida real: entre v16 y v19 del mismo documento cambió el
+ * 4% de las líneas y se reescribieron las 184 cada vez. El 21% de **todos** los
+ * tokens de salida de la corrida se fue en volver a tipear texto idéntico.
+ *
+ * Y no es sólo el gasto: reescribir 17.000 caracteres para tocar tres líneas es
+ * la forma más común de que el modelo agote `max_tokens` a mitad del JSON y la
+ * llamada llegue con los argumentos cortados. El entregable a medio escribir
+ * salía de ahí.
+ */
+const editArtifact: RegisteredTool = {
+  name: "edit_artifact",
+  origin: "coordination",
+  readOnly: false,
+  requiresApproval: false,
+  description:
+    "Corrige partes de un entregable existente sin reescribirlo entero. Crea una versión " +
+    "nueva, igual que write_artifact.\n\n" +
+    "Usala siempre que estés aplicando correcciones o agregando una sección: es más rápida, " +
+    "más barata y no corre riesgo de cortarse a la mitad. Reservá write_artifact para la " +
+    "primera versión o para una reescritura de verdad.\n\n" +
+    "Cada cambio busca un texto **exacto** —copialo tal cual de read_artifact, con sus " +
+    "espacios— y lo reemplaza. Si el texto aparece más de una vez, agregá contexto alrededor " +
+    "hasta que sea único. Para borrar un bloque, dejá 'reemplazar' vacío.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      key: stringProp("Identificador del entregable a corregir"),
+      cambios: {
+        type: "array",
+        description: "Reemplazos a aplicar, en orden.",
+        items: {
+          type: "object",
+          properties: {
+            buscar: stringProp("Texto exacto a reemplazar, único en el documento"),
+            reemplazar: stringProp("Texto nuevo. Vacío borra el bloque."),
+          },
+          required: ["buscar"],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ["key", "cambios"],
+    additionalProperties: false,
+  },
+  async execute(args, ctx) {
+    const parsed = readRequired(args, ["key"]);
+    if (!parsed.ok) return fail(`edit_artifact: ${parsed.error}`);
+
+    const cambios = args.cambios;
+    if (!Array.isArray(cambios) || cambios.length === 0) {
+      return fail(`edit_artifact: "cambios" tiene que ser una lista con al menos un reemplazo.`);
+    }
+
+    const artifact = await ctx.workspace.readArtifact(parsed.values.key!);
+    if (!artifact) {
+      const existentes = await ctx.workspace.listArtifacts();
+      const claves = existentes.map((a) => `"${a.key}"`).join(", ") || "ninguno todavía";
+      return fail(
+        `No existe el entregable "${parsed.values.key}". Los que hay: ${claves}. ` +
+          `Si es nuevo, escribilo con write_artifact.`,
+      );
+    }
+
+    let contenido = artifact.content;
+    const aplicados: string[] = [];
+
+    for (const [i, crudo] of cambios.entries()) {
+      const cambio = crudo as { buscar?: unknown; reemplazar?: unknown };
+      const buscar = typeof cambio.buscar === "string" ? cambio.buscar : "";
+      const reemplazar = typeof cambio.reemplazar === "string" ? cambio.reemplazar : "";
+      if (!buscar) {
+        return fail(`edit_artifact: el cambio ${i + 1} no trae "buscar".`);
+      }
+
+      let veces = contarApariciones(contenido, buscar);
+      let aBuscar = buscar;
+
+      // Los modelos copian el texto **aplanando los saltos de línea**: una
+      // tabla markdown de seis renglones vuelve como una sola línea con pipes.
+      // Es la causa de la mayoría de los rechazos que medimos, y no es un error
+      // del agente sobre el contenido: reconoció el bloque bien. Si el match
+      // exacto falla, se reintenta ignorando cómo está partido el espacio.
+      if (veces === 0) {
+        const flexible = buscarIgnorandoEspacios(contenido, buscar);
+        if (flexible) {
+          aBuscar = flexible;
+          veces = contarApariciones(contenido, flexible);
+        }
+      }
+
+      if (veces === 0) {
+        return fail(
+          `edit_artifact: el cambio ${i + 1} no encontró su texto en "${artifact.key}" v${artifact.version}. ` +
+            `Buscabas: "${preview(buscar, 120)}". Copialo tal cual sale de read_artifact —los ` +
+            `espacios y saltos de línea cuentan— o reescribí el documento con write_artifact. ` +
+            `Los cambios anteriores no se aplicaron: nada quedó a medias.`,
+        );
+      }
+      if (veces > 1) {
+        return fail(
+          `edit_artifact: el cambio ${i + 1} encontró ${veces} veces "${preview(buscar, 80)}". ` +
+            `Agregá contexto alrededor —la línea de arriba o el título de la sección— hasta que ` +
+            `sea único, así no se toca el lugar equivocado.`,
+        );
+      }
+
+      contenido = contenido.replace(aBuscar, () => reemplazar);
+      aplicados.push(`${aBuscar.length}→${reemplazar.length}`);
+    }
+
+    if (contenido === artifact.content) {
+      return fail(
+        `edit_artifact: los cambios dejaron el documento igual que estaba. No se creó una ` +
+          `versión nueva.`,
+      );
+    }
+
+    // La versión editada pasa el mismo control que una escrita entera: por acá
+    // no se entra a guardar algo que write_artifact habría rechazado.
+    const calidad = revisarCalidad(artifact.title, contenido);
+    if (calidad.rechazo) return fail(`edit_artifact: ${calidad.rechazo}`);
+
+    const guardado = await ctx.workspace.writeArtifact({
+      key: artifact.key,
+      title: artifact.title,
+      contentType: artifact.contentType,
+      content: contenido,
+    });
+
+    const tocados = aplicados.reduce((total, tramo) => total + Number(tramo.split("→")[1] ?? 0), 0);
+    return ok(
+      `Entregable "${guardado.title}" corregido: ${cambios.length} cambio(s), ahora es ` +
+        `v${guardado.version}. Escribiste ${tocados} caracteres en vez de los ` +
+        `${contenido.length} del documento entero.` +
+        (calidad.aviso ? ` Para la próxima: ${calidad.aviso}` : ""),
+      `✏️ ${guardado.title} v${guardado.version} (${cambios.length} cambio(s))`,
+    );
+  },
+};
+
+/**
+ * Busca un texto tratando cualquier corrida de espacios como equivalente.
+ *
+ * Devuelve el fragmento **tal como está en el documento**, para poder
+ * reemplazarlo literalmente después. `null` si no aparece o si aparece más de
+ * una vez: en ese caso quien llama tiene que pedir más contexto, no adivinar.
+ */
+function buscarIgnorandoEspacios(donde: string, que: string): string | null {
+  const patron = que
+    .trim()
+    .split(/\s+/)
+    .map((parte) => parte.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("\\s+");
+  if (!patron) return null;
+
+  const encontrados = donde.match(new RegExp(patron, "g"));
+  if (!encontrados || encontrados.length !== 1) return null;
+  return encontrados[0];
+}
+
+/** Cuántas veces aparece un texto literal. Sin regex: el texto trae metacaracteres. */
+function contarApariciones(donde: string, que: string): number {
+  let n = 0;
+  let desde = 0;
+  for (;;) {
+    const i = donde.indexOf(que, desde);
+    if (i === -1) return n;
+    n++;
+    desde = i + que.length;
+  }
+}
 
 const readArtifact: RegisteredTool = {
   name: "read_artifact",
@@ -913,6 +1100,7 @@ export const coordinationTools: RegisteredTool[] = [
   listMyTasks,
   requestApproval,
   writeArtifact,
+  editArtifact,
   readArtifact,
   listArtifacts,
   checkActivity,

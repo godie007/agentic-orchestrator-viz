@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { parseMarkdown, parseSpans, spansToText } from "./markdown.js";
 import { cuerpoSinTituloRepetido, renderDocx, renderPdf } from "./render.js";
-import { createSkillTools, type SkillStorage } from "./index.js";
+import { createSkillTools, type SkillStorage, sinVersionEnNombre } from "./index.js";
 import type { AgentWorkspace, ToolContext } from "../types.js";
 
 /**
@@ -665,3 +665,21 @@ function descomprimirPdf(bytes: Buffer): string {
       Buffer.from(hex, "hex").toString("latin1"),
     );
 }
+
+describe("la versión no va en el nombre del archivo", () => {
+  it("saca el sufijo y deja carpeta y extensión", () => {
+    expect(sinVersionEnNombre("comercial/paquete-comercial-v25.md")).toBe(
+      "comercial/paquete-comercial.md",
+    );
+    expect(sinVersionEnNombre("informe_v3.csv")).toBe("informe.csv");
+    expect(sinVersionEnNombre("notas-V12.md")).toBe("notas.md");
+  });
+
+  it("no toca lo que no es una versión al final", () => {
+    // Un nombre puede terminar en número sin ser una versión.
+    expect(sinVersionEnNombre("comercial/plan-2026.md")).toBe("comercial/plan-2026.md");
+    expect(sinVersionEnNombre("ruta/v2/informe.md")).toBe("ruta/v2/informe.md");
+    // Y si sacarle la versión no deja nombre, se respeta el original.
+    expect(sinVersionEnNombre("v2.md")).toBe("v2.md");
+  });
+});

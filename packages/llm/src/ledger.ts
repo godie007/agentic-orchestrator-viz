@@ -16,19 +16,36 @@ export interface CostBreakdown {
   totalUsd: number;
   /** `false` cuando el catálogo no publica precio: el costo se cuenta como 0. */
   priced: boolean;
+  /** `true` si es lo que el proveedor dice que cobró, no una estimación nuestra. */
+  informado: boolean;
 }
 
 export function computeCost(model: ModelInfo | undefined, usage: TokenUsage): CostBreakdown {
+  // Si el proveedor informa lo que cobró, eso manda: el precio de catálogo es
+  // una estimación con el endpoint más barato, y el ruteo no lo respeta. Medido
+  // en OpenRouter sobre un mismo modelo: catálogo US$0.435/MTok, endpoints
+  // reales entre 0.435 y 1.740. Estimar deja el presupuesto corto de un lado y
+  // largo del otro; el número informado es el que realmente se paga.
+  if (typeof usage.reportedCostUsd === "number") {
+    return {
+      inputUsd: 0,
+      outputUsd: 0,
+      totalUsd: usage.reportedCostUsd,
+      priced: true,
+      informado: true,
+    };
+  }
+
   const inputPrice = model?.inputPricePerMTok ?? null;
   const outputPrice = model?.outputPricePerMTok ?? null;
 
   if (inputPrice == null || outputPrice == null) {
-    return { inputUsd: 0, outputUsd: 0, totalUsd: 0, priced: false };
+    return { inputUsd: 0, outputUsd: 0, totalUsd: 0, priced: false, informado: false };
   }
 
   const inputUsd = (usage.inputTokens / 1_000_000) * inputPrice;
   const outputUsd = (usage.outputTokens / 1_000_000) * outputPrice;
-  return { inputUsd, outputUsd, totalUsd: inputUsd + outputUsd, priced: true };
+  return { inputUsd, outputUsd, totalUsd: inputUsd + outputUsd, priced: true, informado: false };
 }
 
 export interface LedgerRecord {

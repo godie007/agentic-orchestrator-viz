@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ProviderRegistry, RunLedger } from "@orq/llm";
-import { ToolRegistry, type RegisteredTool } from "@orq/tools";
+import { coordinationTools, ToolRegistry, type RegisteredTool } from "@orq/tools";
 import type { TraceEvent } from "@orq/shared";
 import { EventBus } from "./events.js";
 import { RunState, type CompanyConfig } from "./state.js";
@@ -43,6 +43,16 @@ function escenario(toolIds: string[] = ["tool_1"]) {
     roles: [agente],
     policies: [],
     tools: [
+      {
+        id: "tool_2",
+        name: "leer_doc",
+        description: "Lee un documento.",
+        origin: "mcp",
+        inputSchema: {},
+        readOnly: true,
+        requiresApproval: false,
+        mcpServerId: "mcp_1",
+      },
       {
         id: "tool_1",
         name: "leer_archivo",
@@ -354,5 +364,105 @@ describe("presupuesto dinámico de iteraciones", () => {
     });
     expect(retomado.base).toBeLessThan(entero.base);
     expect(retomado.base).toBeGreaterThanOrEqual(3);
+  });
+});
+
+describe("no repetir la misma lectura dentro de un turno", () => {
+  it("reusa el resultado en vez de volver a llamar a la herramienta", async () => {
+    const { agente, state, bus, tools } = escenario();
+
+    let lecturas = 0;
+    tools.register({
+      name: "leer_doc",
+      description: "Lee un documento.",
+      inputSchema: { type: "object", properties: { path: { type: "string" } } },
+      origin: "mcp",
+      readOnly: true,
+      requiresApproval: false,
+      mcpServerId: "mcp_1",
+      execute: async () => {
+        lecturas++;
+        return { ok: true, content: "contenido del documento" };
+      },
+    });
+
+    // El modelo pide lo mismo tres veces, como hacía sobre la bóveda.
+    let vuelta = 0;
+    const provider = new FakeProvider(() => {
+      vuelta++;
+      if (vuelta > 3) return { text: "Listo." };
+      return { toolCalls: [{ name: "leer_doc", arguments: { path: "/mismo.md" } }] };
+    });
+    const providers = new ProviderRegistry();
+    providers.register(provider);
+
+    await runAgentTurn(state, { ...agente, toolIds: ["tool_1", "tool_2"] }, {
+      bus,
+      providers,
+      tools,
+      ledger: new RunLedger(10),
+      objective: "Leer el documento",
+      maxTicks: 5,
+    });
+
+    // Tres pedidos, una sola lectura real.
+    expect(lecturas).toBe(1);
+  });
+});
+
+/**
+ * El encargo que se inyecta desde la UI es de tipo `human` y no lo escribió
+ * ningún rol. `reply` devolvía "no hay ningún mensaje que responder" y el
+ * agente reintentaba: en una corrida real se comió 14 de 25 llamadas, una
+ * iteración entera cada una. Ahora se le dice que no hace falta y por dónde sí
+ * puede hablarle a la persona.
+ */
+describe("contestarle a la persona que dio el encargo", () => {
+  it("no lo deja colgado adivinando: le dice que no hace falta y cuál es el canal", async () => {
+    const { agente, state, bus, eventos, tools } = escenario();
+    // Las de coordinación se otorgan siempre, pero hay que registrarlas.
+    for (const herramienta of coordinationTools) tools.register(herramienta);
+
+    await state.sendMessage(
+      {
+        toRoleId: agente.id,
+        toDepartmentId: null,
+        type: "human",
+        subject: "Encargo",
+        body: "Prepará el informe trimestral.",
+        threadId: null,
+        inReplyTo: null,
+      },
+      null,
+    );
+
+    let vuelta = 0;
+    const provider = new FakeProvider(() => {
+      vuelta++;
+      if (vuelta > 1) return { text: "Listo." };
+      return { toolCalls: [{ name: "reply", arguments: { body: "Recibido, arranco." } }] };
+    });
+    const providers = new ProviderRegistry();
+    providers.register(provider);
+
+    await runAgentTurn(state, agente, {
+      bus,
+      providers,
+      tools,
+      ledger: new RunLedger(10),
+      objective: "Informe trimestral",
+      maxTicks: 5,
+    });
+
+    // No se inventa una respuesta que nadie va a leer...
+    expect(state.messages.some((m) => m.type === "response")).toBe(false);
+
+    // ...y el agente recibe una instrucción accionable, no un "no se pudo".
+    const aviso = eventos.find(
+      (event) => event.type === "tool.end" && event.toolName === "reply" && !event.ok,
+    );
+    expect(aviso).toBeDefined();
+    const detalle = aviso as { error: string | null; preview: string | null };
+    expect(`${detalle.error ?? ""}${detalle.preview ?? ""}`).toContain("request_context");
   });
 });

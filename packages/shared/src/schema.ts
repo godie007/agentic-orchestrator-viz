@@ -482,7 +482,12 @@ export const ledgerEntrySchema = z.object({
   tick: z.number().int().nonnegative(),
   inputTokens: z.number().int().nonnegative(),
   outputTokens: z.number().int().nonnegative(),
-  /** Costo de la llamada en USD, calculado con el precio del catálogo vivo. */
+  /** De los de entrada, cuántos sirvió el proveedor desde su caché. */
+  cachedInputTokens: z.number().int().nonnegative().default(0),
+  /**
+   * Costo de la llamada en USD. Es el que informa el proveedor cuando lo
+   * informa; si no, se estima con el precio del catálogo.
+   */
   costUsd: z.number().nonnegative(),
   latencyMs: z.number().nonnegative(),
   createdAt: timestampSchema,

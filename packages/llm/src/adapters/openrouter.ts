@@ -7,6 +7,7 @@ import {
   type ChatMessage,
   type FinishReason,
   type LlmProvider,
+  type TokenUsage,
 } from "../types.js";
 import {
   ToolCallAccumulator,
@@ -98,6 +99,17 @@ export class OpenRouterProvider implements LlmProvider {
           ...(req.maxOutputTokens ? { max_tokens: req.maxOutputTokens } : {}),
           stream: true,
           stream_options: { include_usage: true },
+          // Devuelve el costo real de la llamada y cuánto salió del caché. Sin
+          // esto sólo podemos estimar con el precio de catálogo, que es el del
+          // endpoint más barato y no el que nos tocó.
+          usage: { include: true },
+          // Orden determinista de upstreams: es lo que hace que el caché de
+          // prefijo pegue entre iteraciones del mismo turno.
+          // `require_parameters` descarta los endpoints que no soportan todo lo
+          // que mandamos. Sin esto el ruteo por precio puede caer en uno que
+          // ignora `tools`, y el agente deja de llamar herramientas **en
+          // silencio**: no falla, simplemente no hace nada.
+          provider: { sort: req.routing?.sort ?? "price", require_parameters: true },
           ...(plugins ? { plugins } : {}),
         } as never,
         { signal: req.signal },
@@ -109,16 +121,24 @@ export class OpenRouterProvider implements LlmProvider {
     const calls = new ToolCallAccumulator();
     let text = "";
     let finishReason: FinishReason = "stop";
-    let usage = { inputTokens: 0, outputTokens: 0 };
+    let usage: TokenUsage = { inputTokens: 0, outputTokens: 0 };
     let modelSlug = req.model;
 
     try {
       for await (const chunk of stream) {
         if (chunk.model) modelSlug = chunk.model;
         if (chunk.usage) {
+          // `cost` y `prompt_tokens_details` son extensiones de OpenRouter: no
+          // están en los tipos del SDK de OpenAI, por eso el ensanche.
+          const extra = chunk.usage as typeof chunk.usage & {
+            cost?: number;
+            prompt_tokens_details?: { cached_tokens?: number } | null;
+          };
           usage = {
             inputTokens: chunk.usage.prompt_tokens ?? 0,
             outputTokens: chunk.usage.completion_tokens ?? 0,
+            cachedInputTokens: extra.prompt_tokens_details?.cached_tokens ?? 0,
+            reportedCostUsd: typeof extra.cost === "number" ? extra.cost : null,
           };
         }
 

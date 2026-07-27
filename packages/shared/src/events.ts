@@ -203,6 +203,7 @@ const costEvent = z.object({
   budgetUsd: z.number().positive(),
   inputTokens: z.number().int().nonnegative(),
   outputTokens: z.number().int().nonnegative(),
+  cachedInputTokens: z.number().int().nonnegative().default(0),
 });
 
 // --- Diagnóstico -----------------------------------------------------------

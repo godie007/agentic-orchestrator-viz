@@ -361,7 +361,21 @@ function crearEscritura(storage: SkillStorage): RegisteredTool {
         return fail("Falta content. Escribir un archivo vacío no le sirve a nadie.");
       }
 
-      const resultado = await storage.writeText(path, content);
+      // La versión no va en el nombre del archivo. Es la misma regla que ya
+      // aplican export_docx y export_pdf, y por acá volvía a entrar: esta
+      // corrida dejó "paquete-comercial-v25.md" al lado del PDF sin versión.
+      // Con la versión en el nombre, cada corrección deja otro archivo y el
+      // directorio termina con v22, v23 y v25 conviviendo, sin saber cuál vale.
+      const limpio = sinVersionEnNombre(path);
+      const resultado = await storage.writeText(limpio, content);
+      if (resultado.ok && limpio !== path) {
+        return ok(
+          `Escrito ${resultado.path}. Le saqué la versión al nombre: el archivo es uno solo y ` +
+            `se pisa con la corrección siguiente. La versión vive en el entregable ` +
+            `(write_artifact) y sale impresa en la portada.`,
+          resultado.path,
+        );
+      }
       return resultado.ok
         ? ok(
             `Escrito ${resultado.path} (${Math.max(1, Math.round(resultado.sizeBytes / 1024))} KB).`,
@@ -370,6 +384,19 @@ function crearEscritura(storage: SkillStorage): RegisteredTool {
         : fail(resultado.motivo);
     },
   };
+}
+
+/** Quita el `-v12` del nombre, conservando carpeta y extensión. */
+export function sinVersionEnNombre(path: string): string {
+  const barra = path.lastIndexOf("/");
+  const carpeta = barra === -1 ? "" : path.slice(0, barra + 1);
+  const archivo = path.slice(barra + 1);
+  const punto = archivo.lastIndexOf(".");
+  const base = punto === -1 ? archivo : archivo.slice(0, punto);
+  const extension = punto === -1 ? "" : archivo.slice(punto);
+  const limpia = base.replace(/[-_\s]*[vV]\d+$/, "");
+  // Si el nombre era sólo la versión no queda nada útil: se deja como estaba.
+  return limpia ? `${carpeta}${limpia}${extension}` : path;
 }
 
 export function createSkillTools(storage: SkillStorage): RegisteredTool[] {

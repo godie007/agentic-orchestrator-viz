@@ -53,12 +53,43 @@ export interface ChatRequest {
    * no la tienen la ignoran y el agente cae en la herramienta `web_search`.
    */
   webSearch?: WebSearchOptions;
+  /**
+   * Preferencia de ruteo para los proveedores que agregan varios upstreams.
+   *
+   * Sin esto cada llamada cae en un upstream distinto y **el caché nunca pega**:
+   * el prefijo está cacheado en otra máquina. Un orden determinista deja las
+   * llamadas de un turno en el mismo lugar.
+   */
+  routing?: RoutingPreference;
   signal?: AbortSignal;
+}
+
+/** Cómo elegir entre los upstreams que sirven un mismo modelo. */
+export interface RoutingPreference {
+  /** `price` es el default: es determinista y evita el endpoint caro al azar. */
+  sort: "price" | "throughput" | "latency";
 }
 
 export interface TokenUsage {
   inputTokens: number;
   outputTokens: number;
+  /**
+   * Cuántos de los de entrada salieron del caché del proveedor.
+   *
+   * Dentro de un turno la conversación crece pero su prefijo no cambia, así que
+   * casi todo se puede servir cacheado —y cuesta cerca de diez veces menos—.
+   * Medido: es la diferencia entre US$0.0022 y US$0.068 por la misma llamada.
+   */
+  cachedInputTokens?: number;
+  /**
+   * Costo real informado por el proveedor, si lo informa.
+   *
+   * Vale más que el precio del catálogo: OpenRouter publica el del endpoint
+   * **más barato** del modelo, pero rutea a cualquiera de los 18 que lo sirven,
+   * con hasta 4x de diferencia. Calcular con el de catálogo subestima la
+   * factura, y el presupuesto de la corrida deja de ser un límite real.
+   */
+  reportedCostUsd?: number | null;
 }
 
 export type FinishReason = "stop" | "tool_calls" | "length" | "content_filter" | "error";
