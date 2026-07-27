@@ -490,6 +490,7 @@ function Activity({ events, company }: { events: TraceEvent[]; company: CompanyB
           events={ventana}
           nameOf={nameOf}
           conAutor
+          orden="reciente-primero"
           titulo="Lo que viene pasando"
           vacio="Todavía no pasó nada. Ejecutá un ciclo para ver a la empresa trabajar."
         />
@@ -700,7 +701,10 @@ function armarCronologia(
    */
   const herramientaDe = (roleId: string | null): ReactNode =>
     opciones.conAutor ? (
-      <span className="shrink-0 text-[10px] text-ink-faint">{nameOf(roleId)}</span>
+      // Sólo el nombre de pila, y es lo que cede el ancho: "Diego Fernando
+      // Echeverry" dejaba a la herramienta en "obsidia…", que es justo el dato
+      // que se viene a leer.
+      <span className="truncate text-[10px] text-ink-faint">{nameOf(roleId).split(" ")[0]}</span>
     ) : null;
 
   for (const event of events) {
@@ -759,7 +763,7 @@ function armarCronologia(
           titulo: (
             <span className="flex items-baseline gap-1.5">
               {herramientaDe(event.roleId)}
-              <span className="truncate font-mono text-[11px] text-ink-dim">
+              <span className="shrink-0 font-mono text-[11px] text-ink-dim">
                 {event.toolName.replace(/^mcp__/, "")}
               </span>
             </span>
@@ -783,7 +787,7 @@ function armarCronologia(
             <span className="flex items-baseline gap-1.5">
               {herramientaDe(event.roleId)}
               <span
-                className={`truncate font-mono text-[11px] ${event.ok ? "text-ink-dim" : "text-danger"}`}
+                className={`shrink-0 font-mono text-[11px] ${event.ok ? "text-ink-dim" : "text-danger"}`}
               >
                 {event.toolName.replace(/^mcp__/, "")}
               </span>
@@ -986,29 +990,58 @@ function Cronologia({
   conAutor = false,
   titulo = "Cronología",
   vacio = "Todavía no pasó nada.",
+  orden = "cronologico",
 }: {
   events: TraceEvent[];
   nameOf: (id: string | null) => string;
   conAutor?: boolean;
   titulo?: string;
   vacio?: string;
+  /**
+   * `cronologico` para leer lo que hizo alguien de principio a fin.
+   * `reciente-primero` para mirar lo que está pasando ahora: lo último arriba,
+   * sin tener que perseguir el final de la lista.
+   */
+  orden?: "cronologico" | "reciente-primero";
 }) {
+  const alRevés = orden === "reciente-primero";
   const ciclos = useMemo(
     () => armarCronologia(events, nameOf, { conAutor }),
     [events, nameOf, conAutor],
   );
   const scroll = useRef<HTMLDivElement>(null);
-  const pegadoAlFondo = useRef(true);
+  const pegado = useRef(true);
+  const altoPrevio = useRef(0);
 
-  // La traza sigue al presente, pero sólo si ya lo estabas mirando. Si
-  // scrolleaste para atrás a leer algo, saltar al final en cada evento nuevo
-  // —llegan por SSE, varios por segundo— hace imposible leer nada.
+  /**
+   * La traza sigue al presente, pero sólo si ya lo estabas mirando.
+   *
+   * Con los eventos llegando por SSE —varios por segundo— arrastrar la vista en
+   * cada uno hace imposible leer nada. Se sigue sólo si estabas parado donde
+   * aparece lo nuevo.
+   *
+   * Con lo más reciente arriba hay además que compensar: cada evento que entra
+   * empuja hacia abajo lo que estás leyendo. Se corrige el scroll por lo que
+   * creció el contenido, así el renglón que mirabas no se mueve de lugar.
+   */
   useEffect(() => {
     const caja = scroll.current;
-    if (caja && pegadoAlFondo.current) caja.scrollTop = caja.scrollHeight;
-  }, [events.length]);
+    if (!caja) return;
+    const crecio = caja.scrollHeight - altoPrevio.current;
+    altoPrevio.current = caja.scrollHeight;
 
-  const conFilas = ciclos.filter((ciclo) => ciclo.filas.length > 0);
+    if (alRevés) {
+      if (pegado.current) caja.scrollTop = 0;
+      else if (crecio > 0) caja.scrollTop += crecio;
+    } else if (pegado.current) {
+      caja.scrollTop = caja.scrollHeight;
+    }
+  }, [events.length, alRevés]);
+
+  const conFilas = ciclos
+    .filter((ciclo) => ciclo.filas.length > 0)
+    .map((ciclo) => (alRevés ? { ...ciclo, filas: [...ciclo.filas].reverse() } : ciclo));
+  if (alRevés) conFilas.reverse();
   if (conFilas.length === 0) {
     return (
       <div className="flex min-h-0 flex-1 flex-col">
@@ -1026,14 +1059,18 @@ function Cronologia({
         <span className="text-[10px] font-semibold tracking-wide text-ink-dim uppercase">
           {titulo}
         </span>
-        <span className="text-[10px] text-ink-faint">de lo primero a lo último</span>
+        <span className="text-[10px] text-ink-faint">
+          {alRevés ? "lo último, arriba" : "de lo primero a lo último"}
+        </span>
       </div>
 
       <div
         ref={scroll}
         onScroll={(event) => {
           const caja = event.currentTarget;
-          pegadoAlFondo.current = caja.scrollHeight - caja.scrollTop - caja.clientHeight < 40;
+          pegado.current = alRevés
+            ? caja.scrollTop < 40
+            : caja.scrollHeight - caja.scrollTop - caja.clientHeight < 40;
         }}
         className="min-h-40 flex-1 overflow-auto rounded border border-line bg-canvas"
       >
@@ -1088,7 +1125,7 @@ function Cronologia({
                       </span>
                     </span>
                     {fila.detalle && (
-                      <span className="mt-0.5 line-clamp-2 block text-[10px] leading-4 text-ink-faint">
+                      <span className="mt-0.5 line-clamp-2 text-[10px] leading-4 text-ink-faint">
                         {fila.detalle}
                       </span>
                     )}
