@@ -446,8 +446,8 @@ const writeArtifact: RegisteredTool = {
     const parsed = readRequired(args, ["key", "title", "content"]);
     if (!parsed.ok) return fail(`write_artifact: ${parsed.error}`);
 
-    const problema = revisarCalidad(parsed.values.title!, parsed.values.content!);
-    if (problema) return fail(`write_artifact: ${problema}`);
+    const calidad = revisarCalidad(parsed.values.title!, parsed.values.content!);
+    if (calidad.rechazo) return fail(`write_artifact: ${calidad.rechazo}`);
 
     // Los agentes tienden a inventar una clave nueva por ciclo
     // ("propuesta-ciclo-3", "propuesta-v2", "propuesta-final") y el entregable
@@ -492,7 +492,8 @@ const writeArtifact: RegisteredTool = {
       content: parsed.values.content!,
     });
     return ok(
-      `Entregable "${artifact.title}" guardado como "${artifact.key}" v${artifact.version}.`,
+      `Entregable "${artifact.title}" guardado como "${artifact.key}" v${artifact.version}.` +
+        (calidad.aviso ? ` Para la próxima versión: ${calidad.aviso}` : ""),
       `📄 ${artifact.title} v${artifact.version}`,
     );
   },
@@ -571,42 +572,55 @@ const listArtifacts: RegisteredTool = {
 const PALABRAS_DE_PROCESO =
   /\b(ciclo\s*\d|bandeja de entrada|respuesta a pedido|seguimiento del pedido|mi turno|herramientas? (?:no )?disponibles?)\b/i;
 
-export function revisarCalidad(title: string, content: string): string | null {
+export interface Calidad {
+  /** Impide guardar: el documento no sirve así. */
+  rechazo?: string;
+  /** Se guarda igual, pero se le dice para que la próxima versión mejore. */
+  aviso?: string;
+}
+
+export function revisarCalidad(title: string, content: string): Calidad {
   if (PALABRAS_DE_PROCESO.test(title)) {
-    return (
-      `el título "${title}" habla de tu proceso interno, no del contenido. ` +
-      `Un entregable lo lee alguien de afuera: titulalo por lo que resuelve ` +
-      `("Plan de paginación", "Informe de estado"), sin ciclos ni bandejas.`
-    );
+    return {
+      rechazo:
+        `el título "${title}" habla de tu proceso interno, no del contenido. ` +
+        `Un entregable lo lee alguien de afuera: titulalo por lo que resuelve ` +
+        `("Plan de paginación", "Informe de estado"), sin ciclos ni bandejas.`,
+    };
   }
 
   const cuerpo = content.trim();
   // Una nota corta no necesita estructura; un documento sí.
-  if (cuerpo.length < 400) return null;
+  if (cuerpo.length < 400) return {};
 
   const titulos = (cuerpo.match(/^#{1,3} .+/gm) ?? []).length;
   const listas = (cuerpo.match(/^\s*(?:[-*+]|\d+[.)])\s+/gm) ?? []).length;
 
   if (titulos === 0 && listas < 3) {
-    return (
-      `el contenido es un bloque de texto sin estructura. Un entregable se lee ` +
-      `con "## Secciones", listas y tablas markdown: escribilo así y se exporta ` +
-      `a Word y PDF con esa forma.`
-    );
+    return {
+      rechazo:
+        `el contenido es un bloque de texto sin estructura. Un entregable se lee ` +
+        `con "## Secciones", listas y tablas markdown: escribilo así y se exporta ` +
+        `a Word y PDF con esa forma.`,
+    };
   }
 
+  // Un párrafo largo es un problema de estilo, no de validez: el documento ya
+  // tiene estructura. Rechazarlo costaba un turno entero por cada intento —un
+  // agente agotó sus 8 iteraciones peleando con esto— así que se guarda y se
+  // avisa, para que la versión siguiente lo corrija.
   const parrafoLargo = cuerpo
     .split(/\n\s*\n/)
     .find((parrafo) => !parrafo.startsWith("|") && parrafo.length > 900);
   if (parrafoLargo) {
-    return (
-      `hay un párrafo de ${parrafoLargo.length} caracteres sin cortes. Partilo en ` +
-      `secciones, o pasalo a lista o tabla si estás enumerando: así de largo no lo ` +
-      `lee nadie.`
-    );
+    return {
+      aviso:
+        `hay un párrafo de ${parrafoLargo.length} caracteres sin cortes. En la próxima ` +
+        `versión partilo en secciones, o pasalo a lista o tabla si estás enumerando.`,
+    };
   }
 
-  return null;
+  return {};
 }
 
 /**

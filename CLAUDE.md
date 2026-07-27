@@ -226,6 +226,11 @@ orquestador vivo escribiendo eventos de algo que ya no existe.
   `strictPort: true` para que no se corra de puerto en silencio.
 - **En grillas CSS, poné `min-w-0`** en `Panel` y columnas: sin eso `min-width:auto`
   desborda la página a lo ancho.
+- **Los nodos del organigrama se actualizan, no se rearman.** React Flow los
+  deja en `visibility: hidden` hasta medirlos; si en cada render recibe objetos
+  nuevos pierde la medición y vuelve a empezar. Con la traza llegando por SSE
+  nunca terminaba y **el grafo quedaba invisible** —nodos en el DOM, ninguno en
+  pantalla—. `OrgGraph` reusa el objeto anterior con `useNodesState`.
 - **Los roles nuevos nacen en la posición (0,0)** y se apilarían en el organigrama;
   `OrgGraph.autoLayout` los acomoda por jerarquía cuando detecta posiciones
   repetidas, y respeta las que hayas movido a mano.

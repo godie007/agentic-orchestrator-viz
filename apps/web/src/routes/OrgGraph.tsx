@@ -5,6 +5,7 @@ import {
   Handle,
   Position,
   ReactFlow,
+  useNodesState,
   type Edge,
   type Node,
   type NodeProps,
@@ -150,22 +151,37 @@ export function OrgGraph({
 }) {
   const posiciones = useMemo(() => autoLayout(roles), [roles]);
 
-  const nodes = useMemo<Node<AgentNodeData>[]>(
-    () =>
-      roles.map((role) => ({
-        id: role.id,
-        type: "agent",
-        position: posiciones.get(role.id) ?? role.position,
-        data: {
+  /**
+   * Los nodos se **actualizan**, no se rearman.
+   *
+   * React Flow mide cada nodo con un ResizeObserver y lo deja en
+   * `visibility: hidden` hasta tener su tamaño. Si en cada render le pasás
+   * objetos nuevos, pierde esa medición y vuelve a empezar: con la traza
+   * llegando por SSE y la bandeja refrescándose cada 3s, nunca terminaba de
+   * medir y **el organigrama quedaba invisible** — nodos en el DOM, ninguno en
+   * pantalla—. Reusar el objeto anterior conserva `measured` y el nodo se
+   * dibuja.
+   */
+  const [nodes, setNodes] = useNodesState<Node<AgentNodeData>>([]);
+
+  useEffect(() => {
+    setNodes((previos) =>
+      roles.map((role) => {
+        const anterior = previos.find((nodo) => nodo.id === role.id);
+        const data: AgentNodeData = {
           role,
           department: departments.find((dep) => dep.id === role.departmentId),
           activity: state.roles.get(role.id),
           selected: role.id === selectedRoleId,
           inboxCount: inboxCounts.get(role.id) ?? 0,
-        },
-      })),
-    [roles, departments, state.roles, selectedRoleId, inboxCounts, posiciones],
-  );
+        };
+        const position = posiciones.get(role.id) ?? role.position;
+        return anterior
+          ? { ...anterior, position, data }
+          : { id: role.id, type: "agent", position, data };
+      }),
+    );
+  }, [roles, departments, state.roles, selectedRoleId, inboxCounts, posiciones, setNodes]);
 
   const edges = useMemo<Edge[]>(() => {
     const result: Edge[] = [];

@@ -286,11 +286,15 @@ describe("un entregable tiene que parecer un documento", () => {
     expect((await escribir("Nota", "Confirmado con el cliente para el jueves.")).ok).toBe(true);
   });
 
-  it("rechaza un párrafo interminable aunque haya secciones", async () => {
+  it("un párrafo interminable se guarda pero se avisa", async () => {
+    // Rechazarlo costaba un turno por intento —un agente agotó sus 8
+    // iteraciones peleando con esto— y el documento ya tenía estructura: es un
+    // problema de estilo, no de validez.
     const largo = ["# Informe", "", "## Detalle", "", "x".repeat(950)].join("\n");
     const result = await escribir("Informe", largo);
 
-    expect(result.ok).toBe(false);
+    expect(result.ok).toBe(true);
+    expect(result.content).toContain("próxima versión");
     expect(result.content).toContain("sin cortes");
   });
 
