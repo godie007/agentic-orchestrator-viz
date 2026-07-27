@@ -66,6 +66,11 @@ export async function runAgentTurn(
 
   deps.ledger.assertWithinBudget();
 
+  // ¿Quedó un turno de este rol cortado a la mitad? Se continúa, no se
+  // reempieza: la conversación guardada ya tiene la bandeja leída, las fuentes
+  // consultadas y los resultados de las herramientas que sí funcionaron.
+  const interrumpido = state.tomarTurnoInterrumpido(role.id);
+
   const inbox = state.drainInbox(role.id);
   const tasks = await state.listTasks(role.id);
 
@@ -112,18 +117,64 @@ export async function runAgentTurn(
   });
 
   const byName = new Map(selection.tools.map((tool) => [tool.name, tool]));
-  const conversation: ChatMessage[] = [
-    { role: "system", content: buildSystemPrompt(state, role, deps.objective) },
-    {
-      role: "user",
-      content: buildTurnPrompt(state, role, inbox, tasks, {
-        tick: state.tick,
-        maxTicks: deps.maxTicks,
-        spentUsd: ledger.spentUsd,
-        budgetUsd: ledger.budgetUsd,
-      }),
-    },
-  ];
+
+  const conversation: ChatMessage[] = interrumpido
+    ? [
+        ...interrumpido.conversation,
+        {
+          role: "user",
+          content:
+            `Tu turno anterior se cortó antes de terminar (${interrumpido.motivo}). ` +
+            `Seguís desde donde quedaste: todo lo que está más arriba ya lo hiciste, ` +
+            `no lo repitas. Revisá qué te faltaba y cerrá el turno.` +
+            (inbox.length > 0
+              ? `\n\nMientras tanto llegó esto:\n${resumirBandeja(inbox)}`
+              : ""),
+        },
+      ]
+    : [
+        { role: "system", content: buildSystemPrompt(state, role, deps.objective) },
+        {
+          role: "user",
+          content: buildTurnPrompt(state, role, inbox, tasks, {
+            tick: state.tick,
+            maxTicks: deps.maxTicks,
+            spentUsd: ledger.spentUsd,
+            budgetUsd: ledger.budgetUsd,
+          }),
+        },
+      ];
+
+  // Al retomar se conserva a quién le estaba contestando: si no, `reply` se
+  // queda sin destinatario y el pedido que originó el turno nunca se cierra.
+  const hilo = interrumpido
+    ? {
+        messageId: interrumpido.pendingMessageId,
+        threadId: interrumpido.threadId,
+        replyToRoleId: interrumpido.replyToRoleId,
+      }
+    : {
+        messageId: pending?.id ?? null,
+        threadId: pending?.threadId ?? null,
+        replyToRoleId: pending?.fromRoleId ?? null,
+      };
+
+  /**
+   * Cuántas iteraciones merece este turno.
+   *
+   * `maxTurns` del rol deja de ser un número fijo para ser el **piso**: un
+   * agente con un mensaje corto no necesita doce vueltas, y uno que tiene que
+   * leer cinco pedidos, consultar fuentes y redactar un entregable no entra en
+   * doce. Un tope igual para las dos situaciones falla en las dos: sobra en la
+   * primera y corta a la mitad en la segunda —vimos a un coordinador tocar el
+   * techo en 11 de 12 turnos, dejando entregables escritos por la mitad—.
+   */
+  const presupuesto = presupuestoDeIteraciones(role, {
+    mensajes: inbox.length,
+    tareas: tasks.length,
+    caracteres: taskContext.length,
+    reanudando: interrumpido != null,
+  });
 
   let iterations = 0;
   let costUsd = 0;
@@ -148,7 +199,11 @@ export async function runAgentTurn(
   // "pensando" para siempre, porque la UI espera un `agent.turn_end` que nunca
   // llega.
   try {
-  while (iterations < role.maxTurns) {
+  // El techo se puede estirar mientras el agente **avance**. Un turno que sigue
+  // ejecutando herramientas con éxito está trabajando; uno que solo habla, no.
+  let ultimoAvance = 0;
+  while (iterations < presupuesto.techo) {
+    if (iterations >= presupuesto.base && iterations - ultimoAvance >= 2) break;
     iterations++;
     ledger.assertWithinBudget();
 
@@ -234,9 +289,9 @@ export async function runAgentTurn(
       tick: state.tick,
       actor: role,
       workspace,
-      currentThreadId: pending?.threadId ?? null,
-      currentMessageId: pending?.id ?? null,
-      replyToRoleId: pending?.fromRoleId ?? null,
+      currentThreadId: hilo.threadId,
+      currentMessageId: hilo.messageId,
+      replyToRoleId: hilo.replyToRoleId,
       ...(deps.signal ? { signal: deps.signal } : {}),
     };
 
@@ -244,6 +299,9 @@ export async function runAgentTurn(
     // porque el orden en que se envían mensajes y se cambian tareas importa.
     const results = await executeCalls(calls, byName, ctx, state, bus);
     conversation.push(...results.messages);
+    // Avance = al menos una herramienta de esta vuelta hizo algo. Es lo que
+    // habilita a estirar el turno más allá de la base.
+    if (results.failures.length < calls.length) ultimoAvance = iterations;
     if (results.awaitingApproval) {
       awaitingApproval = true;
       break;
@@ -290,7 +348,7 @@ export async function runAgentTurn(
     }
   }
 
-  if (iterations >= role.maxTurns) {
+  if (iterations >= presupuesto.techo) {
     bus.emit({
       type: "log",
       runId,
@@ -298,12 +356,36 @@ export async function runAgentTurn(
       level: "warn",
       roleId: role.id,
       message:
-        `${role.name} alcanzó su límite de ${role.maxTurns} iteraciones y se cortó el turno. ` +
-        `Si pasa seguido, subí maxTurns del rol o acotá su trabajo.`,
+        `${role.name} agotó las ${presupuesto.techo} iteraciones que le tocaban ` +
+        `(${presupuesto.base} de base por su carga, estiradas mientras avanzaba). ` +
+        `Sigue en el ciclo próximo desde donde quedó.`,
     });
   }
 
   return { iterations, costUsd, summary, awaitingApproval };
+  } catch (error) {
+    // Lo que se hizo hasta acá no se tira: se guarda para continuarlo en el
+    // ciclo siguiente. Reempezar de cero paga de nuevo todo el contexto y
+    // vuelve a ejecutar herramientas que ya habían salido bien.
+    const motivo = error instanceof Error ? error.message : String(error);
+    const guardado = state.guardarTurnoInterrumpido(role.id, {
+      conversation: podarSinRespuesta(conversation),
+      motivo,
+      pendingMessageId: hilo.messageId,
+      threadId: hilo.threadId,
+      replyToRoleId: hilo.replyToRoleId,
+    });
+    bus.emit({
+      type: "log",
+      runId,
+      tick: state.tick,
+      level: "warn",
+      roleId: role.id,
+      message: guardado
+        ? `${role.name} se cortó por "${motivo}", pero su turno queda guardado: sigue en el ciclo próximo desde donde estaba.`
+        : `${role.name} se cortó por "${motivo}" demasiadas veces seguidas. Se abandona el turno.`,
+    });
+    throw error;
   } finally {
     bus.emit({
       type: "agent.turn_end",
@@ -704,4 +786,56 @@ function emitCoordinationEffect(
       toolName: approval.toolName,
     });
   }
+}
+
+
+/**
+ * Poda las llamadas a herramienta que quedaron sin respuesta.
+ *
+ * Si el turno se corta justo después de que el modelo pidió una herramienta, la
+ * conversación termina en un mensaje del asistente con `toolCalls` y ningún
+ * resultado. Varios proveedores rechazan ese request con un 400 —el protocolo
+ * exige que a cada llamada le siga su resultado—, así que al retomar fallaría
+ * en la primera iteración, para siempre. Se cortan esas colas antes de guardar.
+ */
+export function podarSinRespuesta(conversation: ChatMessage[]): ChatMessage[] {
+  const podada = [...conversation];
+  while (podada.length > 0) {
+    const ultimo = podada[podada.length - 1]!;
+    const sinResponder =
+      ultimo.role === "assistant" && (ultimo.toolCalls?.length ?? 0) > 0;
+    if (!sinResponder) break;
+    podada.pop();
+  }
+  return podada;
+}
+
+/** Las novedades que llegaron mientras el turno estaba cortado, en dos líneas. */
+function resumirBandeja(inbox: { subject: string; body: string }[]): string {
+  return inbox
+    .map((message) => `- ${message.subject}: ${message.body.slice(0, 200)}`)
+    .join("\n");
+}
+
+/**
+ * Traduce la carga de trabajo del turno a una cantidad de iteraciones.
+ *
+ * Cada pedido de la bandeja se lee y se contesta —dos vueltas como mínimo—, y
+ * un contexto largo se recorre en varias consultas antes de poder escribir. El
+ * techo duplica la base pero solo se alcanza si el agente sigue avanzando, y
+ * nunca pasa de 50, que es el máximo que admite el esquema del rol.
+ */
+export function presupuestoDeIteraciones(
+  role: Role,
+  trabajo: { mensajes: number; tareas: number; caracteres: number; reanudando: boolean },
+): { base: number; techo: number } {
+  const porBandeja = trabajo.mensajes * 2;
+  const porTareas = trabajo.tareas;
+  const porContexto = Math.min(6, Math.floor(trabajo.caracteres / 4000));
+  // Al retomar ya se gastaron vueltas en el ciclo anterior: alcanza con lo que
+  // falta para cerrar, no con el turno entero otra vez.
+  const escala = trabajo.reanudando ? 0.5 : 1;
+
+  const base = Math.max(3, Math.round((role.maxTurns + porBandeja + porTareas + porContexto) * escala));
+  return { base, techo: Math.min(50, base * 2) };
 }

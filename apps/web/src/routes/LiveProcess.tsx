@@ -4,7 +4,7 @@ import type { TraceEvent } from "@orq/shared";
 import { api, type CompanyBundle } from "../api.js";
 import { useRunStream } from "../lib/stream.js";
 import { derive, MESSAGE_COLOR, MESSAGE_LABEL, recentFlows } from "../lib/derive.js";
-import { Button, Empty, Field, Panel, Status, inputClass, money, relativeTime } from "../lib/ui.js";
+import { Button, Empty, Field, Panel, Status, inputClass, money, relativeTime, tokens } from "../lib/ui.js";
 import { OrgGraph } from "./OrgGraph.js";
 
 /**
@@ -201,6 +201,12 @@ export function LiveProcess({ company }: { company: CompanyBundle }) {
             className={`text-xs ${state.totalCostUsd / (state.budgetUsd || 1) > 0.8 ? "text-warn" : "text-ink-dim"}`}
           >
             {money(state.totalCostUsd)} / {money(run?.budgetUsd ?? 0)}
+          </span>
+          <span
+            className="text-xs text-ink-dim"
+            title={`${state.inputTokens.toLocaleString("es-AR")} tokens de entrada · ${state.outputTokens.toLocaleString("es-AR")} de salida`}
+          >
+            ↓{tokens(state.inputTokens)} ↑{tokens(state.outputTokens)}
           </span>
           <span className={`text-xs ${connected ? "text-ok" : "text-ink-faint"}`}>
             {connected ? "● en vivo" : "○ desconectado"}
@@ -573,6 +579,11 @@ function RoleDetail({
           <span>autoridad: {role.authority}</span>
           <span>turnos: {activity?.turns ?? 0}</span>
           <span>gasto: {money(activity?.costUsd ?? 0)}</span>
+          <span
+            title={`${(activity?.inputTokens ?? 0).toLocaleString("es-AR")} tokens de entrada · ${(activity?.outputTokens ?? 0).toLocaleString("es-AR")} de salida`}
+          >
+            tokens: ↓{tokens(activity?.inputTokens ?? 0)} ↑{tokens(activity?.outputTokens ?? 0)}
+          </span>
         </div>
 
         {selection && (

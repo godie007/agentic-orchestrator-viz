@@ -13,6 +13,7 @@ import type {
   Task,
   Tool,
 } from "@orq/shared";
+import type { ChatMessage } from "@orq/llm";
 import type {
   AgentWorkspace,
   CreateTaskInput,
@@ -580,6 +581,46 @@ export class RunState {
   private reenvios = new Map<string, number>();
   private static readonly REENVIOS_MAX = 2;
 
+  // --- Turnos interrumpidos -------------------------------------------------
+
+  /**
+   * Turnos que se cortaron a la mitad y pueden seguir en el ciclo siguiente.
+   *
+   * Un turno es trabajo acumulado: el agente leyó su bandeja, consultó fuentes
+   * y ejecutó herramientas. Si el proveedor se cae en la iteración 9, tirar esa
+   * conversación y arrancar de cero en el ciclo siguiente cuesta el doble y
+   * llega al mismo lugar —si es que llega—. Guardamos la conversación y el
+   * turno **continúa** desde donde quedó.
+   */
+  private turnosInterrumpidos = new Map<string, TurnoInterrumpido>();
+  private static readonly REANUDACIONES_MAX = 3;
+
+  /**
+   * Guarda lo que quedó de un turno para continuarlo. Devuelve `false` si ya se
+   * reanudó demasiadas veces: a esa altura no es una caída pasajera sino algo
+   * que no se va a arreglar solo, y seguir intentando gasta la corrida.
+   */
+  guardarTurnoInterrumpido(roleId: string, datos: Omit<TurnoInterrumpido, "reanudaciones">): boolean {
+    const previas = this.turnosInterrumpidos.get(roleId)?.reanudaciones ?? 0;
+    if (previas >= RunState.REANUDACIONES_MAX) {
+      this.turnosInterrumpidos.delete(roleId);
+      return false;
+    }
+    this.turnosInterrumpidos.set(roleId, { ...datos, reanudaciones: previas + 1 });
+    return true;
+  }
+
+  /** Devuelve el turno cortado de un rol y lo saca: se consume una sola vez. */
+  tomarTurnoInterrumpido(roleId: string): TurnoInterrumpido | null {
+    const turno = this.turnosInterrumpidos.get(roleId) ?? null;
+    this.turnosInterrumpidos.delete(roleId);
+    return turno;
+  }
+
+  descartarTurnoInterrumpido(roleId: string): void {
+    this.turnosInterrumpidos.delete(roleId);
+  }
+
   /** Roles con trabajo pendiente: bandeja con algo, o tareas sin terminar. */
   rolesWithWork(): string[] {
     const active = new Set<string>();
@@ -591,6 +632,10 @@ export class RunState {
         active.add(task.assigneeRoleId);
       }
     }
+    // Un turno cortado a la mitad es trabajo pendiente. Si no se cuenta acá, el
+    // agente no vuelve a ser convocado y la conversación guardada no la
+    // continúa nadie: guardarla no serviría de nada.
+    for (const roleId of this.turnosInterrumpidos.keys()) active.add(roleId);
     return [...active];
   }
 
@@ -623,4 +668,17 @@ function normalize(text: string): string {
     .replace(/[^a-z0-9 ]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+/** Lo que sobrevive de un turno que se cortó, para poder continuarlo. */
+export interface TurnoInterrumpido {
+  /** La conversación tal como quedó, ya podada de llamadas sin respuesta. */
+  conversation: ChatMessage[];
+  /** Qué lo cortó, para poder decírselo al modelo al retomar. */
+  motivo: string;
+  /** El pedido que estaba atendiendo, para que `reply` siga sabiendo a quién. */
+  pendingMessageId: string | null;
+  threadId: string | null;
+  replyToRoleId: string | null;
+  reanudaciones: number;
 }

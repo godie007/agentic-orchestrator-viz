@@ -16,6 +16,8 @@ export interface RoleActivity {
   runningTool: string | null;
   turns: number;
   costUsd: number;
+  inputTokens: number;
+  outputTokens: number;
   lastSummary: string | null;
 }
 
@@ -46,6 +48,14 @@ export interface DerivedState {
   maxTick: number;
   totalCostUsd: number;
   budgetUsd: number;
+  /**
+   * Tokens consumidos por la corrida. El costo solo dice cuánto salió; los
+   * tokens dicen **por qué**: un turno caro con poca salida es contexto que se
+   * reenvía entero en cada iteración, y eso se corrige de otra manera que un
+   * turno caro por escribir mucho.
+   */
+  inputTokens: number;
+  outputTokens: number;
   status: string;
   stopReason: string | null;
   /** Cuántos eventos hay por tick, para dibujar la densidad del timeline. */
@@ -53,7 +63,16 @@ export interface DerivedState {
 }
 
 function emptyRole(): RoleActivity {
-  return { thinking: false, modelSlug: null, runningTool: null, turns: 0, costUsd: 0, lastSummary: null };
+  return {
+    thinking: false,
+    modelSlug: null,
+    runningTool: null,
+    turns: 0,
+    costUsd: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    lastSummary: null,
+  };
 }
 
 export function derive(events: TraceEvent[], upTo = events.length): DerivedState {
@@ -67,6 +86,8 @@ export function derive(events: TraceEvent[], upTo = events.length): DerivedState
   let maxTick = 0;
   let totalCostUsd = 0;
   let budgetUsd = 0;
+  let inputTokens = 0;
+  let outputTokens = 0;
   let status = "idle";
   let stopReason: string | null = null;
 
@@ -147,10 +168,20 @@ export function derive(events: TraceEvent[], upTo = events.length): DerivedState
         break;
       }
 
-      case "cost.updated":
+      case "cost.updated": {
         totalCostUsd = event.totalUsd;
         budgetUsd = event.budgetUsd;
+        inputTokens += event.inputTokens;
+        outputTokens += event.outputTokens;
+        // El evento trae el rol que gastó, así que el desglose por agente sale
+        // del mismo lugar que el total: no hay dos fuentes que puedan diferir.
+        if (event.roleId) {
+          const role = roleOf(event.roleId);
+          role.inputTokens += event.inputTokens;
+          role.outputTokens += event.outputTokens;
+        }
         break;
+      }
     }
   }
 
@@ -163,6 +194,8 @@ export function derive(events: TraceEvent[], upTo = events.length): DerivedState
     maxTick,
     totalCostUsd,
     budgetUsd,
+    inputTokens,
+    outputTokens,
     status,
     stopReason,
     eventsPerTick,

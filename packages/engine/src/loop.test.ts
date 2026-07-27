@@ -4,7 +4,7 @@ import { ToolRegistry, type RegisteredTool } from "@orq/tools";
 import type { TraceEvent } from "@orq/shared";
 import { EventBus } from "./events.js";
 import { RunState, type CompanyConfig } from "./state.js";
-import { runAgentTurn } from "./loop.js";
+import { podarSinRespuesta, presupuestoDeIteraciones, runAgentTurn } from "./loop.js";
 import { FakeProvider } from "./testing/fake-provider.js";
 import { makeCompany, makeDepartment, makeRole, makeRun } from "./testing/factory.js";
 
@@ -238,4 +238,121 @@ describe("una llamada lenta no puede bloquear el ciclo", () => {
     // Detener la corrida significa detenerla, no reintentar cuatro veces.
     expect(providers.intentos()).toBe(1);
   }, 30_000);
+});
+
+describe("un turno cortado continúa, no reempieza", () => {
+  it("guarda la conversación y la retoma en el ciclo siguiente", async () => {
+    const { agente, state, bus, eventos, tools } = escenario();
+
+    // Primera vuelta: ejecuta una herramienta y después el proveedor se cae.
+    let llamadas = 0;
+    const caido = new FakeProvider(() => {
+      llamadas++;
+      if (llamadas === 1) {
+        return {
+          text: "Empiezo por leer el archivo.",
+          toolCalls: [{ name: "leer_archivo", arguments: { path: "/a.ts" } }],
+        };
+      }
+      throw new Error("proveedor saturado");
+    });
+    const providers = new ProviderRegistry();
+    providers.register(caido);
+
+    await expect(
+      runAgentTurn(state, agente, {
+        bus,
+        providers,
+        tools,
+        ledger: new RunLedger(10),
+        objective: "Leer el código",
+        maxTicks: 5,
+      }),
+    ).rejects.toThrow();
+
+    const guardado = eventos.find(
+      (event) => event.type === "log" && event.message.includes("queda guardado"),
+    );
+    expect(guardado).toBeDefined();
+
+    // El rol sigue teniendo trabajo aunque su bandeja esté vacía: si no, nadie
+    // lo volvería a convocar y la conversación guardada moriría ahí.
+    expect(state.rolesWithWork()).toContain(agente.id);
+
+    // Segunda vuelta: un proveedor sano retoma.
+    const sano = new FakeProvider(() => ({ text: "Ya lo tenía leído; cierro." }));
+    const providers2 = new ProviderRegistry();
+    providers2.register(sano);
+
+    const result = await runAgentTurn(state, agente, {
+      bus,
+      providers: providers2,
+      tools,
+      ledger: new RunLedger(10),
+      objective: "Leer el código",
+      maxTicks: 5,
+    });
+
+    expect(result.iterations).toBe(1);
+
+    // La clave: el turno retomado arranca con lo que ya había hecho, no de cero.
+    // Ojo: `messages` es el mismo array que el loop sigue usando, así que se
+    // busca por contenido y no por posición.
+    const contexto = sano.calls[0]!.messages;
+    expect(contexto.some((m) => m.content.includes("Empiezo por leer el archivo"))).toBe(true);
+    expect(contexto.some((m) => m.content.includes("se cortó antes de terminar"))).toBe(true);
+
+    // Y ya no queda nada pendiente: el turno se consume una sola vez.
+    expect(state.rolesWithWork()).not.toContain(agente.id);
+  });
+
+  it("no guarda una llamada a herramienta sin su resultado", () => {
+    // El protocolo exige que a cada tool call le siga su resultado. Guardar la
+    // cola sin responder haría fallar el retome con un 400, para siempre.
+    const podada = podarSinRespuesta([
+      { role: "user", content: "hola" },
+      { role: "assistant", content: "leo", toolCalls: [{ id: "c1", name: "leer_archivo", arguments: {} }] },
+    ]);
+    expect(podada).toHaveLength(1);
+  });
+});
+
+describe("presupuesto dinámico de iteraciones", () => {
+  const rol = (maxTurns: number) => ({ maxTurns }) as never;
+
+  it("le da más vueltas al que tiene más trabajo encima", () => {
+    const liviano = presupuestoDeIteraciones(rol(8), {
+      mensajes: 1,
+      tareas: 0,
+      caracteres: 500,
+      reanudando: false,
+    });
+    const cargado = presupuestoDeIteraciones(rol(8), {
+      mensajes: 5,
+      tareas: 3,
+      caracteres: 40_000,
+      reanudando: false,
+    });
+
+    expect(cargado.base).toBeGreaterThan(liviano.base);
+    expect(liviano.base).toBeGreaterThanOrEqual(8); // el del rol es el piso
+    expect(cargado.techo).toBeLessThanOrEqual(50); // y el esquema es el techo
+  });
+
+  it("al retomar pide menos: ya se gastaron vueltas antes", () => {
+    const entero = presupuestoDeIteraciones(rol(10), {
+      mensajes: 2,
+      tareas: 0,
+      caracteres: 0,
+      reanudando: false,
+    });
+    const retomado = presupuestoDeIteraciones(rol(10), {
+      mensajes: 2,
+      tareas: 0,
+      caracteres: 0,
+      reanudando: true,
+    });
+    expect(retomado.base).toBeLessThan(entero.base);
+    expect(retomado.base).toBeGreaterThanOrEqual(3);
+  });
 });

@@ -122,6 +122,18 @@ export function money(value: number): string {
   return value < 0.01 && value > 0 ? `US$${value.toFixed(5)}` : `US$${value.toFixed(3)}`;
 }
 
+/**
+ * Cantidad de tokens en forma legible: 1.2M, 348k, 812.
+ *
+ * En una corrida real son millones, y el número crudo con separadores ocupa
+ * más de lo que informa —lo que importa es el orden de magnitud y si creció—.
+ */
+export function tokens(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
+  if (value >= 1_000) return `${Math.round(value / 1_000)}k`;
+  return String(value);
+}
+
 export function relativeTime(at: number): string {
   const seconds = Math.round((Date.now() - at) / 1000);
   if (seconds < 60) return `hace ${seconds}s`;

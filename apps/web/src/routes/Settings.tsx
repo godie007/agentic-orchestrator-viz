@@ -548,7 +548,10 @@ function RoleEditor({
                 ))}
             </select>
           </Field>
-          <Field label="Máx. iteraciones por turno">
+          <Field
+            label="Iteraciones base por turno"
+            hint="Es el piso, no el techo: el motor suma vueltas según la carga del turno y las estira mientras el agente avance."
+          >
             <input
               type="number"
               min={1}
