@@ -17,7 +17,7 @@ export type Block =
   | { kind: "heading"; level: 1 | 2 | 3; spans: Span[] }
   | { kind: "paragraph"; spans: Span[] }
   | { kind: "bullet"; level: number; spans: Span[] }
-  | { kind: "numbered"; level: number; spans: Span[] }
+  | { kind: "numbered"; level: number; spans: Span[]; index: number }
   | { kind: "quote"; spans: Span[] }
   | { kind: "code"; text: string }
   | { kind: "table"; header: string[]; rows: string[][] }
@@ -138,10 +138,18 @@ export function parseMarkdown(source: string): Block[] {
       continue;
     }
 
-    const numbered = /^\s*\d+[.)]\s+(.*)$/.exec(line);
+    const numbered = /^\s*(\d+)[.)]\s+(.*)$/.exec(line);
     if (numbered) {
       cerrarParrafo();
-      blocks.push({ kind: "numbered", level: nivel, spans: parseSpans(numbered[1]!) });
+      // Se conserva el número escrito por el autor. Word renumera solo, pero el
+      // PDF lo dibuja tal cual: sin esto una lista de pasos quedaba en viñetas
+      // y se perdía el orden, que en un procedimiento es el contenido.
+      blocks.push({
+        kind: "numbered",
+        level: nivel,
+        spans: parseSpans(numbered[2]!),
+        index: Number(numbered[1]),
+      });
       continue;
     }
 

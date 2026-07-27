@@ -128,10 +128,31 @@ describe("título de portada", () => {
 });
 
 describe("archivos generados", () => {
-  const markdown = "# Título\n\nUn párrafo con **negrita**.\n\n- punto uno\n";
+  const markdown = [
+    "# Título",
+    "",
+    "Un párrafo con **negrita**.",
+    "",
+    "## Pasos",
+    "1. Primero",
+    "2. Segundo",
+    "",
+    "| Endpoint | Estado |",
+    "|---|---|",
+    "| photos | keyset |",
+  ].join("\n");
+
+  const meta = {
+    title: "Plan de paginación",
+    company: "INSPIA",
+    author: "Lucas",
+    authorTitle: "Desarrollador",
+    version: 3,
+    date: "26 de julio de 2026",
+  };
 
   it("el .docx es un zip con el XML de Word adentro", async () => {
-    const bytes = await renderDocx(markdown, "Plan de paginación");
+    const bytes = await renderDocx(markdown, meta);
 
     // Un .docx es un zip: tiene que empezar con la firma PK.
     expect(bytes.subarray(0, 2).toString("latin1")).toBe("PK");
@@ -139,20 +160,64 @@ describe("archivos generados", () => {
     expect(bytes.toString("latin1")).toContain("word/document.xml");
   });
 
-  it("el .pdf declara su versión y termina bien", async () => {
-    const bytes = await renderPdf(markdown, "Plan de paginación");
+  it("el .docx trae portada, numeración, encabezado y pie", async () => {
+    const xml = await docxXml(renderDocx(markdown, meta));
+
+    // Portada: quién lo emite y quién lo firma.
+    expect(xml).toContain("INSPIA");
+    expect(xml).toContain("Lucas");
+    expect(xml).toContain("Desarrollador");
+    expect(xml).toContain("26 de julio de 2026");
+    // Salto de página entre portada y cuerpo.
+    expect(xml).toContain("<w:br w:type=\"page\"/>");
+    // Lista numerada de verdad, no viñetas.
+    expect(xml).toContain("<w:numPr>");
+    // Tabla con bordes.
+    expect(xml).toContain("<w:tbl>");
+  });
+
+  it("el .docx numera las páginas en el pie", async () => {
+    const partes = await docxPartes(renderDocx(markdown, meta));
+    const pie = partes.find((p) => p.startsWith("word/footer"));
+    expect(pie).toBeDefined();
+    const encabezado = partes.find((p) => p.startsWith("word/header"));
+    expect(encabezado).toBeDefined();
+  });
+
+  it("el .pdf declara su versión, autor y termina bien", async () => {
+    const bytes = await renderPdf(markdown, meta);
     const texto = bytes.toString("latin1");
 
     expect(texto.startsWith("%PDF-")).toBe(true);
     // Sin el EOF el visor lo da por corrupto.
     expect(texto.trimEnd().endsWith("%%EOF")).toBe(true);
     expect(texto).toContain("/Title");
+    expect(texto).toContain("/Author");
     expect(bytes.length).toBeGreaterThan(500);
   });
 
+  it("el .pdf tiene portada aparte del cuerpo", async () => {
+    // Con portada, el documento más corto ya son dos páginas.
+    expect(paginas(await renderPdf("Una línea.", meta))).toBe(2);
+  });
+
+  it("no agrega páginas en blanco al numerar el pie", async () => {
+    // pdfkit agrega una página cada vez que se escribe debajo del margen
+    // inferior. Con el pie por página el documento salía con el doble de
+    // páginas, la mitad vacías, y sin numeración visible.
+    const bytes = await renderPdf("Una línea corta.", meta);
+    expect(paginas(bytes)).toBe(2); // portada + cuerpo, nada más
+  });
+
   it("no se cae con un entregable vacío", async () => {
-    await expect(renderDocx("", "Vacío")).resolves.toBeInstanceOf(Buffer);
-    await expect(renderPdf("", "Vacío")).resolves.toBeInstanceOf(Buffer);
+    await expect(renderDocx("", { title: "Vacío" })).resolves.toBeInstanceOf(Buffer);
+    await expect(renderPdf("", { title: "Vacío" })).resolves.toBeInstanceOf(Buffer);
+  });
+
+  it("acepta solo el título, sin metadatos", async () => {
+    // Compatibilidad: quien no tenga los datos de portada sigue pudiendo generar.
+    await expect(renderDocx(markdown, "Sin metadatos")).resolves.toBeInstanceOf(Buffer);
+    await expect(renderPdf(markdown, "Sin metadatos")).resolves.toBeInstanceOf(Buffer);
   });
 });
 
@@ -197,10 +262,13 @@ describe("herramienta de exportación", () => {
         if (prop === "readArtifact")
           return async (key: string) => {
             const encontrado = artefactos.find((a) => a.key === key);
-            return encontrado ? { ...encontrado, title: "Doc", version: 2 } : null;
+            return encontrado
+              ? { ...encontrado, title: "Doc", version: 2, createdAt: 1_800_000_000_000 }
+              : null;
           };
         if (prop === "listArtifacts")
           return async () => artefactos.map((a) => ({ ...a, title: "Doc", version: 2 }));
+        if (prop === "company") return { name: "INSPIA" };
         return () => {
           throw new Error(`no esperado: ${String(prop)}`);
         };
@@ -208,7 +276,10 @@ describe("herramienta de exportación", () => {
     });
 
   const ctx = (artefactos: Array<{ key: string; content: string }>): ToolContext =>
-    ({ workspace: workspaceCon(artefactos) }) as unknown as ToolContext;
+    ({
+      workspace: workspaceCon(artefactos),
+      actor: { name: "Lucas", title: "Desarrollador", authority: "executive" },
+    }) as unknown as ToolContext;
 
   const skills = createSkillTools(storage);
 
@@ -481,3 +552,30 @@ describe("crear y modificar documentos", () => {
     expect((await escribir({ content: "algo" })).ok).toBe(false);
   });
 });
+
+/**
+ * Un `.docx` es un zip: para verificar el contenido hay que descomprimirlo.
+ * Buscar texto en los bytes crudos solo encuentra los nombres de las entradas,
+ * que van sin comprimir, y da una falsa sensación de cobertura.
+ */
+async function docxPartes(promesa: Promise<Buffer>): Promise<string[]> {
+  const { default: JSZip } = await import("jszip");
+  const zip = await JSZip.loadAsync(await promesa);
+  return Object.keys(zip.files);
+}
+
+async function docxXml(promesa: Promise<Buffer>): Promise<string> {
+  const { default: JSZip } = await import("jszip");
+  const zip = await JSZip.loadAsync(await promesa);
+  const partes = await Promise.all(
+    Object.keys(zip.files)
+      .filter((nombre) => nombre.endsWith(".xml"))
+      .map((nombre) => zip.files[nombre]!.async("string")),
+  );
+  return partes.join("\n");
+}
+
+/** Cuenta las páginas de un PDF por sus objetos `/Type /Page`. */
+function paginas(bytes: Buffer): number {
+  return (bytes.toString("latin1").match(/\/Type\s*\/Page[^s]/g) ?? []).length;
+}

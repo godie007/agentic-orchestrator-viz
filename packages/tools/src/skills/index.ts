@@ -4,7 +4,8 @@ import { puedeBorrar } from "./permisos.js";
 
 export { parseMarkdown, parseSpans, spansToText } from "./markdown.js";
 export type { Block, Span } from "./markdown.js";
-export { renderDocx, renderPdf } from "./render.js";
+export { renderDocx, renderPdf, cuerpoSinTituloRepetido } from "./render.js";
+export type { DocumentMeta } from "./render.js";
 export { puedeBorrar } from "./permisos.js";
 export type { ArchivoParaBorrar, VeredictoBorrado } from "./permisos.js";
 
@@ -117,7 +118,22 @@ function crearSkill(formato: Formato, storage: SkillStorage): RegisteredTool {
       }
 
       const carpeta = String(args.folder ?? "").trim();
-      const bytes = await render(artifact.content, artifact.title);
+      // La portada la arma el sistema, no el modelo: quién firma y de qué
+      // empresa es información que ya tenemos y que un agente puede escribir
+      // mal. La fecha entra formateada desde acá porque el render no tiene
+      // reloj —así los tests son deterministas—.
+      const bytes = await render(artifact.content, {
+        title: artifact.title,
+        company: ctx.workspace.company.name,
+        author: ctx.actor.name,
+        authorTitle: ctx.actor.title,
+        version: artifact.version,
+        date: new Date(artifact.createdAt).toLocaleDateString("es-AR", {
+          day: "2-digit",
+          month: "long",
+          year: "numeric",
+        }),
+      });
       const guardado = await storage.save({
         filename: `${artifact.key}-v${artifact.version}.${extension}`,
         ...(carpeta ? { folder: carpeta } : {}),
