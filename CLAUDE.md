@@ -88,10 +88,30 @@ numeradas de verdad y control de huérfanos. La portada la compone el sistema co
 datos que ya tiene (`DocumentMeta`), no el modelo. **La fecha entra formateada
 desde el llamador**: el render no tiene reloj, y así los tests son deterministas.
 
-Dos trampas de pdfkit que ya costaron caro: escribir debajo del margen inferior
+**Un archivo por entregable y formato**, no uno por versión: `key.pdf`, no
+`key-v3.pdf`. Con la versión en el nombre cada re-exportación dejaba otro
+archivo y pedir un PDF terminaba en v1, v2 y v3 conviviendo. La versión va en la
+portada, y al exportar se borran los `key-vN.ext` que dejó la forma vieja.
+
+**`write_artifact` rechaza lo que no es un entregable** (`revisarCalidad`): un
+título que habla del proceso interno —"Ciclo 2", "Bandeja de entrada"— o un muro
+de texto de más de 400 caracteres sin una sola sección. El render maqueta lo que
+recibe, pero no puede inventar una estructura que no está. Se verifica en la
+herramienta y no solo en el prompt: un agente puede ignorar una instrucción,
+no al ejecutor.
+
+Tres trampas de pdfkit que ya costaron caro: escribir debajo del margen inferior
 **agrega una página** —el pie duplicaba el documento— así que se baja
-`page.margins.bottom` mientras se dibuja; y en texto `continued` la posición y el
-ancho van solo en el primer tramo, o cada negrita parte el párrafo.
+`page.margins.bottom` mientras se dibuja; en texto `continued` la posición y el
+ancho van solo en el primer tramo, o cada negrita parte el párrafo; y las fuentes
+estándar usan WinAnsi, así que un emoji sale como mojibake —"✅ Sí" se imprimía
+"' Sí"— y hay que descartarlo (`sinEmoji`).
+
+En las tablas, cada columna necesita un **ancho mínimo igual al de su palabra más
+larga**: sin eso el reparto proporcional parte las palabras al medio. Y una línea
+en blanco entre grupos de filas **no** termina la tabla: los agentes separan así
+los bloques, y cortar ahí dejaba media tabla maquetada y el resto como texto con
+pipes a la vista.
 
 Los entregables son **de la empresa, no de la corrida**: al arrancar se cargan
 los de corridas anteriores (`listArtifactsByCompany`), así un área lee lo que

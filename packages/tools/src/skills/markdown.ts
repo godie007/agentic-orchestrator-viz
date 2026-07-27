@@ -110,9 +110,21 @@ export function parseMarkdown(source: string): Block[] {
       const header = celdas(trimmed);
       const rows: string[][] = [];
       i += 2;
-      while (i < lines.length && lines[i]!.includes("|") && lines[i]!.trim() !== "") {
-        rows.push(celdas(lines[i]!));
-        i++;
+      while (i < lines.length) {
+        const actual = lines[i]!;
+        if (actual.includes("|") && actual.trim() !== "") {
+          rows.push(celdas(actual));
+          i++;
+          continue;
+        }
+        // Una línea en blanco entre grupos de filas no termina la tabla: los
+        // agentes separan así los bloques, y cortarla ahí dejaba media tabla
+        // maquetada y el resto como texto suelto con pipes a la vista.
+        if (actual.trim() === "" && lines[i + 1]?.includes("|") && lines[i + 1]!.trim() !== "") {
+          i++;
+          continue;
+        }
+        break;
       }
       i--;
       blocks.push({ kind: "table", header, rows });

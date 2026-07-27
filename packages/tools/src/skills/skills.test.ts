@@ -298,13 +298,41 @@ describe("herramienta de exportación", () => {
     expect(skills.find((s) => s.name === "list_output")?.readOnly).toBe(true);
   });
 
-  it("exporta el entregable y lo nombra con su versión", async () => {
+  it("exporta a un archivo por entregable, sin la versión en el nombre", async () => {
+    // Con `-vN` en el nombre, cada re-exportación dejaba otro archivo: pedías
+    // un PDF y terminabas con v1, v2 y v3 conviviendo. La versión va en la
+    // portada, que es donde se lee.
     const docx = skills.find((skill) => skill.name === "export_docx")!;
     const result = await docx.execute({ artifact_key: "plan" }, ctx([{ key: "plan", content: "# Hola" }]));
 
     expect(result.ok).toBe(true);
-    expect(guardados.at(-1)?.filename).toBe("plan-v2.docx");
+    expect(guardados.at(-1)?.filename).toBe("plan.docx");
     expect(guardados.at(-1)?.bytes.subarray(0, 2).toString("latin1")).toBe("PK");
+  });
+
+  it("se lleva los archivos con versión que dejó la forma vieja", async () => {
+    const borrados: string[] = [];
+    const conViejos: SkillStorage = {
+      ...storage,
+      async list() {
+        return ["plan-v1.pdf", "plan-v2.pdf", "plan-v1.docx", "otro-v1.pdf"].map((path) => ({
+          path,
+          sizeBytes: 10,
+          esMultimedia: false,
+          generadoPorAgente: true,
+        }));
+      },
+      async remove(path) {
+        borrados.push(path);
+        return { ok: true };
+      },
+    };
+
+    const pdf = createSkillTools(conViejos).find((skill) => skill.name === "export_pdf")!;
+    await pdf.execute({ artifact_key: "plan" }, ctx([{ key: "plan", content: "# Hola" }]));
+
+    // Solo los del mismo entregable y formato: ni el .docx ni el de otra clave.
+    expect(borrados).toEqual(["plan-v1.pdf", "plan-v2.pdf"]);
   });
 
   it("cuando la clave no existe, dice cuáles hay", async () => {
@@ -578,4 +606,62 @@ async function docxXml(promesa: Promise<Buffer>): Promise<string> {
 /** Cuenta las páginas de un PDF por sus objetos `/Type /Page`. */
 function paginas(bytes: Buffer): number {
   return (bytes.toString("latin1").match(/\/Type\s*\/Page[^s]/g) ?? []).length;
+}
+
+describe("tablas que los agentes escriben de verdad", () => {
+  // Formas observadas en entregables reales: filas agrupadas con la primera
+  // celda vacía, una línea en blanco entre grupos, negritas y emoji.
+  const tabla = [
+    "| Rol | Capacidad | Soporta demo |",
+    "|---|---|---|",
+    "| **Inspector** | Login | ✅ Sí |",
+    "| | Checklists | ✅ Sí |",
+    "",
+    "| **Director** | Login | ✅ Sí |",
+    "| | Cotizaciones | ⚠️ Limitado |",
+  ].join("\n");
+
+  it("una línea en blanco entre grupos no parte la tabla", () => {
+    // Antes se cortaba ahí y el resto de las filas salía como texto suelto,
+    // con los pipes a la vista en medio del documento.
+    const bloques = parseMarkdown(tabla);
+    const tablas = bloques.filter((bloque) => bloque.kind === "table");
+
+    expect(tablas).toHaveLength(1);
+    expect(tablas[0]!.kind === "table" && tablas[0]!.rows).toHaveLength(4);
+    // Y ninguna fila quedó suelta como párrafo.
+    expect(bloques.some((bloque) => bloque.kind === "paragraph")).toBe(false);
+  });
+
+  it("el PDF sale sin emoji y sin asteriscos a la vista", async () => {
+    // Helvetica usa WinAnsi: un emoji sale como mojibake, y los `**` sin
+    // interpretar se imprimen tal cual dentro de la celda.
+    const bytes = await renderPdf(tabla, { title: "Capacidad" });
+    const texto = descomprimirPdf(bytes);
+
+    expect(texto).not.toContain("*");
+    expect(texto).toContain("Inspector");
+    expect(texto).toContain("Limitado");
+  });
+});
+
+/** Texto dibujado en un PDF, decodificando las cadenas hexadecimales. */
+function descomprimirPdf(bytes: Buffer): string {
+  const { inflateSync } = require("node:zlib") as typeof import("node:zlib");
+  const crudo = bytes.toString("latin1");
+  const flujos = crudo.match(/stream\r?\n([\s\S]*?)\r?\nendstream/g) ?? [];
+
+  return flujos
+    .map((flujo) => {
+      const cuerpo = flujo.replace(/^stream\r?\n/, "").replace(/\r?\nendstream$/, "");
+      try {
+        return inflateSync(Buffer.from(cuerpo, "latin1")).toString("latin1");
+      } catch {
+        return "";
+      }
+    })
+    .join("")
+    .replace(/<([0-9A-Fa-f]+)>/g, (_m, hex: string) =>
+      Buffer.from(hex, "hex").toString("latin1"),
+    );
 }

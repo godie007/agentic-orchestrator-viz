@@ -207,3 +207,102 @@ describe("normalización de claves con marcadores en medio", () => {
     });
   }
 });
+
+/**
+ * Lo que hace que un PDF se vea pobre no es el maquetado sino lo que llega:
+ * documentos sobre el propio proceso del agente, o un muro de texto sin una
+ * sola sección. El render puede maquetar lo que reciba, pero no puede inventar
+ * una estructura que no está.
+ */
+describe("un entregable tiene que parecer un documento", () => {
+  const conArtefactos = (): ToolContext => ({
+    ...ctx,
+    workspace: new Proxy({} as AgentWorkspace, {
+      get(_t, prop) {
+        if (prop === "roles" || prop === "departments") return [];
+        if (prop === "listArtifacts") return async () => [];
+        if (prop === "writeArtifact")
+          return async (input: { key: string }) => ({ ...input, id: "art_1", version: 1 });
+        return () => {
+          throw new Error("no esperado");
+        };
+      },
+    }),
+  });
+
+  const escribir = (title: string, content: string) =>
+    tool("write_artifact").execute({ key: "informe", title, content }, conArtefactos());
+
+  const documento = [
+    "# Informe de estado",
+    "",
+    "## Qué se puede prometer",
+    "- Cobertura RETIE y RETILAP",
+    "- Trazabilidad con firma",
+    "",
+    "## Qué falta",
+    "1. Paginación en no conformidades",
+  ].join("\n");
+
+  it("acepta un documento con secciones y listas", async () => {
+    expect((await escribir("Informe de estado", documento)).ok).toBe(true);
+  });
+
+  // Títulos observados de verdad, escritos por los agentes.
+  const titulosDeProceso = [
+    "Respuesta a pedido de exportación (Ciclo 4 - Bandeja de entrada)",
+    "Informe estado - Ciclo 2 (calidad y demo)",
+    "Seguimiento del pedido de Andrés",
+  ];
+  for (const titulo of titulosDeProceso) {
+    it(`rechaza el título "${titulo.slice(0, 34)}…"`, async () => {
+      const result = await escribir(titulo, documento);
+      expect(result.ok).toBe(false);
+      // El motivo tiene que decir qué hacer, no solo que está mal.
+      expect(result.content).toMatch(/titulalo|resuelve/i);
+    });
+  }
+
+  it("rechaza un muro de texto sin una sola sección", async () => {
+    // Texto real de un entregable producido por la empresa: todo en punto y
+    // coma, sin un título. Exportado a PDF se ve exactamente así de mal.
+    const muro =
+      "Estado técnico actual (verificable): flujos principales estables " +
+      "(asignación→planificación→inspección offline→NC moderadas→cierre→PDF); offline-first " +
+      "funcional; imágenes optimizadas; notificaciones en tiempo real; multi-tenant por plan " +
+      "con límites; migración checklists hecha; verificar columns inspector_site_payload y " +
+      "acta_payload antes de demos. Próximos pasos: implementar paginación para " +
+      "non-conformities, documents, projects y equipos; monitoreo PDF alta concurrencia; " +
+      "reglas de negocio en tabla regulations. Qué puede prometerse (respaldado): cobertura " +
+      "RETIE/RETILAP; trazabilidad y firma PDF con audit trail; ciclo completo online con " +
+      "modo offline; integración básica ERP; seguridad y auditoría por tenant.";
+    const result = await escribir("Informe de estado", muro);
+
+    expect(result.ok).toBe(false);
+    expect(result.content).toContain("sin estructura");
+  });
+
+  it("deja pasar una nota corta: no todo necesita secciones", async () => {
+    expect((await escribir("Nota", "Confirmado con el cliente para el jueves.")).ok).toBe(true);
+  });
+
+  it("rechaza un párrafo interminable aunque haya secciones", async () => {
+    const largo = ["# Informe", "", "## Detalle", "", "x".repeat(950)].join("\n");
+    const result = await escribir("Informe", largo);
+
+    expect(result.ok).toBe(false);
+    expect(result.content).toContain("sin cortes");
+  });
+
+  it("no confunde una tabla larga con un párrafo interminable", async () => {
+    const tabla = [
+      "# Planes",
+      "",
+      "| Cupo | Descripción |",
+      "|---|---|",
+      ...Array.from({ length: 40 }, (_, i) => `| cupo_${i} | Descripción larga del cupo ${i} |`),
+    ].join("\n");
+
+    expect((await escribir("Planes", tabla)).ok).toBe(true);
+  });
+});

@@ -57,6 +57,9 @@ export interface SkillStorage {
   ): Promise<{ ok: true; path: string; sizeBytes: number } | { ok: false; motivo: string }>;
 }
 
+/** Escapa una clave para usarla dentro de una expresión regular. */
+const escaparRegex = (texto: string): string => texto.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 const FORMATOS = {
   docx: { etiqueta: "Word", extension: "docx", render: renderDocx },
   pdf: { etiqueta: "PDF", extension: "pdf", render: renderPdf },
@@ -118,10 +121,23 @@ function crearSkill(formato: Formato, storage: SkillStorage): RegisteredTool {
       }
 
       const carpeta = String(args.folder ?? "").trim();
+
+      // Un archivo por entregable y formato, no uno por versión. Antes el
+      // nombre llevaba `-vN`, así que cada re-exportación dejaba otro archivo:
+      // pedías un PDF y terminabas con v1, v2 y v3 conviviendo, más el Word.
+      // La versión va en la portada, que es donde se lee.
+      const anteriores = (await storage.list())
+        .map((archivo) => archivo.path)
+        .filter((ruta) => {
+          const nombre = ruta.split("/").at(-1) ?? "";
+          return new RegExp(`^${escaparRegex(artifact.key)}-v\\d+\\.${extension}$`).test(nombre);
+        });
       // La portada la arma el sistema, no el modelo: quién firma y de qué
       // empresa es información que ya tenemos y que un agente puede escribir
       // mal. La fecha entra formateada desde acá porque el render no tiene
       // reloj —así los tests son deterministas—.
+      for (const vieja of anteriores) await storage.remove(vieja);
+
       const bytes = await render(artifact.content, {
         title: artifact.title,
         company: ctx.workspace.company.name,
@@ -135,16 +151,19 @@ function crearSkill(formato: Formato, storage: SkillStorage): RegisteredTool {
         }),
       });
       const guardado = await storage.save({
-        filename: `${artifact.key}-v${artifact.version}.${extension}`,
+        filename: `${artifact.key}.${extension}`,
         ...(carpeta ? { folder: carpeta } : {}),
         bytes,
       });
 
+      const reemplazo = anteriores.length
+        ? ` Reemplaza la versión anterior del mismo documento.`
+        : "";
       return ok(
         `Documento ${etiqueta} generado en ${guardado.path}: "${artifact.title}" ` +
-          `(v${artifact.version}), ${Math.max(1, Math.round(guardado.sizeBytes / 1024))} KB. ` +
-          `Queda en el directorio de salida. No hace falta que lo exportes de nuevo salvo ` +
-          `que cambies el contenido.`,
+          `(v${artifact.version}), ${Math.max(1, Math.round(guardado.sizeBytes / 1024))} KB.` +
+          `${reemplazo} Queda en el directorio de salida; no hace falta exportarlo de nuevo ` +
+          `salvo que cambies el contenido.`,
         guardado.path,
       );
     },

@@ -418,8 +418,16 @@ const writeArtifact: RegisteredTool = {
   readOnly: false,
   requiresApproval: false,
   description:
-    "Guarda un entregable (propuesta, análisis, informe, decisión) para que " +
-    "otros roles puedan leerlo. Escribir con la misma 'key' crea una versión nueva.",
+    "Guarda un entregable —propuesta, análisis, informe, decisión— para que otros roles " +
+    "lo lean y para poder exportarlo a Word o PDF. Escribir con la misma 'key' crea una " +
+    "versión nueva.\n\n" +
+    "Escribilo como el documento que va a leer un cliente, no como una nota interna:\n" +
+    "- Empezá con '# Título' y organizá con '## Secciones' con nombre propio.\n" +
+    "- Usá tablas markdown para comparar cosas y listas para enumerarlas. Un párrafo con " +
+    "  cinco puntos y coma es una tabla mal escrita.\n" +
+    "- Nada sobre tu propio proceso: ni ciclos, ni bandejas, ni qué herramientas tenés. " +
+    "  Al lector eso no le dice nada.\n" +
+    "- Si te falta un dato, marcalo como pendiente en una línea; no rellenes.",
   inputSchema: {
     type: "object",
     properties: {
@@ -437,6 +445,9 @@ const writeArtifact: RegisteredTool = {
   async execute(args, ctx) {
     const parsed = readRequired(args, ["key", "title", "content"]);
     if (!parsed.ok) return fail(`write_artifact: ${parsed.error}`);
+
+    const problema = revisarCalidad(parsed.values.title!, parsed.values.content!);
+    if (problema) return fail(`write_artifact: ${problema}`);
 
     // Los agentes tienden a inventar una clave nueva por ciclo
     // ("propuesta-ciclo-3", "propuesta-v2", "propuesta-final") y el entregable
@@ -540,6 +551,63 @@ const listArtifacts: RegisteredTool = {
   },
 };
 
+
+/**
+ * Rechaza lo que no es un entregable.
+ *
+ * Son dos fallas observadas, las dos hacen que el PDF que abre el cliente no
+ * sirva:
+ *
+ * 1. **Documentos sobre el propio proceso.** El agente titula "Respuesta a
+ *    pedido (Ciclo 4 - Bandeja de entrada)" y escribe sobre qué herramientas
+ *    cree tener. Al lector eso no le dice nada del negocio.
+ * 2. **Muros de texto.** Todo en un párrafo con punto y coma, sin un solo
+ *    título. El render puede maquetar lo que reciba, pero no puede inventar
+ *    una estructura que no está.
+ *
+ * Se revisa en la herramienta y no solo en el prompt: un agente puede ignorar
+ * una instrucción, pero no el ejecutor.
+ */
+const PALABRAS_DE_PROCESO =
+  /\b(ciclo\s*\d|bandeja de entrada|respuesta a pedido|seguimiento del pedido|mi turno|herramientas? (?:no )?disponibles?)\b/i;
+
+export function revisarCalidad(title: string, content: string): string | null {
+  if (PALABRAS_DE_PROCESO.test(title)) {
+    return (
+      `el título "${title}" habla de tu proceso interno, no del contenido. ` +
+      `Un entregable lo lee alguien de afuera: titulalo por lo que resuelve ` +
+      `("Plan de paginación", "Informe de estado"), sin ciclos ni bandejas.`
+    );
+  }
+
+  const cuerpo = content.trim();
+  // Una nota corta no necesita estructura; un documento sí.
+  if (cuerpo.length < 400) return null;
+
+  const titulos = (cuerpo.match(/^#{1,3} .+/gm) ?? []).length;
+  const listas = (cuerpo.match(/^\s*(?:[-*+]|\d+[.)])\s+/gm) ?? []).length;
+
+  if (titulos === 0 && listas < 3) {
+    return (
+      `el contenido es un bloque de texto sin estructura. Un entregable se lee ` +
+      `con "## Secciones", listas y tablas markdown: escribilo así y se exporta ` +
+      `a Word y PDF con esa forma.`
+    );
+  }
+
+  const parrafoLargo = cuerpo
+    .split(/\n\s*\n/)
+    .find((parrafo) => !parrafo.startsWith("|") && parrafo.length > 900);
+  if (parrafoLargo) {
+    return (
+      `hay un párrafo de ${parrafoLargo.length} caracteres sin cortes. Partilo en ` +
+      `secciones, o pasalo a lista o tabla si estás enumerando: así de largo no lo ` +
+      `lee nadie.`
+    );
+  }
+
+  return null;
+}
 
 /**
  * Memoria de la empresa. Es la herramienta que evita volver a pagar por lo

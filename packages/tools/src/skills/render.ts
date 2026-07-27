@@ -330,6 +330,20 @@ const PDF = {
 
 type Doc = InstanceType<typeof PDFDocument>;
 
+/**
+ * Saca lo que las fuentes estándar del PDF no saben dibujar.
+ *
+ * Helvetica y Courier usan WinAnsi: un emoji sale como mojibake —"✅ Sí" se
+ * imprimía como "' Sí" y "⚠️ Limitado" como "& þ Limita do"—. Se descartan en
+ * vez de reemplazarlos por un signo: son decorativos y el texto que los
+ * acompaña ya dice lo mismo.
+ */
+const sinEmoji = (texto: string): string =>
+  texto
+    .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE0F}\u{200D}]/gu, "")
+    .replace(/ {2,}/g, " ")
+    .trim();
+
 const anchoUtil = (doc: Doc): number => doc.page.width - PDF.margen * 2;
 const pieDePagina = (doc: Doc): number => doc.page.height - PDF.margen;
 
@@ -352,13 +366,13 @@ function escribirSpans(doc: Doc, spans: Span[], opciones: { indent?: number } = 
     doc.font(span.bold ? "Helvetica-Bold" : "Helvetica");
     const continua = i < spans.length - 1;
     if (i === 0) {
-      doc.text(span.text, x, doc.y, {
+      doc.text(sinEmoji(span.text), x, doc.y, {
         width: ancho,
         continued: continua,
         lineGap: PDF.cuerpo * (PDF.interlineado - 1),
       });
     } else {
-      doc.text(span.text, { continued: continua });
+      doc.text(sinEmoji(span.text), { continued: continua });
     }
   });
 }
@@ -371,6 +385,12 @@ function escribirSpans(doc: Doc, spans: Span[], opciones: { indent?: number } = 
  * por barras, que se desalineaba con cualquier celda larga y se partía al llegar
  * al pie. Es la diferencia más visible entre un volcado y un documento.
  */
+/**
+ * Texto visible de una celda: sin marcas de negrita —se leían los asteriscos—
+ * y sin emoji, que las fuentes estándar no saben dibujar.
+ */
+const textoDeCelda = (celda: string): string => sinEmoji(spansToText(parseSpans(celda ?? "")));
+
 function dibujarTabla(doc: Doc, header: string[], rows: string[][]): void {
   const columnas = header.length;
   if (columnas === 0) return;
@@ -378,20 +398,45 @@ function dibujarTabla(doc: Doc, header: string[], rows: string[][]): void {
   const disponible = anchoUtil(doc);
   const padding = 6;
 
-  // Ancho por columna proporcional a su contenido, con un piso para que una
-  // columna corta no quede ilegible y un techo para que una larga no la ahogue.
-  const pesos = header.map((_, i) => {
-    const largos = [header[i]!.length, ...rows.map((fila) => (fila[i] ?? "").length)];
-    return Math.min(Math.max(Math.max(...largos), 8), 48);
-  });
+  const contenido = header.map((_, i) => [
+    textoDeCelda(header[i]!),
+    ...rows.map((fila) => textoDeCelda(fila[i] ?? "")),
+  ]);
+
+  // Reparto proporcional al contenido, con techo para que una columna larga no
+  // ahogue al resto.
+  const pesos = contenido.map((celdas) =>
+    Math.min(Math.max(...celdas.map((texto) => texto.length), 6), 48),
+  );
   const total = pesos.reduce((a, b) => a + b, 0);
   const anchos = pesos.map((peso) => (peso / total) * disponible);
+
+  // Y un mínimo por columna: el de su palabra más larga. Sin esto una columna
+  // angosta parte las palabras al medio —"Inspecto / r", "Soport / a"— y la
+  // tabla se vuelve difícil de leer justo donde está el dato.
+  doc.font("Helvetica-Bold").fontSize(PDF.cuerpo - 0.5);
+  const minimos = contenido.map((celdas) => {
+    const palabras = celdas.flatMap((texto) => texto.split(/\s+/));
+    const masLarga = palabras.reduce((a, b) => (b.length > a.length ? b : a), "");
+    return Math.min(doc.widthOfString(masLarga) + padding * 2 + 2, disponible / 2);
+  });
+
+  for (let i = 0; i < columnas; i++) {
+    const falta = minimos[i]! - anchos[i]!;
+    if (falta <= 0) continue;
+    // Lo que falta se le saca a la columna más ancha, que es la que mejor
+    // tolera perder espacio.
+    const donante = anchos.indexOf(Math.max(...anchos));
+    if (donante === i || anchos[donante]! - falta < minimos[donante]!) continue;
+    anchos[donante]! -= falta;
+    anchos[i]! += falta;
+  }
 
   const altoDeFila = (fila: string[], negrita: boolean): number => {
     doc.font(negrita ? "Helvetica-Bold" : "Helvetica").fontSize(PDF.cuerpo - 0.5);
     const alto = Math.max(
       ...fila.map((texto, i) =>
-        doc.heightOfString(texto ?? "", { width: anchos[i]! - padding * 2 }),
+        doc.heightOfString(textoDeCelda(texto), { width: anchos[i]! - padding * 2 }),
       ),
     );
     return alto + padding * 2;
@@ -406,11 +451,17 @@ function dibujarTabla(doc: Doc, header: string[], rows: string[][]): void {
     for (let i = 0; i < columnas; i++) {
       if (negrita) doc.rect(x, y, anchos[i]!, alto).fill(PDF.grisClaro);
       doc.rect(x, y, anchos[i]!, alto).strokeColor("#BFBFBF").lineWidth(0.5).stroke();
+      const spans = parseSpans(fila[i] ?? "");
+      // Una celda cuyo contenido va entero en negrita se dibuja en negrita;
+      // mezclar tipografías dentro de una celda angosta se lee peor.
+      const enNegrita = negrita || (spans.length > 0 && spans.every((span) => span.bold));
       doc
-        .font(negrita ? "Helvetica-Bold" : "Helvetica")
+        .font(enNegrita ? "Helvetica-Bold" : "Helvetica")
         .fontSize(PDF.cuerpo - 0.5)
         .fillColor(PDF.tinta)
-        .text(fila[i] ?? "", x + padding, y + padding, { width: anchos[i]! - padding * 2 });
+        .text(textoDeCelda(fila[i] ?? ""), x + padding, y + padding, {
+          width: anchos[i]! - padding * 2,
+        });
       x += anchos[i]!;
     }
     doc.y = y + alto;
@@ -501,7 +552,7 @@ export async function renderPdf(markdown: string, meta: DocumentMeta | string): 
             .font("Helvetica-Bold")
             .fontSize(tamaño)
             .fillColor(block.level === 1 ? PDF.acento : PDF.tinta);
-          doc.text(spansToText(block.spans), PDF.margen, doc.y, { width: anchoUtil(doc) });
+          doc.text(sinEmoji(spansToText(block.spans)), PDF.margen, doc.y, { width: anchoUtil(doc) });
           doc.moveDown(0.35);
           break;
         }
@@ -528,7 +579,9 @@ export async function renderPdf(markdown: string, meta: DocumentMeta | string): 
           asegurarEspacio(doc, 32);
           const inicio = doc.y;
           doc.font("Helvetica-Oblique").fontSize(PDF.cuerpo).fillColor(PDF.gris);
-          doc.text(spansToText(block.spans), PDF.margen + 18, doc.y, { width: anchoUtil(doc) - 18 });
+          doc.text(sinEmoji(spansToText(block.spans)), PDF.margen + 18, doc.y, {
+            width: anchoUtil(doc) - 18,
+          });
           doc
             .moveTo(PDF.margen + 4, inicio)
             .lineTo(PDF.margen + 4, doc.y)
