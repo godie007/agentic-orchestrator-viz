@@ -166,6 +166,15 @@ existe para eso, y `listArtifactsByCompany` filtra por ahí en vez de unir con
 —el registro de *cómo* se llegó— pero nunca los artefactos. Limpiar la lista de
 corridas no puede costarle a la empresa el trabajo que produjo.
 
+**La salida se mira antes de descargar.** El PDF y las imágenes los dibuja el
+navegador desde la misma URL con `?inline` —un `attachment` dentro de un iframe
+dispara la descarga en vez de dibujarse—. Word no lo abre ningún navegador, así
+que el servidor extrae su texto de `word/document.xml`: si no, el único formato
+que la empresa produce en Word sería justo el que no se puede revisar antes de
+mandarlo. Ojo con el orden al desarmar el XML: `</w:p>` dentro de una celda hay
+que descartarlo **antes** que los genéricos, o cada celda cae en su renglón y la
+tabla se deshace.
+
 **Los controles de la corrida se muestran según su estado.** Ofrecer "pausar"
 sobre una corrida terminada obliga a adivinar cuál sirve; cada botón dice qué
 hace y su `title` explica cuándo conviene. Solo una corrida `running` no se puede

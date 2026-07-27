@@ -16,7 +16,7 @@ import {
 import { resolveAllTiers, type ProviderRegistry } from "@orq/llm";
 import type { Store } from "./db.js";
 import type { Runtime } from "./runtime.js";
-import { contentTypeOf } from "./exports.js";
+import { contentTypeOf, previewDe } from "./exports.js";
 
 /**
  * API HTTP.
@@ -396,6 +396,17 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
     return { ok: true };
   });
 
+  /** Contenido listo para mostrar en pantalla, sin descargar. */
+  app.get("/api/companies/:companyId/exports-preview/*", async (request, reply) => {
+    const { companyId } = request.params as { companyId: string };
+    const ruta = (request.params as Record<string, string>)["*"] ?? "";
+    const bytes = await runtime.exports.read(companyId, ruta);
+    if (!bytes) return notFound(reply, "documento", ruta);
+
+    const nombre = ruta.split("/").at(-1) ?? ruta;
+    return { ...(await previewDe(nombre, bytes)), sizeBytes: bytes.length };
+  });
+
   app.get("/api/companies/:companyId/exports/*", async (request, reply) => {
     const { companyId } = request.params as { companyId: string };
     const ruta = (request.params as Record<string, string>)["*"] ?? "";
@@ -403,10 +414,15 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
     if (!bytes) return notFound(reply, "documento", ruta);
 
     const nombre = ruta.split("/").at(-1) ?? ruta;
-    // `attachment` para que el navegador lo baje en vez de intentar abrirlo:
-    // un .docx renderizado como texto plano no le sirve a nadie.
+    // Por defecto `attachment`, para que el navegador lo baje en vez de
+    // intentar abrirlo. Con `?inline` se sirve para mostrarlo en pantalla: un
+    // `attachment` dentro de un iframe dispara la descarga en vez de dibujarse.
+    const inline = (request.query as { inline?: string }).inline != null;
     reply.header("content-type", contentTypeOf(nombre));
-    reply.header("content-disposition", `attachment; filename="${nombre}"`);
+    reply.header(
+      "content-disposition",
+      `${inline ? "inline" : "attachment"}; filename="${nombre}"`,
+    );
     return reply.send(bytes);
   });
 

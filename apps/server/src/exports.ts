@@ -437,3 +437,88 @@ export function contentTypeOf(filename: string): string {
   };
   return tipos[ext] ?? "application/octet-stream";
 }
+
+/** Qué se puede mostrar sin descargar, y cómo. */
+export type PreviewKind = "pdf" | "image" | "text" | "none";
+
+export interface Preview {
+  kind: PreviewKind;
+  /** Contenido ya legible, para `text`. */
+  text?: string;
+  /** Por qué no se puede previsualizar, para `none`. */
+  motivo?: string;
+}
+
+const EXTENSIONES_TEXTO = new Set(["md", "txt", "csv", "json", "log", "yml", "yaml", "html", "xml"]);
+const EXTENSIONES_IMAGEN = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"]);
+
+const extensionDe = (nombre: string): string => {
+  const punto = nombre.lastIndexOf(".");
+  return punto < 0 ? "" : nombre.slice(punto + 1).toLowerCase();
+};
+
+/**
+ * Texto de un `.docx`, para poder leerlo sin abrir Word.
+ *
+ * Un `.docx` es un zip con el texto en `word/document.xml`. Se reconstruyen los
+ * párrafos a partir de `<w:p>` y las tablas a partir de `<w:tr>`: sin eso todo
+ * el documento quedaría en una sola línea corrida e ilegible.
+ */
+async function textoDeDocx(bytes: Buffer): Promise<string> {
+  const { default: JSZip } = await import("jszip");
+  const zip = await JSZip.loadAsync(bytes);
+  const entrada = zip.file("word/document.xml");
+  if (!entrada) return "";
+
+  const xml = await entrada.async("string");
+  return xml
+    .replace(/<w:tab\b[^>]*\/>/g, "\t")
+    .replace(/<w:br\b[^>]*\/>/g, "\n")
+    // El cierre de párrafo dentro de una celda se descarta antes que nada: el
+    // XML es `<w:tc><w:p>…</w:p></w:tc>`, y tratarlo como salto de línea
+    // partía cada celda en su propio renglón y deshacía la tabla.
+    .replace(/<\/w:p>\s*<\/w:tc>/g, "</w:tc>")
+    // Celdas separadas por barra, filas y párrafos por salto: así una tabla
+    // sigue leyéndose como una tabla.
+    .replace(/<\/w:tc>\s*<\/w:tr>/g, "</w:tr>")
+    .replace(/<\/w:tc>/g, " | ")
+    .replace(/<\/w:tr>/g, "\n")
+    .replace(/<\/w:p>/g, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/**
+ * Cómo mostrar un archivo sin descargarlo.
+ *
+ * El PDF y las imágenes las dibuja el navegador desde la misma URL servida en
+ * modo `inline`. Word no lo puede abrir, así que se extrae su texto acá: si no,
+ * el único entregable que la empresa produce en Word sería justo el que no se
+ * puede revisar antes de mandarlo.
+ */
+export async function previewDe(nombre: string, bytes: Buffer): Promise<Preview> {
+  const ext = extensionDe(nombre);
+
+  if (ext === "pdf") return { kind: "pdf" };
+  if (EXTENSIONES_IMAGEN.has(ext)) return { kind: "image" };
+  if (EXTENSIONES_TEXTO.has(ext)) return { kind: "text", text: bytes.toString("utf8") };
+
+  if (ext === "docx") {
+    const texto = await textoDeDocx(bytes);
+    return texto
+      ? { kind: "text", text: texto }
+      : { kind: "none", motivo: "El documento está vacío o no se pudo leer." };
+  }
+
+  return {
+    kind: "none",
+    motivo: `No hay vista previa para archivos .${ext || "sin extensión"}. Descargalo para abrirlo.`,
+  };
+}

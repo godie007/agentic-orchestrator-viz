@@ -42,6 +42,8 @@ export function Output({ company }: { company: CompanyBundle }) {
   const queryClient = useQueryClient();
   const [nuevaCarpeta, setNuevaCarpeta] = useState("");
   const [error, setError] = useState<string | null>(null);
+  /** Archivo abierto en la vista previa. */
+  const [seleccion, setSeleccion] = useState<TreeFile | null>(null);
 
   const tree = useQuery({
     queryKey: ["export-tree", companyId],
@@ -78,8 +80,9 @@ export function Output({ company }: { company: CompanyBundle }) {
   const vacio = !raiz || raiz.children.length === 0;
 
   return (
-    <div className="h-full overflow-auto p-2">
+    <div className="grid h-full min-h-0 grid-cols-[minmax(0,420px)_1fr] gap-2 p-2">
       <Panel
+        className="overflow-auto"
         title="Directorio de salida"
         actions={
           <span className="text-[10px] normal-case text-ink-faint">
@@ -128,12 +131,16 @@ export function Output({ company }: { company: CompanyBundle }) {
                   nivel={0}
                   onBorrar={(path) => borrar.mutate(path)}
                   borrando={borrar.isPending}
+                  seleccionado={seleccion?.path}
+                  onAbrir={setSeleccion}
                 />
               ))}
             </ul>
           )}
         </div>
       </Panel>
+
+      <VistaPrevia companyId={companyId} archivo={seleccion} />
     </div>
   );
 }
@@ -145,12 +152,16 @@ function Nodo({
   nivel,
   onBorrar,
   borrando,
+  seleccionado,
+  onAbrir,
 }: {
   nodo: TreeFolder | TreeFile;
   companyId: string;
   nivel: number;
   onBorrar: (path: string) => void;
   borrando: boolean;
+  seleccionado: string | undefined;
+  onAbrir: (archivo: TreeFile) => void;
 }) {
   const [abierta, setAbierta] = useState(true);
   const [confirmando, setConfirmando] = useState(false);
@@ -182,6 +193,8 @@ function Nodo({
                 nivel={nivel + 1}
                 onBorrar={onBorrar}
                 borrando={borrando}
+                seleccionado={seleccionado}
+                onAbrir={onAbrir}
               />
             ))}
           </ul>
@@ -191,17 +204,33 @@ function Nodo({
   }
 
   return (
-    <li style={sangria} className="group flex items-center gap-1.5 py-1 hover:bg-surface-2">
+    <li
+      style={sangria}
+      className={`group flex items-center gap-1.5 py-1 ${
+        seleccionado === nodo.path ? "bg-accent/15" : "hover:bg-surface-2"
+      }`}
+    >
       <span className="w-3" />
       <span>{iconoDe(nodo.name)}</span>
+      {/* El nombre abre la vista previa: mirar antes de bajar es lo que uno
+          quiere hacer casi siempre. La descarga queda a un clic, al lado. */}
+      <button
+        onClick={() => onAbrir(nodo)}
+        className={`truncate text-left hover:underline ${
+          seleccionado === nodo.path ? "text-ink" : "text-accent"
+        }`}
+      >
+        {nodo.name}
+      </button>
+      <span className="text-[10px] text-ink-faint">{peso(nodo.sizeBytes)}</span>
       <a
         href={api.exportUrl(companyId, nodo.path)}
         download
-        className="truncate text-accent hover:underline"
+        title="Descargar"
+        className="text-[11px] text-ink-faint hover:text-accent"
       >
-        {nodo.name}
+        ↓
       </a>
-      <span className="text-[10px] text-ink-faint">{peso(nodo.sizeBytes)}</span>
       {/* Los que no generó la empresa son tuyos: el agente los deja en paz y
           conviene que se note de dónde salió cada archivo. */}
       {!nodo.generadoPorAgente && !nodo.esMultimedia && (
@@ -257,5 +286,83 @@ function contarArchivos(carpeta: TreeFolder): number {
   return carpeta.children.reduce(
     (total, hijo) => total + (hijo.kind === "folder" ? contarArchivos(hijo) : 1),
     0,
+  );
+}
+
+/**
+ * Vista previa del archivo seleccionado.
+ *
+ * El PDF y las imágenes los dibuja el navegador desde la misma URL, servida en
+ * modo `inline`. Word no lo puede abrir, así que el servidor devuelve su texto:
+ * revisar un entregable antes de mandarlo no debería obligar a descargarlo.
+ */
+function VistaPrevia({
+  companyId,
+  archivo,
+}: {
+  companyId: string;
+  archivo: TreeFile | null;
+}) {
+  const preview = useQuery({
+    queryKey: ["export-preview", companyId, archivo?.path],
+    queryFn: () => api.exportPreview(companyId, archivo!.path),
+    enabled: archivo != null,
+  });
+
+  if (!archivo) {
+    return (
+      <Panel title="Vista previa">
+        <Empty>Elegí un archivo del árbol para verlo sin descargarlo.</Empty>
+      </Panel>
+    );
+  }
+
+  const url = api.exportInlineUrl(companyId, archivo.path);
+
+  return (
+    <Panel
+      title={archivo.name}
+      className="min-h-0"
+      actions={
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] normal-case text-ink-faint">{peso(archivo.sizeBytes)}</span>
+          <a
+            href={api.exportUrl(companyId, archivo.path)}
+            download
+            className="rounded border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[10px] normal-case text-accent hover:bg-accent/20"
+          >
+            ↓ descargar
+          </a>
+        </div>
+      }
+    >
+      <div className="h-full min-h-0 overflow-auto p-3">
+        {preview.isLoading && <Empty>Abriendo…</Empty>}
+        {preview.error && (
+          <p className="text-xs text-danger">{(preview.error as Error).message}</p>
+        )}
+
+        {preview.data?.kind === "pdf" && (
+          // `title` es lo que anuncian los lectores de pantalla del iframe.
+          <iframe src={url} title={archivo.name} className="h-full min-h-[70vh] w-full rounded border border-line bg-white" />
+        )}
+
+        {preview.data?.kind === "image" && (
+          <img
+            src={url}
+            alt={archivo.name}
+            className="mx-auto max-h-full max-w-full rounded border border-line bg-white object-contain"
+          />
+        )}
+
+        {preview.data?.kind === "text" && (
+          <pre className="rounded bg-canvas p-3 text-[11px] leading-relaxed whitespace-pre-wrap text-ink-dim">
+            {preview.data.text}
+          </pre>
+        )}
+
+        {preview.data?.kind === "none" && <Empty>{preview.data.motivo}</Empty>}
+      </div>
+    </Panel>
   );
 }

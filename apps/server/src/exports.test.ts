@@ -2,7 +2,15 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ExportStore, contentTypeOf, esMultimedia, type TreeFile, type TreeFolder } from "./exports.js";
+import {
+  ExportStore,
+  contentTypeOf,
+  esMultimedia,
+  previewDe,
+  type TreeFile,
+  type TreeFolder,
+} from "./exports.js";
+import { renderDocx } from "@orq/tools";
 
 /**
  * El directorio de salida recibe rutas que propone un agente, y un prompt puede
@@ -226,5 +234,50 @@ describe("reconocimiento de multimedia y tipos", () => {
     expect(contentTypeOf("x.png")).toBe("image/png");
     expect(contentTypeOf("x.docx")).toContain("wordprocessingml");
     expect(contentTypeOf("x.desconocido")).toBe("application/octet-stream");
+  });
+});
+
+describe("vista previa", () => {
+  it("el PDF y las imágenes las dibuja el navegador", async () => {
+    expect(await previewDe("informe.pdf", Buffer.from("%PDF-1.4"))).toEqual({ kind: "pdf" });
+    expect(await previewDe("captura.PNG", Buffer.from("x"))).toEqual({ kind: "image" });
+  });
+
+  it("el texto se devuelve tal cual", async () => {
+    const preview = await previewDe("notas.md", Buffer.from("# Hola\n\nAlgo.", "utf8"));
+    expect(preview).toMatchObject({ kind: "text" });
+    expect(preview.text).toContain("# Hola");
+  });
+
+  it("extrae el texto de un .docx real, con párrafos separados", async () => {
+    // Word no lo abre el navegador: sin esto, el único formato que la empresa
+    // produce en Word sería justo el que no se puede revisar antes de mandarlo.
+    const bytes = await renderDocx("# Informe\n\nPrimer párrafo.\n\nSegundo párrafo.", {
+      title: "Informe",
+    });
+    const preview = await previewDe("informe.docx", bytes);
+
+    expect(preview.kind).toBe("text");
+    expect(preview.text).toContain("Primer párrafo.");
+    expect(preview.text).toContain("Segundo párrafo.");
+    // Separados: si no, el documento entero queda en una sola línea corrida.
+    expect(preview.text).toMatch(/Primer párrafo\.\s*\n/);
+  });
+
+  it("una tabla de .docx se sigue leyendo como tabla", async () => {
+    const bytes = await renderDocx(
+      ["| Cupo | Estado |", "|---|---|", "| max_users | Aplicado |"].join("\n"),
+      { title: "Planes" },
+    );
+    const preview = await previewDe("planes.docx", bytes);
+
+    expect(preview.text).toContain("Cupo | Estado");
+    expect(preview.text).toContain("max_users | Aplicado");
+  });
+
+  it("dice por qué no puede previsualizar en vez de mostrar basura", async () => {
+    const preview = await previewDe("archivo.zip", Buffer.from("PK"));
+    expect(preview.kind).toBe("none");
+    expect(preview.motivo).toContain("Descargalo");
   });
 });

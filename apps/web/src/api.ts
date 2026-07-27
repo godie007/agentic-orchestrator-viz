@@ -155,6 +155,16 @@ export const api = {
     }),
   exportUrl: (companyId: string, path: string) =>
     `/api/companies/${companyId}/exports/${encodePath(path)}`,
+  /** Misma URL, servida para mostrarse en pantalla en vez de descargarse. */
+  exportInlineUrl: (companyId: string, path: string) =>
+    `/api/companies/${companyId}/exports/${encodePath(path)}?inline`,
+  exportPreview: (companyId: string, path: string) =>
+    request<{
+      kind: "pdf" | "image" | "text" | "none";
+      text?: string;
+      motivo?: string;
+      sizeBytes: number;
+    }>(`/companies/${companyId}/exports-preview/${encodePath(path)}`),
 
   requests: (companyId: string) => request<AgentRequest[]>(`/companies/${companyId}/requests`),
   resolveRequest: (
