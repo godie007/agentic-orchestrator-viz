@@ -610,6 +610,81 @@ export function revisarCalidad(title: string, content: string): string | null {
 }
 
 /**
+ * Auditoría de lo que hicieron los demás.
+ *
+ * Un revisor que solo lee los mensajes revisa lo que los agentes **cuentan**.
+ * Con esto revisa lo que **hicieron**: qué herramientas ejecutaron y con qué
+ * resultado. Es la única forma de detectar la clase de error que más vimos —un
+ * agente ejecuta algo con éxito y después informa que no pudo, o dice que
+ * produjo un entregable que nunca escribió—.
+ */
+const checkActivity: RegisteredTool = {
+  name: "check_activity",
+  origin: "coordination",
+  readOnly: true,
+  requiresApproval: false,
+  description:
+    "Muestra qué herramientas ejecutó cada agente en esta corrida y con qué resultado. " +
+    "Usalo para contrastar lo que un agente informó con lo que realmente hizo antes de " +
+    "dar un trabajo por bueno. Podés filtrar por rol y ver solo los fallos.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      role: stringProp("Nombre del rol a auditar. Vacío = todos."),
+      only_failures: {
+        type: "boolean",
+        description: "Solo las llamadas que fallaron. Útil para ir directo a lo que se rompió.",
+      },
+    },
+    additionalProperties: false,
+  },
+  async execute(args, ctx) {
+    const entradas = ctx.workspace.listActivity();
+    if (entradas.length === 0) {
+      return ok("Todavía no ejecutó nada nadie en esta corrida.");
+    }
+
+    const filtroRol = String(args.role ?? "").trim();
+    let objetivo = entradas;
+
+    if (filtroRol) {
+      const rol = resolveRole(ctx.workspace, filtroRol);
+      if (!rol) {
+        return fail(`No existe el rol "${filtroRol}". Roles: ${roleNames(ctx.workspace)}`);
+      }
+      objetivo = objetivo.filter((entrada) => entrada.roleId === rol.id);
+    }
+    if (args.only_failures === true) objetivo = objetivo.filter((entrada) => !entrada.ok);
+
+    if (objetivo.length === 0) {
+      return ok(
+        filtroRol
+          ? `${filtroRol} no tiene ${args.only_failures === true ? "fallos" : "actividad"} registrados.`
+          : "No hay nada que coincida con ese filtro.",
+      );
+    }
+
+    const nombre = (roleId: string): string =>
+      ctx.workspace.roles.find((role) => role.id === roleId)?.name ?? "?";
+
+    // Se muestran las últimas: en una corrida larga lo viejo ya se revisó.
+    const lineas = objetivo
+      .slice(-60)
+      .map(
+        (entrada) =>
+          `- c${entrada.tick} ${nombre(entrada.roleId)} · ${entrada.tool} · ` +
+          `${entrada.ok ? "ok" : "FALLÓ"} · ${entrada.detail}`,
+      );
+
+    const fallos = objetivo.filter((entrada) => !entrada.ok).length;
+    return ok(
+      `${objetivo.length} llamadas${fallos ? `, ${fallos} con error` : ""}:\n${lineas.join("\n")}`,
+      `${objetivo.length} llamadas`,
+    );
+  },
+};
+
+/**
  * Memoria de la empresa. Es la herramienta que evita volver a pagar por lo
  * mismo: lo que se registra acá entra en el prompt de todas las corridas
  * siguientes, así que el conocimiento no se re-deriva a fuerza de mensajes.
@@ -826,6 +901,7 @@ export const coordinationTools: RegisteredTool[] = [
   writeArtifact,
   readArtifact,
   listArtifacts,
+  checkActivity,
   recordLesson,
   requestNewRole,
   requestContext,

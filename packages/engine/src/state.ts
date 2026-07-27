@@ -82,8 +82,27 @@ export const noPersistence: Persistence = {
  * nada— y se persiste en paralelo para el replay del timeline y para sobrevivir
  * a un reinicio.
  */
+/** Una llamada a herramienta, como quedó registrada para poder auditarla. */
+export interface ActivityEntry {
+  roleId: string;
+  tick: number;
+  tool: string;
+  ok: boolean;
+  /** Resultado o error, recortado. */
+  detail: string;
+}
+
 export class RunState {
   readonly messages: Message[] = [];
+  /**
+   * Qué ejecutó cada agente y con qué resultado.
+   *
+   * Existe para que un rol revisor pueda contrastar lo que un agente **informa**
+   * con lo que efectivamente **hizo**. Es una clase de error que vimos repetida:
+   * un agente ejecuta una herramienta con éxito y después reporta que no la
+   * tenía disponible, o dice que produjo algo que nunca escribió.
+   */
+  readonly activity: ActivityEntry[] = [];
   readonly tasks: Task[] = [];
   readonly artifacts: Artifact[] = [];
   readonly approvals: ApprovalRequest[] = [];
@@ -175,6 +194,7 @@ export class RunState {
       listLessons: () => state.learnings,
       createRequest: (input) => state.createRequest(input, actorId),
       listRequests: () => state.requests,
+      listActivity: () => state.activity,
     };
   }
 
@@ -430,6 +450,14 @@ export class RunState {
     this.requestList.push(request);
     this.persistence.saveRequest(request);
     return request;
+  }
+
+  /** Registra una llamada a herramienta. Lo llama el agent loop. */
+  recordActivity(entry: ActivityEntry): void {
+    this.activity.push(entry);
+    // Una corrida larga acumularía miles: se conserva una ventana, que es lo
+    // que un revisor puede leer sin ahogarse.
+    if (this.activity.length > 500) this.activity.splice(0, this.activity.length - 500);
   }
 
   get requests(): readonly AgentRequest[] {

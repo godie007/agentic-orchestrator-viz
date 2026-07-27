@@ -470,6 +470,15 @@ async function executeOne(
   try {
     const result = await tool.execute(call.arguments, ctx);
     emitToolEnd(bus, ctx, callId, tool, startedAt, result.ok, result.preview ?? preview(result.content), null);
+    // Se registra el resultado real, no el que el agente vaya a contar después:
+    // es lo único que permite a un revisor contrastar una cosa con la otra.
+    state.recordActivity({
+      roleId: ctx.actor.id,
+      tick: ctx.tick,
+      tool: tool.name,
+      ok: result.ok,
+      detail: preview(result.content, 200),
+    });
     if (tool.origin === "coordination" && result.ok) emitCoordinationEffect(bus, ctx, state, tool);
     return {
       message: { role: "tool", toolCallId: callId, name: tool.name, content: result.content },
@@ -479,6 +488,13 @@ async function executeOne(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     emitToolEnd(bus, ctx, callId, tool, startedAt, false, "falló", message);
+    state.recordActivity({
+      roleId: ctx.actor.id,
+      tick: ctx.tick,
+      tool: tool.name,
+      ok: false,
+      detail: preview(message, 200),
+    });
     return {
       message: {
         role: "tool",

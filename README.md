@@ -138,6 +138,19 @@ negritas—, y el archivo queda descargable desde la pestaña **Entregables**. S
 entregable siguió versionándose después de exportarlo, el enlace lo dice: te
 avisa que ese Word es de la v1 y el texto ya va por la v5.
 
+### Control de calidad entre agentes
+
+Un rol puede revisar el trabajo de los demás y devolverles correcciones. Para que
+eso sirva necesita ver **qué pasó**, no solo lo que le contaron: `check_activity`
+muestra qué herramienta ejecutó cada agente y con qué resultado, grabado por el
+motor y no por el agente.
+
+Es lo que permite detectar el error más difícil de ver desde afuera: un agente
+que ejecuta algo con éxito y después informa que no pudo. Combinado con acceso de
+lectura a las fuentes —la bóveda de documentación, por ejemplo— el revisor
+contrasta cada afirmación del entregable contra su fuente y devuelve la
+corrección con la cita, en vez de un "revisar el documento" que no acciona nada.
+
 ### Selección automática de herramientas
 
 El agente elige por function-calling. Con varios MCP conectados el catálogo llega

@@ -151,6 +151,12 @@ habilidades se exponen siempre y no compiten por los lugares del ranking. Cuando
 sí competían, 15 de coordinación dejaban 5 lugares para 20 herramientas y un
 agente se quedaba sin su propia `export_pdf` frente a tools de MCP.
 
+**`check_activity` deja auditar lo que un agente hizo, no lo que contó.**
+`RunState.activity` registra cada llamada a herramienta con su resultado real —lo
+graba el agent loop, no el agente— y la herramienta lo expone filtrable por rol.
+Es lo único que detecta la clase de error más repetida: ejecutar algo con éxito
+y después informar que no se pudo. Se conservan las últimas 500 entradas.
+
 **Las herramientas de coordinación se otorgan siempre.** `packages/tools/src/registry.ts`
 las expone sin mirar `role.toolIds`; `toolIds` solo controla capacidad y MCP. Si
 tocás la UI de asignación, no las presentes como si se pudieran quitar.

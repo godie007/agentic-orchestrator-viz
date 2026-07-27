@@ -306,3 +306,81 @@ describe("un entregable tiene que parecer un documento", () => {
     expect((await escribir("Planes", tabla)).ok).toBe(true);
   });
 });
+
+/**
+ * Un revisor que solo lee los mensajes revisa lo que los agentes *cuentan*.
+ * La clase de error que más apareció es justo la otra: un agente ejecuta algo
+ * con éxito y después informa que no pudo.
+ */
+describe("auditar lo que los agentes hicieron", () => {
+  const actividad = [
+    { roleId: "rol_2", tick: 3, tool: "export_pdf", ok: true, detail: "informe.pdf" },
+    { roleId: "rol_2", tick: 4, tool: "send_message", ok: true, detail: "→ Ana" },
+    { roleId: "rol_3", tick: 4, tool: "read_file", ok: false, detail: "ERROR: Access denied" },
+  ];
+
+  const roles = [
+    { id: "rol_2", name: "Lucas", title: "Desarrollador" },
+    { id: "rol_3", name: "Luisa", title: "QA" },
+  ];
+
+  const conActividad = (entradas = actividad): ToolContext => ({
+    ...ctx,
+    workspace: new Proxy({} as AgentWorkspace, {
+      get(_t, prop) {
+        if (prop === "roles") return roles;
+        if (prop === "departments") return [];
+        if (prop === "listActivity") return () => entradas;
+        return () => {
+          throw new Error("no esperado");
+        };
+      },
+    }),
+  });
+
+  const auditar = (args: Record<string, unknown> = {}) =>
+    tool("check_activity").execute(args, conActividad());
+
+  it("muestra qué ejecutó cada agente y con qué resultado", async () => {
+    const result = await auditar();
+
+    expect(result.ok).toBe(true);
+    expect(result.content).toContain("Lucas");
+    expect(result.content).toContain("export_pdf");
+    expect(result.content).toContain("FALLÓ");
+  });
+
+  it("permite ir directo a lo que se rompió", async () => {
+    const result = await auditar({ only_failures: true });
+
+    expect(result.content).toContain("read_file");
+    // Sin ruido: lo que salió bien no aparece.
+    expect(result.content).not.toContain("export_pdf");
+  });
+
+  it("filtra por rol, por nombre y no por id", async () => {
+    // Los modelos manejan mal los identificadores opacos.
+    const result = await auditar({ role: "Lucas" });
+
+    expect(result.content).toContain("export_pdf");
+    expect(result.content).not.toContain("read_file");
+  });
+
+  it("cuando el rol no existe devuelve los válidos", async () => {
+    const result = await auditar({ role: "Fantasma" });
+
+    expect(result.ok).toBe(false);
+    expect(result.content).toContain("Lucas");
+  });
+
+  it("dice que no hay nada en vez de mostrar una lista vacía", async () => {
+    const result = await tool("check_activity").execute({}, conActividad([]));
+
+    expect(result.ok).toBe(true);
+    expect(result.content).toContain("Todavía no");
+  });
+
+  it("es de solo lectura: auditar no cambia nada", () => {
+    expect(tool("check_activity").readOnly).toBe(true);
+  });
+});

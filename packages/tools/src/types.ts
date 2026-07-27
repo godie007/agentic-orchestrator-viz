@@ -127,6 +127,14 @@ export interface AgentWorkspace {
   /** Pedido a la persona a cargo. Va a una bandeja aparte, no a otro agente. */
   createRequest(input: AgentRequestInput): Promise<AgentRequest>;
   listRequests(): readonly AgentRequest[];
+  /** Qué ejecutó cada agente y con qué resultado, para poder auditarlo. */
+  listActivity(): ReadonlyArray<{
+    roleId: string;
+    tick: number;
+    tool: string;
+    ok: boolean;
+    detail: string;
+  }>;
 }
 
 /** Contexto de una invocación concreta. */
