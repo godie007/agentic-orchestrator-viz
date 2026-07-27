@@ -51,6 +51,11 @@ function tonosPorArea(departments: Department[]): Map<string, number> {
   );
 }
 
+/** Clave sin dirección de un par de roles. */
+function clavePar(uno: string, otro: string): string {
+  return uno < otro ? `${uno}|${otro}` : `${otro}|${uno}`;
+}
+
 /** Iniciales del nombre, hasta dos. "Diego Fernando Echeverry" → "DE". */
 function iniciales(nombre: string): string {
   const partes = nombre.trim().split(/\s+/).filter(Boolean);
@@ -187,6 +192,15 @@ const CLARO = 70;
  * la dirección en que necesitan lugar.
  */
 const ACHATADO = 1.5;
+
+/**
+ * Hasta cuántos pares se dibuja la malla completa de canales disponibles.
+ *
+ * Crece al cuadrado: ocho agentes son 28 líneas y todavía se entiende; doce
+ * son 66 y el organigrama pasa a ser una madeja. Arriba de este número sólo se
+ * dibujan las conversaciones que existieron.
+ */
+const MALLA_MAXIMA = 28;
 
 /**
  * Acomoda la empresa en anillos concéntricos alrededor de quien la dirige.
@@ -424,6 +438,27 @@ export function OrgGraph({
     });
   }, [roles, departments, tonos, state.roles, selectedRoleId, inboxCounts, posiciones, radios, setNodes]);
 
+  /**
+   * Cada par que intercambió al menos un mensaje, con cuántos.
+   *
+   * Sale de la traza, así que respeta el corte del timeline: al retroceder, la
+   * red de conversaciones es la que había en ese momento y no la final.
+   */
+  const conversaciones = useMemo(() => {
+    const pares = new Map<string, { de: string; a: string; total: number }>();
+    for (const flow of state.flows) {
+      if (!flow.from || !flow.to || flow.from === flow.to) continue;
+      // La clave es el par sin dirección: que A le escriba a B y B a A es una
+      // sola conversación, no dos líneas encimadas.
+      const [uno, otro] = flow.from < flow.to ? [flow.from, flow.to] : [flow.to, flow.from];
+      const clave = `${uno}|${otro}`;
+      const previo = pares.get(clave);
+      if (previo) previo.total += 1;
+      else pares.set(clave, { de: uno, a: otro, total: 1 });
+    }
+    return pares;
+  }, [state.flows]);
+
   const edges = useMemo<Edge[]>(() => {
     const result: Edge[] = [];
 
@@ -449,41 +484,101 @@ export function OrgGraph({
         // da la disposición —hacia adentro se manda, hacia afuera se reporta—.
         style: {
           stroke: activeType ? MESSAGE_COLOR[activeType] : reposo,
-          strokeWidth: activeType ? 2.5 : 1.5,
+          // También engrosa con lo que se hablaron: una línea de reporte por la
+          // que no pasó nunca un mensaje no es lo mismo que una por la que
+          // pasaron veinte.
+          strokeWidth: activeType
+            ? 2.5
+            : 1.2 + Math.log2(1 + (conversaciones.get(clavePar(role.reportsTo, role.id))?.total ?? 0)) * 0.5,
           color: activeType ? MESSAGE_COLOR[activeType] : undefined,
         },
       });
     }
 
-    // Mensajes entre pares: no hay línea de reporte, pero la conversación
-    // existe y tiene que verse, o la mitad de la coordinación queda invisible.
+    // Con quién habló cada uno, para toda la corrida y no sólo ahora.
+    //
+    // Los agentes no se hablan sólo por la línea de reporte: la QA le escribe
+    // al desarrollador sin pasar por el CTO, y esa conversación es la mitad de
+    // cómo trabaja la empresa. Antes esa línea aparecía un segundo, mientras el
+    // mensaje viajaba, y desaparecía: el organigrama volvía a ser un árbol y no
+    // quedaba rastro de que esos dos se hubieran hablado nunca.
+    //
+    // Ahora el vínculo queda dibujado, y el grosor dice cuánto se hablaron.
     const reporting = new Set(
       roles.flatMap((role) =>
         role.reportsTo ? [`${role.reportsTo}->${role.id}`, `${role.id}->${role.reportsTo}`] : [],
       ),
     );
-    for (const [key, type] of activeEdges) {
-      if (reporting.has(key)) continue;
-      const [source, target] = key.split("->");
-      if (!source || !target) continue;
+
+    for (const [key, conversacion] of conversaciones) {
+      // Si ya hay línea de reporte entre esos dos, no se duplica: la de
+      // jerarquía queda, engrosada por lo que se hablaron.
+      if (reporting.has(`${conversacion.de}->${conversacion.a}`)) continue;
+
+      const activo = activeEdges.get(`${conversacion.de}->${conversacion.a}`)
+        ?? activeEdges.get(`${conversacion.a}->${conversacion.de}`);
+
       result.push({
-        id: `flow-${key}`,
-        source,
-        target,
+        id: `charla-${key}`,
+        source: conversacion.de,
+        target: conversacion.a,
         type: "straight",
-        className: "edge-active",
-        animated: true,
+        className: activo ? "edge-active" : "",
+        ...(activo ? { animated: true } : {}),
         style: {
-          stroke: MESSAGE_COLOR[type] ?? "var(--color-accent)",
-          strokeWidth: 2,
-          strokeDasharray: "4 4",
-          color: MESSAGE_COLOR[type],
+          stroke: activo ? MESSAGE_COLOR[activo] : "var(--color-ink-faint)",
+          // El grosor crece con la cantidad de mensajes, pero achatado: sin el
+          // logaritmo, dos agentes que se escribieron treinta veces tapaban
+          // todo lo demás.
+          strokeWidth: activo ? 2 : 0.6 + Math.log2(1 + conversacion.total) * 0.5,
+          strokeOpacity: activo ? 1 : 0.3,
+          strokeDasharray: activo ? "4 4" : undefined,
+          color: activo ? MESSAGE_COLOR[activo] : undefined,
         },
       });
     }
 
+    // Los canales que existen y todavía nadie usó.
+    //
+    // En esta empresa cualquiera le puede escribir a cualquiera: el bus no
+    // exige pasar por la jerarquía. Dibujar también los pares que no se
+    // hablaron deja ver esa capacidad —y, por contraste, cuáles se usaron de
+    // verdad—. Van casi transparentes: son posibilidad, no actividad.
+    //
+    // Se cortan al pasar de MALLA_MAXIMA pares porque la malla completa crece
+    // al cuadrado: con doce agentes son 66 líneas y el organigrama deja de
+    // mostrar la empresa para mostrar una madeja.
+    const paresPosibles = (roles.length * (roles.length - 1)) / 2;
+    if (paresPosibles <= MALLA_MAXIMA) {
+      for (let i = 0; i < roles.length; i++) {
+        for (let j = i + 1; j < roles.length; j++) {
+          const uno = roles[i]!;
+          const otro = roles[j]!;
+          const clave = clavePar(uno.id, otro.id);
+          if (conversaciones.has(clave)) continue;
+          if (reporting.has(`${uno.id}->${otro.id}`) || reporting.has(`${otro.id}->${uno.id}`)) {
+            continue;
+          }
+          result.push({
+            id: `canal-${clave}`,
+            source: uno.id,
+            target: otro.id,
+            type: "straight",
+            // Sólida y finísima. Punteado hay uno solo en el lienzo —los
+            // anillos— y usar el mismo trazo para dos cosas distintas hacía
+            // que un canal sin usar se leyera como parte de la guía.
+            style: {
+              stroke: "var(--color-line)",
+              strokeWidth: 0.75,
+              strokeOpacity: 0.22,
+            },
+          });
+        }
+      }
+    }
+
     return result;
-  }, [roles, activeEdges, tonos]);
+  }, [roles, activeEdges, tonos, conversaciones]);
 
   // `fitView` corre una sola vez, al inicializar. Si en ese momento el
   // contenedor todavía mide cero —pasa seguido dentro de un grid flexible— el
