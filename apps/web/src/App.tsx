@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "./api.js";
 import { Empty } from "./lib/ui.js";
+import { Board } from "./routes/Board.js";
 import { LiveProcess } from "./routes/LiveProcess.js";
 import { McpHub } from "./routes/McpHub.js";
 import { CompanyDesigner, Costs, Providers } from "./routes/Settings.js";
@@ -11,6 +12,7 @@ import { Output } from "./routes/Output.js";
 
 const TABS = [
   { id: "proceso", label: "Proceso en vivo" },
+  { id: "tablero", label: "Tablero" },
   { id: "mcp", label: "MCP Hub" },
   { id: "solicitudes", label: "Solicitudes" },
   { id: "empresa", label: "Empresa" },
@@ -86,6 +88,8 @@ export function App() {
           <Empty>Cargando la empresa…</Empty>
         ) : tab === "proceso" ? (
           <LiveProcess key={activeId} company={company.data} />
+        ) : tab === "tablero" ? (
+          <Board key={activeId} company={company.data} />
         ) : tab === "mcp" ? (
           <McpHub key={activeId} company={company.data} />
         ) : tab === "solicitudes" ? (

@@ -22,6 +22,7 @@ export const providerIdSchema = z.enum([
   "anthropic",
   "openai",
   "ollama",
+  "nvidia",
 ]);
 export type ProviderId = z.infer<typeof providerIdSchema>;
 
@@ -319,9 +320,18 @@ export const messageSchema = z.object({
 });
 export type Message = z.infer<typeof messageSchema>;
 
+/**
+ * Etapas por las que pasa una tarea. El orden es el del tablero, y es la
+ * secuencia que se espera que siga el trabajo.
+ *
+ * `in_review` existe para que el paso por Control de Calidad sea una etapa
+ * visible y no un mensaje suelto: sin ella, un entregable saltaba de "en curso"
+ * a "hecha" y nadie podía ver si alguien lo había verificado.
+ */
 export const taskStatusSchema = z.enum([
   "pending",
   "in_progress",
+  "in_review",
   "blocked",
   "done",
   "cancelled",

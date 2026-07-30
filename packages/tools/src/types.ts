@@ -99,6 +99,16 @@ export interface RequestApprovalInput {
  * Lo que una herramienta puede hacerle al estado de la corrida. El motor lo
  * implementa contra la base; los tests lo implementan en memoria.
  */
+/** Resultado de pasar las cifras de un entregable por `verificar_cifras`. */
+export interface VerificacionCifras {
+  /** Versión del entregable que se verificó: si se reescribe, hay que rehacerla. */
+  version: number;
+  total: number;
+  malas: number;
+  sinVerificar: number;
+  roleId: string;
+}
+
 export interface AgentWorkspace {
   readonly company: Company;
   readonly departments: readonly Department[];
@@ -109,6 +119,18 @@ export interface AgentWorkspace {
   directReports(roleId: string): Role[];
 
   sendMessage(input: SendMessageInput): Promise<Message>;
+  /**
+   * Lo que el actor ya le escribió a alguien y todavía no le contestaron.
+   * Alcanza para no repetir el mismo pedido; no es el historial completo.
+   */
+  mensajesSinResponder(): readonly Message[];
+
+  /**
+   * Deja constancia de que las cifras de un entregable se verificaron, y con
+   * qué resultado. Es lo que después mira la exportación.
+   */
+  registrarVerificacion(clave: string, resultado: VerificacionCifras): void;
+  verificacionDe(clave: string): VerificacionCifras | undefined;
   createTask(input: CreateTaskInput): Promise<Task>;
   updateTask(taskId: string, patch: UpdateTaskInput): Promise<Task | null>;
   listTasks(assigneeRoleId: string): Promise<Task[]>;
@@ -160,6 +182,15 @@ export interface RegisteredTool {
   origin: ToolOrigin;
   /** Sin efectos secundarios: el motor puede ejecutarlas en paralelo. */
   readOnly: boolean;
+  /**
+   * Qué argumentos determinan el resultado, para no repetir una lectura que ya
+   * se hizo en el turno. Si no se declara, cuentan todos los del esquema.
+   *
+   * Sirve para los que llevan argumentos decorativos —un rótulo para la traza,
+   * un comentario— que no cambian lo que devuelve la herramienta pero sí la
+   * huella, y hacen que la misma llamada parezca nueva.
+   */
+  clavesDeCache?: readonly string[];
   requiresApproval: boolean;
   /** Servidor MCP de origen, si `origin === "mcp"`. */
   mcpServerId?: string;

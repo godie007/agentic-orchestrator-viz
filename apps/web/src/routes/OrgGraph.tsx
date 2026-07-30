@@ -45,7 +45,7 @@ interface AgentNodeData extends Record<string, unknown> {
  * creación— caían en tonos casi iguales y las tres áreas se veían del mismo
  * violeta. Por índice, dos áreas nunca comparten color hasta pasar las 20.
  */
-function tonosPorArea(departments: Department[]): Map<string, number> {
+export function tonosPorArea(departments: Department[]): Map<string, number> {
   return new Map(
     departments.map((department, i) => [department.id, Math.round((i * 137.508) % 360)]),
   );
@@ -57,7 +57,7 @@ function clavePar(uno: string, otro: string): string {
 }
 
 /** Iniciales del nombre, hasta dos. "Diego Fernando Echeverry" → "DE". */
-function iniciales(nombre: string): string {
+export function iniciales(nombre: string): string {
   const partes = nombre.trim().split(/\s+/).filter(Boolean);
   if (partes.length === 0) return "?";
   if (partes.length === 1) return partes[0]!.slice(0, 2).toUpperCase();

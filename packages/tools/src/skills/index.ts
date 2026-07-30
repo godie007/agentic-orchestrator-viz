@@ -120,6 +120,43 @@ function crearSkill(formato: Formato, storage: SkillStorage): RegisteredTool {
         );
       }
 
+      // Nada con plata sale sin que alguien haya verificado las cuentas.
+      //
+      // Es el mismo principio que el resto de las guardias: se verifica en el
+      // ejecutor y no en el prompt. Le pedimos exhaustividad al auditor de
+      // cinco maneras distintas —la herramienta, el prompt, la versión en lote,
+      // abaratar la lectura, más iteraciones— y verificó una cifra de seis y se
+      // dio por satisfecho. Acá deja de ser algo que *debería* hacer.
+      //
+      // Sólo aplica a documentos con cifras: un instructivo sin números no
+      // tiene nada que verificar.
+      const tieneCifras = /(\$\s?[\d.,]{4,})|(\d[\d.,]*\s?%)/.test(artifact.content);
+      if (tieneCifras) {
+        const verificacion = ctx.workspace.verificacionDe(artifact.key);
+        if (!verificacion) {
+          return fail(
+            `"${artifact.key}" tiene cifras de plata o porcentajes y nadie las verificó, así que ` +
+              `no sale. Corré verificar_cifras con entregable: "${artifact.key}" y una fila por ` +
+              `cada número que el documento afirma. Si no es tu tarea, pedísela a Control de ` +
+              `Calidad y exportá cuando te confirme.`,
+          );
+        }
+        if (verificacion.version !== artifact.version) {
+          return fail(
+            `La verificación de "${artifact.key}" es de la v${verificacion.version} y el ` +
+              `documento ya va por la v${artifact.version}: se reescribió después de revisarlo. ` +
+              `Volvé a correr verificar_cifras sobre la versión actual.`,
+          );
+        }
+        if (verificacion.malas > 0) {
+          return fail(
+            `"${artifact.key}" no sale: la verificación encontró ${verificacion.malas} de ` +
+              `${verificacion.total} cifras que no coinciden con su cuenta. Corregilas en el ` +
+              `documento, volvé a verificar y después exportá.`,
+          );
+        }
+      }
+
       const carpeta = String(args.folder ?? "").trim();
 
       // Un archivo por entregable y formato, no uno por versión. Antes el

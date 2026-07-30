@@ -92,7 +92,28 @@ describe("memoria de la empresa", () => {
 
     expect(prompt).toContain("Lección número 39");
     expect(prompt).not.toContain("Lección número 0");
-    expect(prompt).toContain("lecciones más");
+    expect(prompt).toContain("no se muestran");
+  });
+
+  it("acota la memoria por tamaño, no sólo por cantidad", () => {
+    // Tres lecciones enormes entran en el tope de 25, pero solas ocupaban el
+    // 54% del prompt del sistema y se reenviaban en cada llamada: medimos 825k
+    // tokens en una corrida gastados en material ajeno al turno.
+    const enormes = Array.from({ length: 3 }, (_, index) =>
+      learning(`tema-${index}`, "L".repeat(5_000), {
+        id: `lrn_${index}`,
+        timesConfirmed: 10 - index,
+      }),
+    );
+    const { role, run, config } = scenario(enormes);
+    const prompt = buildSystemPrompt(new RunState(run.id, config), role, "Objetivo");
+
+    const desde = prompt.indexOf("## Lo que esta empresa ya aprendió");
+    const hasta = prompt.indexOf("\n## ", desde + 1);
+    const memoria = prompt.slice(desde, hasta > 0 ? hasta : undefined);
+    // Sin el tope esto eran 15.000 caracteres sólo de memoria.
+    expect(memoria.length).toBeLessThan(2_500);
+    expect(memoria).toContain("recortada");
   });
 
   it("registrar la misma lección la refuerza en vez de duplicarla", async () => {

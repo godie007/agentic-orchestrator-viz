@@ -542,3 +542,155 @@ describe("editar tolerando cómo quedó partido el espacio", () => {
     expect(guardados).toHaveLength(0);
   });
 });
+
+/**
+ * Un coordinador que no recuerda lo que ya repartió asigna dos veces la misma
+ * tarea. En el tablero aparecen dos tarjetas idénticas que se mueven por
+ * separado: el asignado hace el trabajo una vez y la copia queda colgada.
+ */
+describe("assign_task no duplica trabajo ya asignado", () => {
+  function workspaceCon(tareas: Array<{ id: string; title: string; status: string }>) {
+    const creadas: Array<{ title: string }> = [];
+    const bruno = { id: "rol_2", name: "Bruno", title: "Analista" };
+    const workspace = {
+      roles: [bruno],
+      departments: [],
+      directReports: () => [bruno],
+      listTasks: async () => tareas,
+      createTask: async (input: { title: string }) => {
+        creadas.push(input);
+        return { id: "tsk_nueva", title: input.title };
+      },
+    } as unknown as AgentWorkspace;
+    return { workspace, creadas };
+  }
+
+  it("rechaza una tarea abierta con el mismo título, aunque cambie el formato", async () => {
+    const { workspace, creadas } = workspaceCon([
+      { id: "tsk_1", title: "Control de Calidad de entregables", status: "in_progress" },
+    ]);
+
+    const result = await tool("assign_task").execute(
+      {
+        assignee: "Bruno",
+        title: "control de calidad de ENTREGABLES.",
+        detail: "Revisá lo que produzcan.",
+      },
+      { ...ctx, workspace },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.content).toContain("tsk_1");
+    expect(creadas).toHaveLength(0);
+  });
+
+  it("deja reasignar si la anterior ya se cerró", async () => {
+    const { workspace, creadas } = workspaceCon([
+      { id: "tsk_1", title: "Control de Calidad de entregables", status: "done" },
+    ]);
+
+    const result = await tool("assign_task").execute(
+      {
+        assignee: "Bruno",
+        title: "Control de Calidad de entregables",
+        detail: "Segunda vuelta sobre la v6.",
+      },
+      { ...ctx, workspace },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(creadas).toHaveLength(1);
+  });
+});
+
+/**
+ * Un coordinador movía tareas ajenas: medimos a una CEO asignar el diagnóstico
+ * y acto seguido moverlo ella a "in_progress" y después a "blocked", sin que la
+ * asignada hubiera empezado. El tablero mostraba a alguien trabado en algo que
+ * nunca tocó, y un tablero que miente es peor que no tener tablero.
+ */
+describe("update_task: cada uno mueve sólo lo suyo", () => {
+  function workspaceCon(propias: Array<{ id: string; title: string }>) {
+    const movidas: string[] = [];
+    const workspace = {
+      roles: [],
+      departments: [],
+      listTasks: async () => propias,
+      updateTask: async (id: string, patch: { status: string }) => {
+        movidas.push(`${id}→${patch.status}`);
+        return { id, title: "Diagnóstico", status: patch.status };
+      },
+    } as unknown as AgentWorkspace;
+    return { workspace, movidas };
+  }
+
+  it("rechaza mover la tarea de otro y le dice qué hacer en su lugar", async () => {
+    const { workspace, movidas } = workspaceCon([]);
+    const result = await tool("update_task").execute(
+      { task_id: "tsk_de_sofia", status: "blocked" },
+      { ...ctx, workspace },
+    );
+    expect(result.ok).toBe(false);
+    expect(result.content).toContain("send_message");
+    expect(movidas).toHaveLength(0);
+  });
+
+  it("deja mover la propia", async () => {
+    const { workspace, movidas } = workspaceCon([{ id: "tsk_mia", title: "Diagnóstico" }]);
+    const result = await tool("update_task").execute(
+      { task_id: "tsk_mia", status: "in_review" },
+      { ...ctx, workspace },
+    );
+    expect(result.ok).toBe(true);
+    expect(movidas).toEqual(["tsk_mia→in_review"]);
+  });
+});
+
+/**
+ * Los agentes insisten: medimos diez mensajes de un coordinador a la misma
+ * persona en una corrida —pedido, recordatorio, seguimiento, escalamiento—
+ * todos sobre lo mismo. Y el que insiste se queda esperando en vez de avanzar
+ * con lo que sí puede hacer.
+ */
+describe("send_message: uno por persona hasta que conteste", () => {
+  function workspaceCon(sinResponder: Array<{ toRoleId: string; subject: string }>) {
+    const bruno = { id: "rol_2", name: "Bruno", title: "Analista" };
+    const ana = { id: "rol_3", name: "Ana Gómez", title: "Diseñadora" };
+    const enviados: string[] = [];
+    const workspace = {
+      roles: [bruno, ana],
+      departments: [],
+      mensajesSinResponder: () => sinResponder,
+      sendMessage: async (input: { toRoleId: string }) => {
+        enviados.push(input.toRoleId);
+        return { id: "msg_1", ...input };
+      },
+    } as unknown as AgentWorkspace;
+    return { workspace, enviados };
+  }
+
+  it("rechaza insistirle a quien todavía no contestó", async () => {
+    const { workspace, enviados } = workspaceCon([
+      { toRoleId: "rol_2", subject: "Necesito la estimación" },
+    ]);
+    const result = await tool("send_message").execute(
+      { to: "Bruno", type: "request", subject: "Recordatorio: estimación", body: "¿La tenés?" },
+      { ...ctx, workspace },
+    );
+    expect(result.ok).toBe(false);
+    expect(result.content).toContain("Necesito la estimación");
+    expect(enviados).toHaveLength(0);
+  });
+
+  it("no frena escribirle a otra persona: eso es avanzar en paralelo", async () => {
+    const { workspace, enviados } = workspaceCon([
+      { toRoleId: "rol_2", subject: "Necesito la estimación" },
+    ]);
+    const result = await tool("send_message").execute(
+      { to: "Ana Gómez", type: "request", subject: "Costeo", body: "Necesito el precio." },
+      { ...ctx, workspace },
+    );
+    expect(result.ok).toBe(true);
+    expect(enviados).toEqual(["rol_3"]);
+  });
+});

@@ -5,6 +5,7 @@ import { api, type CompanyBundle } from "../api.js";
 import { useRunStream } from "../lib/stream.js";
 import { derive, MESSAGE_COLOR, MESSAGE_LABEL, porcentajeCache, recentFlows } from "../lib/derive.js";
 import { Button, Empty, Field, Panel, Status, inputClass, money, relativeTime, tokens } from "../lib/ui.js";
+import { accionDeHerramienta, demora } from "../lib/acciones.js";
 import { OrgGraph } from "./OrgGraph.js";
 
 /**
@@ -742,12 +743,17 @@ function armarCronologia(
           nivel: 1,
           punto: "bg-accent",
           titulo: (
-            <span className="text-ink-dim">
+            // "vuelta 1" no le dice nada a nadie: es lo normal. Desde la
+            // segunda sí, porque un agente que da muchas vueltas sobre lo
+            // mismo es lo que hay que poder ver de un vistazo.
+            <span className="text-ink-dim" title={event.modelSlug}>
               {autor(event.roleId)}
-              piensa
-              <span className="ml-1.5 font-mono text-[10px] text-ink-faint">
-                vuelta {event.iteration} · {event.modelSlug.split("/").pop()}
-              </span>
+              {event.iteration === 1 ? "piensa" : "sigue pensando"}
+              {event.iteration > 1 && (
+                <span className="ml-1.5 text-[10px] text-ink-faint">
+                  vuelta {event.iteration}
+                </span>
+              )}
             </span>
           ),
         });
@@ -761,10 +767,10 @@ function armarCronologia(
           punto: "bg-warn",
           enCurso: true,
           titulo: (
-            <span className="flex items-baseline gap-1.5">
+            <span className="flex items-baseline gap-1.5" title={event.toolName}>
               {herramientaDe(event.roleId)}
-              <span className="shrink-0 font-mono text-[11px] text-ink-dim">
-                {event.toolName.replace(/^mcp__/, "")}
+              <span className="min-w-0 text-[11px] text-ink-dim">
+                {accionDeHerramienta(event.toolName)}
               </span>
             </span>
           ),
@@ -779,19 +785,30 @@ function armarCronologia(
         // traza puede venir recortada— se agrega sola, para no perder el
         // resultado.
         const fila = abiertas.get(event.callId);
+        const tardanza = demora(event.durationMs);
         const cuerpo = {
           punto: event.ok ? "bg-ok" : "bg-danger",
           enCurso: false,
           detalle: event.error ?? event.preview,
           titulo: (
-            <span className="flex items-baseline gap-1.5">
+            <span className="flex items-baseline gap-1.5" title={event.toolName}>
               {herramientaDe(event.roleId)}
-              <span
-                className={`shrink-0 font-mono text-[11px] ${event.ok ? "text-ink-dim" : "text-danger"}`}
-              >
-                {event.toolName.replace(/^mcp__/, "")}
+              <span className={`min-w-0 text-[11px] ${event.ok ? "text-ink-dim" : "text-danger"}`}>
+                {accionDeHerramienta(event.toolName)}
               </span>
-              <span className="shrink-0 text-[10px] text-ink-faint">{event.durationMs}ms</span>
+              {/* El fallo va como marca y no reescribiendo el verbo: las frases
+                  están conjugadas en presente y "no pudo lee un entregable" no
+                  es castellano. El motivo se lee en el detalle, abajo. */}
+              {!event.ok && (
+                <span className="shrink-0 rounded bg-danger/15 px-1 text-[10px] text-danger">
+                  falló
+                </span>
+              )}
+              {tardanza && (
+                <span className="shrink-0 text-[10px] text-warn" title="tardó más de lo normal">
+                  {tardanza}
+                </span>
+              )}
             </span>
           ),
         };
@@ -948,17 +965,17 @@ const ESTADO_CORRIDA: Record<string, string> = {
   stopped: "se detuvo",
   failed: "falló",
   budget_exceeded: "se quedó sin presupuesto",
-  awaiting_approval: "espera una aprobación",
+  awaiting_approval: "espera una respuesta de la persona a cargo",
 };
 
 const ESTADO_TAREA: Record<string, string> = {
   pending: "pendiente",
   in_progress: "en curso",
+  in_review: "en revisión",
   done: "terminada",
   blocked: "trabada",
   cancelled: "cancelada",
 };
-
 const ESTADO_APROBACION: Record<string, string> = {
   pending: "pendiente",
   granted: "otorgada",

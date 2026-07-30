@@ -1,3 +1,5 @@
+import { bloques, buscarEnEntregables } from "./busqueda.js";
+import { calcular, verificarCifras } from "./calculo.js";
 import type { Role } from "@orq/shared";
 import { fail, ok, preview, type AgentWorkspace, type RegisteredTool } from "./types.js";
 
@@ -23,6 +25,20 @@ function resolveRole(workspace: AgentWorkspace, reference: string): Role | undef
       role.name.toLowerCase() === needle ||
       role.title.toLowerCase() === needle,
   );
+}
+
+/**
+ * Título comparable: sin mayúsculas, tildes, puntuación ni espacios de más.
+ * "Control de Calidad de entregables" y "control de calidad de entregables."
+ * son la misma tarea aunque el modelo las escriba distinto.
+ */
+function normalizarTitulo(titulo: string): string {
+  return titulo
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
 }
 
 function roleNames(workspace: AgentWorkspace): string {
@@ -110,6 +126,26 @@ const sendMessage: RegisteredTool = {
     }
     if (target.id === ctx.actor.id) {
       return fail("No podés enviarte un mensaje a vos mismo.");
+    }
+
+    // Un mensaje por persona hasta que conteste.
+    //
+    // Sin esto los agentes insisten: medimos diez mensajes de un coordinador a
+    // la misma persona en una corrida —pedido, recordatorio, seguimiento,
+    // escalamiento— todos sobre lo mismo. Insistir no acelera a nadie: el otro
+    // contesta en su próximo ciclo igual, y mientras tanto cada mensaje le come
+    // un lugar en la bandeja y contexto a los dos. Peor todavía, el que insiste
+    // se queda esperando en vez de avanzar con lo que sí puede hacer solo.
+    const pendiente = ctx.workspace
+      .mensajesSinResponder()
+      .find((mensaje) => mensaje.toRoleId === target.id);
+    if (pendiente) {
+      return fail(
+        `Ya le escribiste a ${target.name} y todavía no te contestó: "${pendiente.subject}". ` +
+          `Va a responderte en su próximo ciclo; insistir no lo acelera. Si te falta algo más ` +
+          `para ese mismo tema, esperá y sumalo cuando conteste. Mientras tanto, avanzá con lo ` +
+          `que puedas hacer sin su respuesta o pedile a otra área lo que sí depende de ella.`,
+      );
     }
 
     const type = args.type === "report" ? "report" : "request";
@@ -321,6 +357,25 @@ const assignTask: RegisteredTool = {
       );
     }
 
+    // Un coordinador que no se acuerda de lo que ya repartió asigna la misma
+    // cosa dos veces, y en el tablero aparecen dos tarjetas iguales que se
+    // mueven por separado: el asignado hace el trabajo una vez y la copia queda
+    // colgada para siempre. Se ataja acá y no en el prompt, como el resto.
+    const abiertas = await ctx.workspace.listTasks(target.id);
+    const yaAsignada = abiertas.find(
+      (tarea) =>
+        tarea.status !== "done" &&
+        tarea.status !== "cancelled" &&
+        normalizarTitulo(tarea.title) === normalizarTitulo(parsed.values.title!),
+    );
+    if (yaAsignada) {
+      return fail(
+        `${target.name} ya tiene abierta la tarea "${yaAsignada.title}" (id ${yaAsignada.id}), ` +
+          `que es la misma que estás asignando. Si querés sumarle contexto, mandale un ` +
+          `mensaje; si cambió el alcance, decíselo referenciando esa tarea. No la dupliques.`,
+      );
+    }
+
     const task = await ctx.workspace.createTask({
       title: parsed.values.title!,
       detail: parsed.values.detail!,
@@ -341,15 +396,18 @@ const updateTask: RegisteredTool = {
   readOnly: false,
   requiresApproval: false,
   description:
-    "Actualiza el estado de una de tus tareas. Marcala 'done' con el resultado " +
-    "cuando la termines, o 'blocked' explicando qué te frena.",
+    "Mueve una de tus tareas de etapa. Ponela en 'in_progress' cuando arrancás, " +
+    "'in_review' cuando terminaste el trabajo y lo mandaste a verificar, 'done' " +
+    "con el resultado cuando quedó aprobado, o 'blocked' explicando qué te frena. " +
+    "Es lo único que hace visible en qué anda tu trabajo: una tarea que nunca se " +
+    "mueve parece abandonada aunque la estés haciendo.",
   inputSchema: {
     type: "object",
     properties: {
       task_id: stringProp("ID de la tarea (lo ves en tu lista de tareas)"),
       status: {
         type: "string",
-        enum: ["in_progress", "blocked", "done", "cancelled"],
+        enum: ["in_progress", "in_review", "blocked", "done", "cancelled"],
       },
       result: stringProp("Resultado si la terminaste, o el motivo del bloqueo"),
     },
@@ -360,8 +418,25 @@ const updateTask: RegisteredTool = {
     const parsed = readRequired(args, ["task_id", "status"]);
     if (!parsed.ok) return fail(`update_task: ${parsed.error}`);
     const taskId = parsed.values.task_id!;
+
+    // Sólo el asignado mueve su tarea. Medimos a un coordinador asignarle el
+    // diagnóstico a otra persona y acto seguido moverlo él mismo a
+    // "in_progress" y después a "blocked", sin que la otra hubiera empezado:
+    // el tablero mostraba a alguien trabado en algo que nunca tocó. Un tablero
+    // que miente es peor que no tener tablero, así que se verifica en la
+    // herramienta y no en el prompt.
+    const propias = await ctx.workspace.listTasks(ctx.actor.id);
+    if (!propias.some((tarea) => tarea.id === taskId)) {
+      return fail(
+        `La tarea "${taskId}" no es tuya, así que no podés moverla de etapa. Cada uno ` +
+          `mueve las suyas: es lo que hace que el tablero refleje el trabajo real. ` +
+          `Si querés saber cómo viene, o pedir que la frenen, escribile a quien la tiene ` +
+          `con send_message.`,
+      );
+    }
+
     const updated = await ctx.workspace.updateTask(taskId, {
-      status: args.status as "in_progress" | "blocked" | "done" | "cancelled",
+      status: args.status as "in_progress" | "in_review" | "blocked" | "done" | "cancelled",
       ...(args.result != null ? { result: String(args.result) } : {}),
     });
     if (!updated) return fail(`No existe la tarea "${taskId}".`);
@@ -691,10 +766,19 @@ const readArtifact: RegisteredTool = {
   origin: "coordination",
   readOnly: true,
   requiresApproval: false,
-  description: "Lee la última versión de un entregable guardado por cualquier rol.",
+  description:
+    "Lee un entregable guardado. Si es largo te devuelve su índice en vez del " +
+    "texto completo: pedí después la sección que necesites con `seccion`, o " +
+    "buscá el dato con buscar_en_entregables. Traerte veinte mil caracteres para " +
+    "mirar una cifra te gasta el turno y el contexto.",
   inputSchema: {
     type: "object",
-    properties: { key: stringProp("Identificador del entregable") },
+    properties: {
+      key: stringProp("Identificador del entregable"),
+      seccion: stringProp(
+        "Opcional: el encabezado que querés, tal como figura en el índice. Parcial alcanza.",
+      ),
+    },
     required: ["key"],
     additionalProperties: false,
   },
@@ -707,8 +791,49 @@ const readArtifact: RegisteredTool = {
       const keys = available.map((a) => `"${a.key}"`).join(", ") || "ninguno todavía";
       return fail(`No existe el entregable "${args.key}". Disponibles: ${keys}`);
     }
+
+    const encabezado = `# ${artifact.title} (v${artifact.version})`;
+    const partes = bloques(artifact.content);
+
+    // Una sección concreta: es lo que el modelo venía inventando con `start=`.
+    if (args.seccion) {
+      const buscada = String(args.seccion).toLowerCase();
+      const elegidas = partes.filter((p) => p.titulo.toLowerCase().includes(buscada));
+      if (elegidas.length === 0) {
+        const indice = partes.map((p) => p.titulo).filter(Boolean);
+        return fail(
+          `"${args.seccion}" no es una sección de ${artifact.key}. Las que tiene son: ` +
+            `${indice.join(" · ") || "ninguna, es un documento sin encabezados"}.`,
+        );
+      }
+      const texto = elegidas.map((p) => `## ${p.titulo}\n${p.texto}`).join("\n\n");
+      return ok(`${encabezado}\n\n${texto}`, `📖 ${artifact.title} › ${args.seccion}`);
+    }
+
+    // Un documento largo se devuelve como índice.
+    //
+    // Medimos a un auditor leer los mismos tres entregables enteros en dos
+    // ciclos seguidos —el memo no la frena porque es por turno y entre turnos
+    // la conversación se reinicia— y quedarse sin iteraciones antes de
+    // verificar nada. Traer el índice cuesta cien veces menos y le dice qué
+    // pedir después.
+    const TOPE_ENTERO = 4_000;
+    const indice = partes.map((p) => p.titulo).filter(Boolean);
+    if (artifact.content.length > TOPE_ENTERO && indice.length > 1) {
+      return ok(
+        `${encabezado}\n\n` +
+          `Este entregable tiene ${artifact.content.length} caracteres, así que va su índice ` +
+          `en vez del texto completo:\n\n` +
+          indice.map((t) => `- ${t}`).join("\n") +
+          `\n\nPedí la que necesites con read_artifact(key: "${artifact.key}", seccion: "…"), ` +
+          `o si buscás un dato puntual usá buscar_en_entregables, que mira en todos los ` +
+          `entregables a la vez.`,
+        `📖 ${artifact.title} v${artifact.version} — índice (${indice.length} secciones)`,
+      );
+    }
+
     return ok(
-      `# ${artifact.title} (v${artifact.version})\n\n${artifact.content}`,
+      `${encabezado}\n\n${artifact.content}`,
       `📖 ${artifact.title} v${artifact.version}`,
     );
   },
@@ -1029,6 +1154,28 @@ const requestContext: RegisteredTool = {
   async execute(args, ctx) {
     const parsed = readRequired(args, ["question", "reason"]);
     if (!parsed.ok) return fail(`request_context: ${parsed.error}`);
+
+    // Una consulta por vez. Con una pregunta sin responder, el agente sigue
+    // trabajando y vuelve a preguntar; las consultas se apilan y cada una le
+    // cuesta un ciclo a alguien. Medimos a un agente hacer una segunda tanda
+    // repitiendo tres preguntas que ya le habían contestado.
+    const propia = ctx.workspace
+      .listRequests()
+      .find(
+        (pedido) =>
+          pedido.status === "pending" &&
+          pedido.type === "context" &&
+          pedido.requestedByRoleId === ctx.actor.id,
+      );
+    if (propia) {
+      return fail(
+        `Ya tenés una consulta sin responder: "${(propia.question ?? propia.reason).slice(0, 140)}". ` +
+          `Esperá esa respuesta antes de preguntar otra cosa —va a llegarte a la bandeja— y ` +
+          `mientras tanto avanzá con lo que sí podés hacer. Si te falta algo más, sumalo cuando ` +
+          `te contesten, en una sola consulta.`,
+      );
+    }
+
     const request = await ctx.workspace.createRequest({
       type: "context",
       reason: parsed.values.reason!,
@@ -1091,6 +1238,13 @@ const requestToolAccess: RegisteredTool = {
 
 /** Todas las herramientas de coordinación. Todo rol las recibe siempre. */
 export const coordinationTools: RegisteredTool[] = [
+  // `calcular` no coordina a nadie, pero va acá porque las de coordinación se
+  // otorgan siempre: hacer una cuenta bien no es una capacidad especial que
+  // haya que asignar rol por rol, es higiene. Un rol nuevo la tiene desde el
+  // primer turno sin que nadie se acuerde de dársela.
+  calcular,
+  verificarCifras,
+  buscarEnEntregables,
   sendMessage,
   reply,
   broadcast,

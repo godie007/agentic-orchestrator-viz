@@ -289,6 +289,9 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
 
     // El agente que preguntó se entera por su bandeja, como cualquier novedad.
     const entrega = runtime.notifyRequester(resuelta, aplicado);
+    // Y la corrida que estaba esperando esta respuesta sigue sola: contestar es
+    // destrabar, no hace falta además apretar "continuar".
+    runtime.reanudarSiEsperaba(resuelta.runId);
     return { request: resuelta, aplicado, entrega };
   });
 

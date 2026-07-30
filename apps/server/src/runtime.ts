@@ -263,6 +263,12 @@ export class Runtime {
       tools: runtime.tools,
       ledger,
       concurrency: this.env.agentConcurrency,
+      fechaHoy: () =>
+        new Date().toLocaleDateString("es-AR", {
+          day: "numeric",
+          month: "long",
+          year: "numeric",
+        }),
       onRunUpdate: (updated) => this.store.saveRun(updated),
     });
 
@@ -314,6 +320,30 @@ export class Runtime {
     const active = this.require(runId);
     await active.orchestrator.runContinuous();
     this.store.saveRun(active.orchestrator.snapshot);
+  }
+
+  /**
+   * Retoma sola una corrida que se había quedado esperando una respuesta.
+   *
+   * Contestar una pregunta tiene que hacer que el trabajo continúe: si la
+   * respuesta entra a la bandeja pero nadie vuelve a mover el ciclo, el agente
+   * la lee recién si alguien aprieta "continuar" a mano, y eso convierte una
+   * espera asincrónica en una intervención manual.
+   *
+   * No bloquea la respuesta HTTP: la corrida puede durar minutos.
+   */
+  reanudarSiEsperaba(runId: string | null): void {
+    if (!runId) return;
+    const active = this.runs.get(runId);
+    if (!active) return;
+    if (active.orchestrator.snapshot.status !== "awaiting_approval") return;
+    // Si todavía queda otra pregunta sin responder, se sigue esperando.
+    if (active.state.requests.some((pedido) => pedido.status === "pending")) return;
+
+    void this.resume(runId).catch(() => {
+      // Un fallo acá ya quedó registrado en la traza de la corrida; no puede
+      // tumbar la respuesta a quien contestó la solicitud.
+    });
   }
 
   pause(runId: string): void {
@@ -562,13 +592,41 @@ export class Runtime {
       return "memoria";
     }
 
+    // La copia en memoria de la corrida tiene que enterarse: es la que mira el
+    // scheduler para saber si todavía espera a alguien.
+    active.state.resolverSolicitud(request);
+
     const aprobada = request.status === "approved";
-    const detalle =
-      request.type === "context"
-        ? (request.resolution ?? "")
-        : aprobada
-          ? `Aplicado: ${JSON.stringify(aplicado)}`
-          : (request.resolution ?? "");
+
+    // Una pregunta se contesta con una respuesta, no con un permiso.
+    //
+    // Todo salía como `approval_grant` con el asunto "Tu solicitud fue
+    // aprobada", así que un agente que había preguntado "¿cuántas consultas
+    // reciben por mes?" recibía algo rotulado "Aprobación concedida" con los
+    // datos escondidos en el cuerpo. Lo medimos: leyó el mensaje y volvió a
+    // preguntar tres de las mismas cosas en el ciclo siguiente.
+    if (request.type === "context") {
+      const pregunta = request.question ?? request.reason;
+      void active.state.forActor(null).sendMessage({
+        toRoleId: request.requestedByRoleId,
+        toDepartmentId: null,
+        type: aprobada ? "response" : "approval_deny",
+        subject: aprobada
+          ? `Respuesta a: ${pregunta.slice(0, 120)}`
+          : "No hay respuesta para tu consulta",
+        // El dato primero: es lo que el agente vino a buscar. La pregunta va
+        // al final, como referencia de qué se estaba contestando.
+        body: aprobada
+          ? `${request.resolution ?? ""}\n\n---\nEsto responde tu consulta: "${pregunta}"\n` +
+            `Ya lo tenés: no lo vuelvas a preguntar.`
+          : `Tu consulta no fue respondida.\n\n${request.resolution ?? ""}`,
+        threadId: null,
+        inReplyTo: null,
+      });
+      return "bandeja";
+    }
+
+    const detalle = aprobada ? `Aplicado: ${JSON.stringify(aplicado)}` : (request.resolution ?? "");
 
     void active.state.forActor(null).sendMessage({
       toRoleId: request.requestedByRoleId,

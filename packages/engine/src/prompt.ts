@@ -112,29 +112,69 @@ function buildAuthoritySection(role: Role, state: RunState): string {
  * Se acota para que la memoria no crezca sin control y termine costando más de
  * lo que ahorra: las más reafirmadas primero, hasta un límite.
  */
+/** Cuánto puede ocupar la memoria en el prompt, en caracteres. */
+const TOPE_MEMORIA = 3_200;
+/** Y cuánto una lección suelta, para que una sola no se coma el cupo. */
+const TOPE_LECCION = 400;
+
 function buildMemorySection(state: RunState, limit = 25): string {
   const learnings = state.learnings.slice(0, limit);
   if (learnings.length === 0) return "";
 
-  const byTopic = new Map<string, string[]>();
-  for (const learning of learnings) {
-    const list = byTopic.get(learning.topic) ?? [];
-    list.push(learning.lesson);
-    byTopic.set(learning.topic, list);
-  }
-
+  // La memoria se acota por **tamaño**, no sólo por cantidad.
+  //
+  // Va en el prompt a propósito —detrás de una herramienta costaría un turno
+  // descubrirla y otro llamarla— pero eso vale mientras sea corta. Medimos una
+  // empresa donde llegó a 2.532 tokens, el 54% del prompt del sistema, y como
+  // se reenvía en cada llamada fueron 825k tokens en una sola corrida: el 19%
+  // del gasto, casi todo en material que no tenía nada que ver con el turno.
+  // La inflaron tres respuestas a consultas guardadas enteras, de hasta 5.570
+  // caracteres, contra 167 de una lección de verdad.
+  //
+  // Se recorta lo largo en vez de descartarlo: el encabezado de una lección ya
+  // dice si aplica, y lo que importa suele estar en la primera línea.
   const lines = [
     `## Lo que esta empresa ya aprendió`,
     `Esto viene de trabajos anteriores. Dalo por válido y no lo vuelvas a averiguar;`,
     `si algo resulta estar mal, corregilo con record_lesson.`,
     ``,
   ];
+
+  const byTopic = new Map<string, string[]>();
+  let usado = 0;
+  let recortadas = 0;
+  let omitidas = 0;
+
+  for (const learning of learnings) {
+    if (usado >= TOPE_MEMORIA) {
+      omitidas += 1;
+      continue;
+    }
+    let lesson = learning.lesson;
+    if (lesson.length > TOPE_LECCION) {
+      lesson = `${lesson.slice(0, TOPE_LECCION).trimEnd()}… (recortada)`;
+      recortadas += 1;
+    }
+    usado += lesson.length + learning.topic.length;
+    const list = byTopic.get(learning.topic) ?? [];
+    list.push(lesson);
+    byTopic.set(learning.topic, list);
+  }
+
   for (const [topic, lessons] of byTopic) {
     lines.push(`**${topic}**`);
     for (const lesson of lessons) lines.push(`- ${lesson}`);
   }
-  const omitted = state.learnings.length - learnings.length;
-  if (omitted > 0) lines.push(``, `(${omitted} lecciones más, menos reafirmadas, no se muestran.)`);
+
+  const sinMostrar = omitidas + (state.learnings.length - learnings.length);
+  if (sinMostrar > 0 || recortadas > 0) {
+    lines.push(
+      ``,
+      `(${sinMostrar} lección(es) más no se muestran y ${recortadas} van recortadas, para no ` +
+        `gastar tu contexto en cosas de otros trabajos. Si necesitás el detalle de alguna, ` +
+        `preguntá con request_context nombrando el tema.)`,
+    );
+  }
   return lines.join("\n");
 }
 
@@ -150,12 +190,51 @@ Tu turno termina cuando dejás de llamar herramientas. Lo que escribas fuera de
 una herramienta no le llega a nadie: es tu razonamiento, no una acción. Para que
 algo ocurra, tenés que usar una herramienta.
 
+### Cuando te falta un dato, resolvelo en este orden
+
+Sos responsable de lo tuyo de punta a punta. Preguntar es lo último, no lo
+primero, y no es por orgullo: **preguntar es lo más caro y lo más lento que
+podés hacer**. Un mensaje a un colega no se contesta hasta el ciclo siguiente,
+así que cuesta un ciclo entero de reloj; buscar algo vos te cuesta una vuelta
+del mismo turno. Y una consulta a la persona a cargo frena tu trabajo hasta que
+alguien la conteste, que puede ser mañana.
+
+1. **¿Ya está escrito?** \`buscar_en_entregables\` con la pregunta en palabras: te
+   devuelve el fragmento que responde, con su fuente, sin traerte el documento
+   entero. La mitad de lo que los agentes se preguntan entre sí ya está escrito
+   en un entregable de otra área. \`read_artifact\` sólo cuando de verdad
+   necesitás el documento completo.
+2. **¿Lo puedo averiguar?** \`web_search\` y \`fetch_url\`, si las tenés. Precios de
+   mercado, cómo funciona una API, qué límites tiene una herramienta, qué hace
+   la competencia: eso se busca, no se pregunta.
+3. **¿Lo sabe un colega y sólo él?** \`send_message\`, **una sola vez**, y seguís
+   trabajando en lo que no depende de esa respuesta. Insistir no lo acelera.
+4. **¿Sólo lo sabe el cliente o la persona a cargo?** \`request_context\`, con
+   todo lo que te falta junto en una sola consulta.
+
+Si podés avanzar con un supuesto razonable, avanzá y dejalo escrito como
+supuesto en el entregable. Un documento que dice "asumimos X, confirmar" sirve;
+uno que no existe porque estabas esperando una respuesta, no.
+
 - Si te escribieron un pedido, respondelo con \`reply\` antes de terminar el turno.
-  Dejar un pedido sin respuesta bloquea a quien te escribió.
+  Dejar un pedido sin respuesta bloquea a quien te escribió. La excepción es el
+  encargo de la persona a cargo: no se acusa recibo con \`reply\` — no hay bandeja
+  del otro lado —, se atiende trabajando.
 - Cuando delegues o pidas algo, incluí todo el contexto en el mensaje. La otra
   persona no ve tu conversación ni tus tareas: si no se lo contás, no lo sabe.
-- Mantené tus tareas al día con \`update_task\`: es el único modo de que el resto
-  vea en qué anda tu trabajo.
+- Movés tus tareas por sus etapas con \`update_task\`, en orden y a medida que
+  trabajás: \`in_progress\` al arrancar, \`in_review\` cuando terminaste y lo
+  mandaste a verificar, \`done\` cuando quedó aprobado, \`blocked\` si algo te
+  frena. No las dejes para el final ni saltes de una punta a la otra: es lo
+  único que le muestra al resto en qué anda cada cosa, y una tarea que nunca se
+  mueve parece abandonada aunque la estés haciendo.
+- **Todo número que entre a un entregable pasa por \`calcular\`.** Márgenes,
+  precios, horas por mes, repagos, porcentajes: hacelos con la herramienta, no
+  de cabeza. Y cuando revises una cifra que ya está escrita, pasale \`esperado\`
+  para que te diga si coincide. Los cuatro errores más caros que cometió esta
+  empresa fueron aritmética que parecía razonable: un margen del 38,2% donde era
+  35,0%, un ahorro de 80 millones donde eran 14,4, y dos más. Todos pasaron una
+  revisión sin que nadie los viera.
 - Cuando produzcas un entregable —una propuesta, un análisis, una decisión—
   guardalo con \`write_artifact\`. Un resultado que solo existe en un mensaje se
   pierde.
@@ -175,8 +254,12 @@ export function buildTurnPrompt(
   tasks: Task[],
   /** Cuánto queda de la corrida, para saber si hay que cerrar. */
   progress?: { tick: number; maxTicks: number; spentUsd: number; budgetUsd: number },
+  /** Hoy, ya formateado por el llamador. Ver `TurnDeps.fechaHoy`. */
+  fechaHoy?: string,
 ): string {
-  const sections: string[] = [`# Ciclo ${state.tick}`];
+  const sections: string[] = [
+    fechaHoy ? `# Ciclo ${state.tick} — hoy es ${fechaHoy}` : `# Ciclo ${state.tick}`,
+  ];
 
   if (inbox.length === 0) {
     sections.push(

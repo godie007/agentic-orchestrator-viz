@@ -207,9 +207,28 @@ export class Store {
     return this.many<Company>("SELECT data FROM companies ORDER BY updated_at DESC");
   }
 
+  /**
+   * Borra la empresa y **todo lo suyo**, corridas y entregables incluidos.
+   *
+   * Que un entregable sobreviva a que se borre su corrida es deliberado —para
+   * eso existe `artifacts.company_id`—, pero no puede sobrevivir a que se borre
+   * la empresa: ahí no queda nadie a quien pertenezca. Antes se dejaban
+   * huérfanos y cada borrado desde la UI acumulaba basura invisible: medimos 10
+   * entregables y 21 corridas apuntando a empresas inexistentes.
+   */
   deleteCompany(id: string): void {
     const tables = ["departments", "roles", "policies", "mcp_servers", "tools", "learnings", "agent_requests"];
     const tx = this.db.transaction(() => {
+      const runIds = this.db
+        .prepare("SELECT id FROM runs WHERE json_extract(data, '$.companyId') = ?")
+        .all(id) as Array<{ id: string }>;
+      for (const { id: runId } of runIds) {
+        for (const tabla of ["events", "messages", "tasks", "approvals", "ledger"]) {
+          this.db.prepare(`DELETE FROM ${tabla} WHERE run_id = ?`).run(runId);
+        }
+      }
+      this.db.prepare("DELETE FROM runs WHERE json_extract(data, '$.companyId') = ?").run(id);
+      this.db.prepare("DELETE FROM artifacts WHERE company_id = ?").run(id);
       for (const table of tables) {
         this.db.prepare(`DELETE FROM ${table} WHERE company_id = ?`).run(id);
       }

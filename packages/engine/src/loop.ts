@@ -44,6 +44,15 @@ export interface TurnDeps {
    * El ciclo avanza cuando terminan todos, así que el más lento manda.
    */
   llmTimeoutMs?: number;
+  /**
+   * Hoy, ya formateado. Entra desde el llamador y no de un reloj acá adentro,
+   * igual que en el render de documentos: así los tests son deterministas.
+   *
+   * Sin esto el agente no sabe en qué año vive. Un auditor "encontró" que la
+   * fecha correcta de una propuesta era un typo y pidió cambiarla a un año
+   * anterior: no alcanza con que no invente, tiene que poder verificar.
+   */
+  fechaHoy?: string;
   signal?: AbortSignal;
 }
 
@@ -54,6 +63,11 @@ export interface TurnResult {
   summary: string | null;
   /** `true` si el turno quedó bloqueado esperando una aprobación. */
   awaitingApproval: boolean;
+  /**
+   * Cuántas herramientas ejecutó. Cero significa que habló y no hizo nada, que
+   * desde afuera es indistinguible de no haber tenido el turno.
+   */
+  herramientas: number;
 }
 
 export async function runAgentTurn(
@@ -143,12 +157,19 @@ export async function runAgentTurn(
         { role: "system", content: buildSystemPrompt(state, role, deps.objective) },
         {
           role: "user",
-          content: buildTurnPrompt(state, role, inbox, tasks, {
-            tick: state.tick,
-            maxTicks: deps.maxTicks,
-            spentUsd: ledger.spentUsd,
-            budgetUsd: ledger.budgetUsd,
-          }),
+          content: buildTurnPrompt(
+            state,
+            role,
+            inbox,
+            tasks,
+            {
+              tick: state.tick,
+              maxTicks: deps.maxTicks,
+              spentUsd: ledger.spentUsd,
+              budgetUsd: ledger.budgetUsd,
+            },
+            deps.fechaHoy,
+          ),
         },
       ];
 
@@ -187,6 +208,7 @@ export async function runAgentTurn(
   let costUsd = 0;
   let summary: string | null = null;
   let awaitingApproval = false;
+  let herramientas = 0;
 
   // Cuántas veces falló exactamente la misma llamada en este turno. Un modelo
   // que choca contra un error que no puede resolver —una ruta MCP fuera del
@@ -307,8 +329,26 @@ export async function runAgentTurn(
 
     // Las de solo lectura pueden ir en paralelo; las que mutan van en serie,
     // porque el orden en que se envían mensajes y se cambian tareas importa.
+    herramientas += calls.length;
     const results = await executeCalls(calls, byName, ctx, state, bus, lecturasDelTurno);
     conversation.push(...results.messages);
+
+    // Antes de la vuelta siguiente: si la conversación se pasó del presupuesto,
+    // lo ya consumido se retira. Va acá y no al final del turno porque el
+    // ahorro es en las vueltas que faltan, no en la que terminó.
+    const compactado = compactarConversacion(conversation, lecturasDelTurno);
+    if (compactado.compactados > 0) {
+      bus.emit({
+        type: "log",
+        runId,
+        tick: state.tick,
+        level: "info",
+        roleId: role.id,
+        message:
+          `${role.name}: se retiraron del contexto ${compactado.compactados} resultado(s) ya ` +
+          `leídos (~${compactado.liberados} tokens) para no reenviarlos en cada vuelta.`,
+      });
+    }
     // Avance = al menos una herramienta de esta vuelta hizo algo. Es lo que
     // habilita a estirar el turno más allá de la base.
     if (results.failures.length < calls.length) ultimoAvance = iterations;
@@ -372,7 +412,7 @@ export async function runAgentTurn(
     });
   }
 
-  return { iterations, costUsd, summary, awaitingApproval };
+  return { iterations, costUsd, summary, awaitingApproval, herramientas };
   } catch (error) {
     // Lo que se hizo hasta acá no se tira: se guarda para continuarlo en el
     // ciclo siguiente. Reempezar de cero paga de nuevo todo el contexto y
@@ -482,6 +522,126 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+/**
+ * Presupuesto de contexto de un turno, en tokens estimados.
+ *
+ * Por encima de esto se compactan los resultados de herramienta más viejos.
+ * El piso de un turno es el prompt del sistema más la bandeja: medimos 5–6k.
+ * 14k deja lugar para varios documentos en juego sin que la conversación se
+ * vuelva el gasto principal.
+ */
+const PRESUPUESTO_CONTEXTO = 14_000;
+
+/**
+ * Cuánto contexto reciente se protege, en tokens.
+ *
+ * Se mide en tamaño y no en cantidad de resultados. Proteger "los últimos 3"
+ * parece equivalente pero no lo es: si esos tres son documentos grandes, solos
+ * superan el presupuesto y la compactación ya no puede llegar al objetivo —lo
+ * medimos, un turno siguió creciendo hasta 22k con el tope en 14k—. Por tamaño,
+ * el trabajo en curso queda protegido tanto si son cinco resultados chicos como
+ * si es uno solo enorme.
+ */
+const TOKENS_INTOCABLES = 6_000;
+
+/** Aproximación barata y suficiente: no necesitamos exactitud, sino magnitud. */
+function tokensAprox(texto: string): number {
+  return Math.ceil(texto.length / 4);
+}
+
+/**
+ * Compacta la conversación de un turno para que no crezca al cuadrado.
+ *
+ * El costo de una vuelta es proporcional a todo lo leído antes: cada resultado
+ * de herramienta queda textual y se reenvía en cada iteración siguiente.
+ * Medido en una corrida real: un turno de 14 vueltas creció de 6k a 27k tokens
+ * y gastó 236k, de los cuales 149k —el 63%— fue reenviar lo mismo. Ese único
+ * turno fue casi la mitad de la corrida entera.
+ *
+ * Lo que se compacta es el **contenido ya consumido**: un agente actúa sobre lo
+ * que leyó en la vuelta inmediatamente siguiente, y a partir de ahí el texto
+ * completo pesa sin aportar. Se reemplaza por un aviso que dice qué había y que
+ * puede volver a pedirlo, así la información no se pierde: se vuelve
+ * recuperable en vez de estar siempre presente.
+ *
+ * Los últimos resultados no se tocan, y los mensajes del agente y del sistema
+ * tampoco: sin el razonamiento previo el turno pierde el hilo.
+ */
+function compactarConversacion(
+  conversation: ChatMessage[],
+  memo: Map<string, string>,
+): { liberados: number; compactados: number } {
+  const total = conversation.reduce((suma, m) => suma + tokensAprox(m.content), 0);
+  if (total <= PRESUPUESTO_CONTEXTO) return { liberados: 0, compactados: 0 };
+
+  // Resultados de herramienta todavía enteros, de más viejo a más nuevo.
+  const enteros = conversation.filter(
+    (mensaje) => mensaje.role === "tool" && !mensaje.content.startsWith(MARCA_RETIRADO),
+  );
+
+  // Se protege el trabajo en curso contando hacia atrás por tamaño: el más
+  // reciente siempre queda, aunque solo ya se pase del cupo.
+  const protegidos = new Set<ChatMessage>();
+  let acumulado = 0;
+  for (let i = enteros.length - 1; i >= 0; i--) {
+    const mensaje = enteros[i]!;
+    if (protegidos.size > 0 && acumulado >= TOKENS_INTOCABLES) break;
+    protegidos.add(mensaje);
+    acumulado += tokensAprox(mensaje.content);
+  }
+
+  const candidatos = enteros.filter((mensaje) => !protegidos.has(mensaje));
+
+  let restante = total;
+  let liberados = 0;
+  let compactados = 0;
+
+  for (const mensaje of candidatos) {
+    if (restante <= PRESUPUESTO_CONTEXTO) break;
+    const antes = tokensAprox(mensaje.content);
+    // No vale la pena tocar lo chico: el aviso ocupa parecido y se pierde
+    // información a cambio de nada.
+    if (antes < 200) continue;
+
+    const nombre = mensaje.name ?? "una herramienta";
+    mensaje.content =
+      `${MARCA_RETIRADO} El resultado de \`${nombre}\` (${mensaje.content.length} caracteres) ` +
+      `se retiró del contexto para no reenviarlo en cada vuelta. Ya lo leíste más arriba en ` +
+      `este turno. Si necesitás volver a consultarlo, pedilo de nuevo.`;
+    restante -= antes - tokensAprox(mensaje.content);
+    liberados += antes - tokensAprox(mensaje.content);
+    compactados += 1;
+
+    // Si lo sacamos del contexto, el memo no puede seguir diciendo "ya lo
+    // leíste, está más arriba": ya no está. Volver a pedirlo tiene que
+    // ejecutarse de verdad.
+    for (const clave of [...memo.keys()]) {
+      if (clave.startsWith(`${nombre}(`)) memo.delete(clave);
+    }
+  }
+
+  return { liberados, compactados };
+}
+
+/** Prefijo de un resultado ya retirado, para no compactarlo dos veces. */
+const MARCA_RETIRADO = "[contenido retirado]";
+
+/**
+ * Herramientas que sólo hablan: crean un mensaje o una solicitud, y no tocan
+ * nada de lo que reporta una herramienta de lectura —ni entregables, ni
+ * tareas, ni archivos—. No invalidan el memo de lecturas del turno.
+ */
+const COMUNICACION = new Set([
+  "send_message",
+  "reply",
+  "broadcast",
+  "escalate",
+  "request_approval",
+  "request_context",
+  "request_new_role",
+  "request_tool_access",
+]);
+
 async function executeCalls(
   calls: ToolCall[],
   byName: Map<string, RegisteredTool>,
@@ -499,12 +659,13 @@ async function executeCalls(
 
   const parallel = await Promise.all(
     readOnly.map(async (call) => {
-      // Una lectura idéntica ya hecha en este mismo turno se contesta con lo
-      // que devolvió la primera vez. Los agentes releen el mismo archivo dos y
-      // tres veces por turno —lo vimos con `read_text_file` y `list_directory`
-      // sobre la misma ruta— y cada relectura vuelve a pagar el ida y vuelta
-      // al servidor MCP y a meter el contenido entero en el contexto.
-      const huella = huellaDeFallo(call.name, call.arguments);
+      // Una lectura ya hecha en este mismo turno **no se repite ni se vuelve a
+      // pegar**: se contesta con un puntero a lo que ya está más arriba en la
+      // conversación. Devolver el contenido cacheado ahorraba el ida y vuelta
+      // al servidor MCP pero no los tokens, que es donde está el costo real:
+      // cada iteración del turno reenvía la conversación entera, así que un
+      // entregable repetido se paga muchas veces.
+      const huella = huellaDeLectura(byName.get(call.name), call);
       const cacheado = memo.get(huella);
       if (cacheado != null) {
         bus.emit({
@@ -513,10 +674,22 @@ async function executeCalls(
           tick: ctx.tick,
           level: "info",
           roleId: ctx.actor.id,
-          message: `${call.name}: misma lectura que ya hizo en este turno, se reusa el resultado.`,
+          message:
+            `${call.name}: ya lo había leído en este turno. Se le devuelve un puntero ` +
+            `en vez del contenido (${cacheado.length} caracteres ahorrados).`,
         });
         return {
-          message: { role: "tool" as const, toolCallId: call.id || ids.toolCall(), name: call.name, content: cacheado },
+          message: {
+            role: "tool" as const,
+            toolCallId: call.id || ids.toolCall(),
+            name: call.name,
+            content:
+              `Ya hiciste esta misma lectura en este turno: el resultado completo ` +
+              `(${cacheado.length} caracteres) está más arriba en esta conversación. ` +
+              `Usá lo que ya leíste en vez de volver a pedirlo. Si intentaste acotar la ` +
+              `lectura con un argumento que la herramienta no declara, ese argumento no ` +
+              `existe y se ignora: no hay forma de pedir "la parte siguiente".`,
+          },
           awaitingApproval: false,
           failure: null,
         };
@@ -538,9 +711,23 @@ async function executeCalls(
     messages.push(entry.message);
     if (entry.failure) failures.push(...entry.failure);
     if (entry.awaitingApproval) awaitingApproval = true;
+
     // Algo cambió: lo leído antes puede haber quedado viejo. Un `list_output`
     // después de escribir un archivo tiene que ver el archivo nuevo.
-    memo.clear();
+    //
+    // Pero hablar no cambia el mundo. Vaciar el memo con *cualquier* mutación
+    // incluía mandar un mensaje, y como un turno de coordinación intercala
+    // lecturas y mensajes todo el tiempo, en la práctica el memo casi nunca
+    // servía: medimos a un agente ejecutar `list_artifacts` tres veces en el
+    // mismo turno porque entre medio mandó un mensaje y asignó una tarea.
+    // Lo único que un mensaje sí desactualiza es la traza de actividad.
+    if (COMUNICACION.has(call.name)) {
+      for (const clave of [...memo.keys()]) {
+        if (clave.startsWith("check_activity(")) memo.delete(clave);
+      }
+    } else {
+      memo.clear();
+    }
   }
 
   return { messages, awaitingApproval, failures };
@@ -556,6 +743,48 @@ async function executeCalls(
 function huellaDeFallo(name: string, args: Record<string, unknown>): string {
   const claves = Object.keys(args).sort();
   return `${name}(${claves.map((clave) => `${clave}=${JSON.stringify(args[clave])}`).join(",")})`;
+}
+
+/**
+ * Huella para el memo de lecturas, calculada **solo sobre los argumentos que la
+ * herramienta declara**.
+ *
+ * Los modelos inventan parámetros que no existen. Medimos a un agente pedir
+ * `read_artifact` once veces con `start=4000`, `start=8000`… creyendo que
+ * paginaba: la herramienta ignora lo que no está en su esquema y devuelve el
+ * entregable entero cada vez, pero con la huella cruda cada llamada parecía
+ * distinta, el memo no pegaba nunca y el mismo documento de 40k caracteres
+ * entró once veces al contexto. Esa corrida gastó 534k tokens de entrada para
+ * producir 2k de salida.
+ *
+ * Si el esquema no cierra la puerta (`additionalProperties` distinto de
+ * `false`), el argumento extra sí puede cambiar el resultado y la huella se
+ * calcula completa.
+ */
+function huellaDeLectura(tool: RegisteredTool | undefined, call: ToolCall): string {
+  // Si la herramienta declara cuáles de sus argumentos determinan el resultado,
+  // manda eso: el resto es decoración y no puede hacer parecer nueva una
+  // llamada repetida.
+  if (tool?.clavesDeCache) {
+    const efectivos: Record<string, unknown> = {};
+    for (const clave of tool.clavesDeCache) {
+      if (clave in call.arguments) efectivos[clave] = call.arguments[clave];
+    }
+    return huellaDeFallo(call.name, efectivos);
+  }
+
+  const schema = tool?.inputSchema as
+    | { properties?: Record<string, unknown>; additionalProperties?: boolean }
+    | undefined;
+  const declaradas = schema?.properties;
+  if (!declaradas || schema?.additionalProperties !== false) {
+    return huellaDeFallo(call.name, call.arguments);
+  }
+  const efectivos: Record<string, unknown> = {};
+  for (const clave of Object.keys(call.arguments)) {
+    if (clave in declaradas) efectivos[clave] = call.arguments[clave];
+  }
+  return huellaDeFallo(call.name, efectivos);
 }
 
 /**

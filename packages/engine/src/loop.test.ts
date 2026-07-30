@@ -408,6 +408,279 @@ describe("no repetir la misma lectura dentro de un turno", () => {
     // Tres pedidos, una sola lectura real.
     expect(lecturas).toBe(1);
   });
+
+  /**
+   * Medido en producción: un agente ejecutó `list_artifacts` tres veces en el
+   * mismo turno. No era el memo fallando sino la invalidación: se vaciaba con
+   * cualquier mutación, y mandar un mensaje contaba como tal. Un turno de
+   * coordinación intercala lecturas y mensajes todo el tiempo, así que el memo
+   * casi nunca llegaba a servir.
+   */
+  it("mandar un mensaje no invalida lo que ya leyó", async () => {
+    const { agente, state, bus, tools } = escenario();
+
+    let lecturas = 0;
+    tools.register({
+      name: "list_artifacts",
+      description: "Lista los entregables.",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      origin: "coordination",
+      readOnly: true,
+      requiresApproval: false,
+      execute: async () => {
+        lecturas++;
+        return { ok: true, content: "7 entregables" };
+      },
+    });
+    tools.register({
+      name: "send_message",
+      description: "Escribe un mensaje.",
+      inputSchema: { type: "object", properties: { body: { type: "string" } } },
+      origin: "coordination",
+      readOnly: false,
+      requiresApproval: false,
+      execute: async () => ({ ok: true, content: "enviado" }),
+    });
+
+    // Leer, hablar, volver a leer: la segunda lectura no debería ejecutarse.
+    const guion = [
+      { name: "list_artifacts", arguments: {} },
+      { name: "send_message", arguments: { body: "hola" } },
+      { name: "list_artifacts", arguments: {} },
+    ];
+    let vuelta = 0;
+    const provider = new FakeProvider(() => {
+      const paso = guion[vuelta++];
+      return paso ? { toolCalls: [paso] } : { text: "Listo." };
+    });
+    const providers = new ProviderRegistry();
+    providers.register(provider);
+
+    await runAgentTurn(state, { ...agente, toolIds: ["tool_1", "tool_2"] }, {
+      bus,
+      providers,
+      tools,
+      ledger: new RunLedger(10),
+      objective: "Revisar el estado",
+      maxTicks: 5,
+    });
+
+    expect(lecturas).toBe(1);
+  });
+
+  it("pero escribir sí lo invalida: la lectura siguiente tiene que ver lo nuevo", async () => {
+    const { agente, state, bus, tools } = escenario();
+
+    let lecturas = 0;
+    tools.register({
+      name: "list_artifacts",
+      description: "Lista los entregables.",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      origin: "coordination",
+      readOnly: true,
+      requiresApproval: false,
+      execute: async () => {
+        lecturas++;
+        return { ok: true, content: `${lecturas} entregables` };
+      },
+    });
+    tools.register({
+      name: "write_artifact",
+      description: "Escribe un entregable.",
+      inputSchema: { type: "object", properties: { key: { type: "string" } } },
+      origin: "coordination",
+      readOnly: false,
+      requiresApproval: false,
+      execute: async () => ({ ok: true, content: "guardado" }),
+    });
+
+    const guion = [
+      { name: "list_artifacts", arguments: {} },
+      { name: "write_artifact", arguments: { key: "informe" } },
+      { name: "list_artifacts", arguments: {} },
+    ];
+    let vuelta = 0;
+    const provider = new FakeProvider(() => {
+      const paso = guion[vuelta++];
+      return paso ? { toolCalls: [paso] } : { text: "Listo." };
+    });
+    const providers = new ProviderRegistry();
+    providers.register(provider);
+
+    await runAgentTurn(state, { ...agente, toolIds: ["tool_1", "tool_2"] }, {
+      bus,
+      providers,
+      tools,
+      ledger: new RunLedger(10),
+      objective: "Escribir el informe",
+      maxTicks: 5,
+    });
+
+    expect(lecturas).toBe(2);
+  });
+
+  /**
+   * El caso medido en producción: el modelo cree que puede paginar un
+   * entregable largo e inventa `start=4000`, `start=8000`… La herramienta no
+   * declara ese argumento, lo ignora y devuelve el documento entero cada vez.
+   * Con la huella cruda cada llamada parecía distinta, el memo no pegaba, y el
+   * mismo documento entró once veces al contexto: 534k tokens de entrada para
+   * 2k de salida.
+   */
+  it("no se deja engañar por un argumento inventado que la herramienta ignora", async () => {
+    const { agente, state, bus, tools } = escenario();
+    const GRANDE = "L".repeat(5000);
+
+    let lecturas = 0;
+    tools.register({
+      name: "leer_entregable",
+      description: "Lee un entregable completo.",
+      // Igual que `read_artifact`: sólo `key`, y la puerta cerrada.
+      inputSchema: {
+        type: "object",
+        properties: { key: { type: "string" } },
+        required: ["key"],
+        additionalProperties: false,
+      },
+      origin: "coordination",
+      readOnly: true,
+      requiresApproval: false,
+      execute: async () => {
+        lecturas++;
+        return { ok: true, content: GRANDE };
+      },
+    });
+
+    let vuelta = 0;
+    const provider = new FakeProvider(() => {
+      vuelta++;
+      if (vuelta > 3) return { text: "Listo." };
+      return {
+        toolCalls: [
+          // Mismo entregable, "paginado" con un argumento que no existe.
+          { name: "leer_entregable", arguments: { key: "propuesta", start: vuelta * 4000 } },
+        ],
+      };
+    });
+    const providers = new ProviderRegistry();
+    providers.register(provider);
+
+    await runAgentTurn(state, { ...agente, toolIds: ["tool_1", "tool_2"] }, {
+      bus,
+      providers,
+      tools,
+      ledger: new RunLedger(10),
+      objective: "Auditar la propuesta",
+      maxTicks: 5,
+    });
+
+    expect(lecturas).toBe(1);
+
+    // Lo que importa no es ahorrar la llamada sino los tokens: el documento
+    // tiene que estar una sola vez en la conversación que se le reenvía al
+    // modelo, no una por cada pedido.
+    const ultimo = provider.calls[provider.calls.length - 1];
+    const veces = (ultimo?.messages ?? []).filter(
+      (m) => typeof m.content === "string" && m.content.includes(GRANDE),
+    ).length;
+    expect(veces).toBe(1);
+  });
+});
+
+/**
+ * El costo de una vuelta es proporcional a todo lo leído antes: cada resultado
+ * de herramienta queda textual y se reenvía en cada iteración siguiente, así
+ * que un turno largo crece al cuadrado. Medido en una corrida real: 14 vueltas,
+ * de 6k a 27k tokens, 236k en total, de los cuales 149k fue reenviar lo mismo.
+ */
+describe("el contexto de un turno no crece sin techo", () => {
+  /** Un documento grande, del orden de los entregables reales. */
+  const GRANDE = (n: number) => `documento ${n} ` + "x".repeat(40_000);
+
+  function escenarioConLecturas() {
+    const { agente, state, bus, tools } = escenario();
+    tools.register({
+      name: "read_artifact",
+      description: "Lee un entregable.",
+      inputSchema: {
+        type: "object",
+        properties: { key: { type: "string" } },
+        required: ["key"],
+        additionalProperties: false,
+      },
+      origin: "coordination",
+      readOnly: true,
+      requiresApproval: false,
+      execute: async (args) => ({ ok: true, content: GRANDE(Number(args.key)) }),
+    });
+    return { agente, state, bus, tools };
+  }
+
+  it("retira lo ya consumido en vez de reenviarlo en cada vuelta", async () => {
+    const { agente, state, bus, tools } = escenarioConLecturas();
+
+    // Cinco lecturas distintas: el memo no aplica —son claves distintas— así
+    // que sin compactación las cinco viajarían enteras en la última vuelta.
+    let vuelta = 0;
+    const provider = new FakeProvider(() => {
+      vuelta++;
+      if (vuelta > 5) return { text: "Listo." };
+      return { toolCalls: [{ name: "read_artifact", arguments: { key: String(vuelta) } }] };
+    });
+    const providers = new ProviderRegistry();
+    providers.register(provider);
+
+    await runAgentTurn(state, { ...agente, maxTurns: 12, toolIds: ["tool_1", "tool_2"] }, {
+      bus,
+      providers,
+      tools,
+      ledger: new RunLedger(10),
+      objective: "Auditar los entregables",
+      maxTicks: 5,
+    });
+
+    const ultima = provider.calls[provider.calls.length - 1]!;
+    const texto = ultima.messages.map((m) => m.content).join("");
+
+    // Los primeros documentos ya no viajan enteros.
+    expect(texto).not.toContain(GRANDE(1));
+    expect(texto).toContain("[contenido retirado]");
+    // Pero los últimos sí: son con los que está trabajando.
+    expect(texto).toContain(GRANDE(5));
+  });
+
+  it("mantiene el contexto acotado aunque el turno se estire", async () => {
+    const { agente, state, bus, tools } = escenarioConLecturas();
+
+    let vuelta = 0;
+    const provider = new FakeProvider(() => {
+      vuelta++;
+      if (vuelta > 8) return { text: "Listo." };
+      return { toolCalls: [{ name: "read_artifact", arguments: { key: String(vuelta) } }] };
+    });
+    const providers = new ProviderRegistry();
+    providers.register(provider);
+
+    await runAgentTurn(state, { ...agente, maxTurns: 12, toolIds: ["tool_1", "tool_2"] }, {
+      bus,
+      providers,
+      tools,
+      ledger: new RunLedger(10),
+      objective: "Auditar los entregables",
+      maxTicks: 5,
+    });
+
+    const tamaños = provider.calls.map((llamada) =>
+      llamada.messages.reduce((suma, m) => suma + m.content.length, 0),
+    );
+    const pico = Math.max(...tamaños);
+    // Sin compactar, ocho documentos de 40k dan más de 320k caracteres. Con la
+    // protección medida por tamaño y no por cantidad, el techo es el
+    // presupuesto (14k tokens ≈ 56k caracteres) más el resultado en curso.
+    expect(pico).toBeLessThan(80_000);
+    // Y no crece sin parar: la última no es la más grande por mucho.
+    expect(tamaños[tamaños.length - 1]!).toBeLessThanOrEqual(pico);
+  });
 });
 
 /**

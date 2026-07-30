@@ -20,6 +20,7 @@ import type {
   RequestApprovalInput,
   SendMessageInput,
   UpdateTaskInput,
+  VerificacionCifras,
   WriteArtifactInput,
 } from "@orq/tools";
 
@@ -184,6 +185,12 @@ export class RunState {
       getRole: (roleId) => state.getRole(roleId),
       directReports: (roleId) => state.directReports(roleId),
       sendMessage: (input) => state.sendMessage(input, actorId),
+      registrarVerificacion: (clave, resultado) => state.registrarVerificacion(clave, resultado),
+      verificacionDe: (clave) => state.verificacionDe(clave),
+      mensajesSinResponder: () =>
+        state.messages.filter(
+          (mensaje) => mensaje.fromRoleId === actorId && mensaje.status !== "answered",
+        ),
       createTask: (input) => state.createTask(input, actorId),
       updateTask: (taskId, patch) => state.updateTask(taskId, patch),
       listTasks: (roleId) => state.listTasks(roleId),
@@ -453,6 +460,23 @@ export class RunState {
     return request;
   }
 
+  /**
+   * Verificaciones de cifras por entregable.
+   *
+   * Vive en la corrida y no en la base a propósito: verificar es parte de
+   * producir el documento, no un atributo permanente del documento. Si se
+   * reescribe, la verificación de la versión anterior no vale.
+   */
+  private readonly verificaciones = new Map<string, VerificacionCifras>();
+
+  registrarVerificacion(clave: string, resultado: VerificacionCifras): void {
+    this.verificaciones.set(clave, resultado);
+  }
+
+  verificacionDe(clave: string): VerificacionCifras | undefined {
+    return this.verificaciones.get(clave);
+  }
+
   /** Registra una llamada a herramienta. Lo llama el agent loop. */
   recordActivity(entry: ActivityEntry): void {
     this.activity.push(entry);
@@ -463,6 +487,20 @@ export class RunState {
 
   get requests(): readonly AgentRequest[] {
     return this.requestList;
+  }
+
+  /**
+   * Refleja acá una solicitud que se resolvió desde afuera.
+   *
+   * La corrida tiene su propia copia en memoria, y resolver por la API sólo
+   * tocaba la base: la copia seguía diciendo "pending" para siempre. Con eso, la
+   * corrida que esperaba una respuesta no volvía a arrancar nunca —el chequeo
+   * de reanudación leía la lista vieja— y quedaba trabada informando que
+   * esperaba solicitudes que ya estaban contestadas.
+   */
+  resolverSolicitud(resuelta: AgentRequest): void {
+    const indice = this.requestList.findIndex((candidate) => candidate.id === resuelta.id);
+    if (indice >= 0) this.requestList[indice] = resuelta;
   }
 
   /** Memoria de la empresa, la reafirmada primero. */

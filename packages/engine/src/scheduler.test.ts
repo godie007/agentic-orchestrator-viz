@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ProviderRegistry, RunLedger } from "@orq/llm";
-import { ToolRegistry } from "@orq/tools";
+import { coordinationTools, ToolRegistry } from "@orq/tools";
 import type { TraceEvent } from "@orq/shared";
 import { EventBus } from "./events.js";
 import { RunState, type CompanyConfig } from "./state.js";
@@ -227,6 +227,225 @@ describe("Orchestrator", () => {
 
     expect(orchestrator.snapshot.status).toBe("budget_exceeded");
     expect(orchestrator.snapshot.stopReason).toContain("Presupuesto agotado");
+  });
+
+  /**
+   * Una pregunta a la persona a cargo no puede matar la corrida: terminar deja
+   * la pregunta huérfana —la respuesta ya no llega a ninguna bandeja— y el
+   * pedido muere a medias. La espera es asincrónica: queda a la espera y sigue
+   * cuando le contestan.
+   */
+  it("queda esperando en vez de terminar cuando le preguntó algo a la persona", async () => {
+    const { ceo, run, state, bus } = buildScenario();
+
+    const provider = new FakeProvider((req) => {
+      if (alreadyActed(req)) return { text: "Espero la respuesta." };
+      return {
+        toolCalls: [
+          {
+            name: "request_context",
+            arguments: { reason: "Faltan los volúmenes", question: "¿Cuántos pedidos por mes?" },
+          },
+        ],
+      };
+    });
+    const providers = new ProviderRegistry();
+    providers.register(provider);
+
+    const tools = new ToolRegistry();
+    for (const herramienta of coordinationTools) tools.register(herramienta);
+
+    const orchestrator = new Orchestrator(run, state, {
+      bus,
+      providers,
+      tools,
+      ledger: new RunLedger(run.budgetUsd),
+    });
+
+    await state.forActor(null).sendMessage({
+      toRoleId: ceo.id,
+      toDepartmentId: null,
+      type: "human",
+      subject: "Encargo",
+      body: "Diagnosticá el proceso.",
+      threadId: null,
+      inReplyTo: null,
+    });
+
+    await orchestrator.runContinuous();
+
+    expect(state.requests.some((pedido) => pedido.status === "pending")).toBe(true);
+    // Ni "completed" ni "failed": el trabajo sigue del otro lado.
+    expect(orchestrator.snapshot.status).toBe("awaiting_approval");
+    expect(orchestrator.snapshot.stopReason).toContain("esperando una respuesta");
+  });
+
+  /**
+   * Y cuando le contestan, sigue. La corrida tiene su propia copia de las
+   * solicitudes: resolverlas desde la API sólo tocaba la base, la copia seguía
+   * diciendo "pending" y la corrida quedaba trabada para siempre informando que
+   * esperaba respuestas que ya estaban dadas.
+   */
+  it("retoma cuando la solicitud queda resuelta", async () => {
+    const { ceo, run, state, bus } = buildScenario();
+
+    let yaPregunto = false;
+    const provider = new FakeProvider((req) => {
+      if (alreadyActed(req)) return { text: "Listo." };
+      if (!yaPregunto) {
+        yaPregunto = true;
+        return {
+          toolCalls: [
+            {
+              name: "request_context",
+              arguments: { reason: "Faltan los volúmenes", question: "¿Cuántos pedidos por mes?" },
+            },
+          ],
+        };
+      }
+      return { text: "Con eso alcanza." };
+    });
+    const providers = new ProviderRegistry();
+    providers.register(provider);
+    const tools = new ToolRegistry();
+    for (const herramienta of coordinationTools) tools.register(herramienta);
+
+    const orchestrator = new Orchestrator(run, state, {
+      bus,
+      providers,
+      tools,
+      ledger: new RunLedger(run.budgetUsd),
+    });
+
+    await state.forActor(null).sendMessage({
+      toRoleId: ceo.id,
+      toDepartmentId: null,
+      type: "human",
+      subject: "Encargo",
+      body: "Diagnosticá el proceso.",
+      threadId: null,
+      inReplyTo: null,
+    });
+
+    await orchestrator.runContinuous();
+    expect(orchestrator.snapshot.status).toBe("awaiting_approval");
+
+    // La persona contesta: es lo que hace el servidor al resolver la solicitud.
+    const pedido = state.requests.find((p) => p.status === "pending")!;
+    state.resolverSolicitud({ ...pedido, status: "approved", resolution: "140 por mes." });
+
+    // Ya no espera a nadie, así que puede seguir.
+    expect(state.requests.some((p) => p.status === "pending")).toBe(false);
+    await orchestrator.runContinuous();
+    expect(orchestrator.snapshot.status).not.toBe("awaiting_approval");
+  });
+
+  /**
+   * El caso medido: un agente con una tarea abierta que no toca. Como la tarea
+   * lo mantiene "con trabajo", tomaba turno cada ciclo, hablaba, no ejecutaba
+   * nada y terminaba. Catorce ciclos seguidos así, hasta morir por límite de
+   * ciclos. Y como siempre había alguien "con trabajo", la revisión de cierre
+   * no llegaba a ofrecerse nunca.
+   */
+  it("deja de convocar al que habla sin hacer nada, en vez de quemar los ciclos", async () => {
+    const { ceo, analista, run, state, bus } = buildScenario();
+
+    // Nunca llama herramientas: sólo habla.
+    const provider = new FakeProvider(() => ({ text: "Lo estoy viendo." }));
+    const providers = new ProviderRegistry();
+    providers.register(provider);
+
+    const orchestrator = new Orchestrator(run, state, {
+      bus,
+      providers,
+      tools: new ToolRegistry(),
+      ledger: new RunLedger(run.budgetUsd),
+    });
+
+    // Una tarea abierta que nadie va a mover: es lo que lo mantenía convocado.
+    await state.forActor(ceo.id).createTask({
+      title: "Diagnóstico",
+      detail: "Relevá el proceso.",
+      assigneeRoleId: analista.id,
+      priority: "normal",
+      dueTick: null,
+    });
+
+    await orchestrator.runContinuous();
+
+    // Sin el corte esto llegaba a maxTicks (50 en el escenario).
+    expect(orchestrator.snapshot.tick).toBeLessThan(8);
+    expect(orchestrator.snapshot.status).not.toBe("running");
+  });
+
+  it("no informa éxito cuando nadie produjo nada", async () => {
+    const { ceo, run, state, bus } = buildScenario();
+
+    // El agente lee algo y termina el turno sin delegar ni escribir: la bandeja
+    // queda vacía y desde el scheduler se ve igual que "ya está todo hecho".
+    const provider = new FakeProvider(() => ({ text: "Leí la propuesta." }));
+    const providers = new ProviderRegistry();
+    providers.register(provider);
+
+    const orchestrator = new Orchestrator(run, state, {
+      bus,
+      providers,
+      tools: new ToolRegistry(),
+      ledger: new RunLedger(run.budgetUsd),
+    });
+
+    await state.forActor(null).sendMessage({
+      toRoleId: ceo.id,
+      toDepartmentId: null,
+      type: "human",
+      subject: "Encargo",
+      body: "Auditá la propuesta.",
+      threadId: null,
+      inReplyTo: null,
+    });
+
+    await orchestrator.runContinuous();
+
+    // Antes decía "completed / no queda trabajo pendiente", que se lee como que
+    // salió bien.
+    expect(orchestrator.snapshot.status).toBe("failed");
+    expect(orchestrator.snapshot.stopReason).toContain("sin producir nada");
+  });
+
+  it("corta la corrida cuando el proveedor rechaza todos los turnos varios ciclos seguidos", async () => {
+    const { ceo, run, state, bus } = buildScenario();
+
+    // Una cuenta sin crédito: toda llamada al proveedor falla al instante.
+    const provider = new FakeProvider(() => {
+      throw new Error("402 Insufficient credits");
+    });
+    const providers = new ProviderRegistry();
+    providers.register(provider);
+
+    const orchestrator = new Orchestrator(run, state, {
+      bus,
+      providers,
+      tools: new ToolRegistry(),
+      ledger: new RunLedger(run.budgetUsd),
+    });
+
+    await state.forActor(null).sendMessage({
+      toRoleId: ceo.id,
+      toDepartmentId: null,
+      type: "human",
+      subject: "Encargo",
+      body: "Hacé algo.",
+      threadId: null,
+      inReplyTo: null,
+    });
+
+    // Sin la guarda, esto seguiría quemando ciclos hasta maxTicks y terminaría
+    // en "completed" sin haber producido nada.
+    await orchestrator.runContinuous();
+
+    expect(orchestrator.snapshot.status).toBe("failed");
+    expect(orchestrator.snapshot.stopReason).toContain("sin un solo turno completado");
+    expect(orchestrator.snapshot.tick).toBeLessThan(run.maxTicks);
   });
 });
 

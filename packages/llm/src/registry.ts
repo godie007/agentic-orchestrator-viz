@@ -6,6 +6,7 @@ import { OpenRouterProvider } from "./adapters/openrouter.js";
 import { AnthropicProvider } from "./adapters/anthropic.js";
 import { OpenAiProvider } from "./adapters/openai.js";
 import { OllamaProvider } from "./adapters/ollama.js";
+import { NvidiaProvider } from "./adapters/nvidia.js";
 
 /**
  * Registro de proveedores.
@@ -92,6 +93,7 @@ export interface ProviderEnv {
   ANTHROPIC_API_KEY?: string;
   OPENAI_API_KEY?: string;
   OLLAMA_BASE_URL?: string;
+  NVIDIA_API_KEY?: string;
   APP_URL?: string;
   APP_TITLE?: string;
 }
@@ -121,6 +123,9 @@ export function buildRegistry(env: ProviderEnv): ProviderRegistry {
   }
   if (env.OLLAMA_BASE_URL) {
     registry.register(new OllamaProvider({ baseUrl: env.OLLAMA_BASE_URL }));
+  }
+  if (env.NVIDIA_API_KEY) {
+    registry.register(new NvidiaProvider({ apiKey: env.NVIDIA_API_KEY }));
   }
 
   return registry;

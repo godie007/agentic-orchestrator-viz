@@ -23,6 +23,12 @@ export interface OrchestratorDeps {
   ledger: RunLedger;
   /** Turnos ejecutados en paralelo dentro de un tick. */
   concurrency?: number;
+  /**
+   * Cómo se formatea "hoy" para el prompt de los agentes. Es una función y no
+   * un valor porque una corrida puede cruzar la medianoche. Los tests no la
+   * pasan y así quedan deterministas. Ver `TurnDeps.fechaHoy`.
+   */
+  fechaHoy?: () => string;
   onRunUpdate?: (run: Run) => void;
 }
 
@@ -78,7 +84,20 @@ export class Orchestrator {
         });
       }
 
-      const activeRoleIds = this.state.rolesWithWork();
+      // Una tarea abierta hace que su responsable cuente como "con trabajo"
+      // para siempre, aunque no la toque. Medimos catorce ciclos seguidos donde
+      // el mismo agente tomaba turno, pensaba una vez, no llamaba ninguna
+      // herramienta y terminaba: la corrida murió por límite de ciclos sin
+      // producir nada, y como siempre había alguien "con trabajo", la revisión
+      // de cierre nunca llegó a ofrecerse.
+      //
+      // Hablar sin hacer nada, repetido, es no tener trabajo. Un mensaje nuevo
+      // en la bandeja sí lo es, y lo reactiva.
+      const activeRoleIds = this.state.rolesWithWork().filter((roleId) => {
+        const vacios = this.turnosSinHacerNada.get(roleId) ?? 0;
+        if (vacios < TURNOS_VACIOS_TOLERADOS) return true;
+        return this.state.inbox(roleId).length > 0;
+      });
 
       this.deps.bus.emit({
         type: "tick.start",
@@ -88,6 +107,74 @@ export class Orchestrator {
       });
 
       if (activeRoleIds.length === 0) {
+        // Nadie tiene trabajo, pero alguien quedó esperando una respuesta de
+        // una persona. Eso no es "terminó": es que el trabajo sigue del otro
+        // lado. Terminar acá dejaba la pregunta huérfana —la respuesta ya no
+        // llegaba a ninguna bandeja— y el pedido moría a medias.
+        //
+        // La espera sólo corta cuando ya no hay nada más que hacer: mientras
+        // otros puedan seguir, siguen. Una pregunta pendiente no frena a toda
+        // la empresa.
+        const esperando = this.state.requests.filter((pedido) => pedido.status === "pending");
+        if (esperando.length > 0) {
+          const reason =
+            `${esperando.length} solicitud(es) esperando una respuesta de la persona a cargo. ` +
+            `La corrida queda en pausa y sigue sola cuando respondas.`;
+          this.setStatus("awaiting_approval", reason);
+          return { advanced: false, reason };
+        }
+
+        // Antes de dar por cerrada una corrida que sí produjo algo, el máximo
+        // responsable tiene una última chance de mirar si el objetivo está
+        // cumplido.
+        //
+        // Sin esto la corrida termina en silencio apenas se vacían las
+        // bandejas, y eso premia quedarse a mitad de camino: lo medimos con un
+        // encargo que pedía diagnóstico, diseño y precio, y cerró como
+        // "completed" con sólo el diagnóstico hecho, porque quien coordinaba
+        // recibió el primer entregable y no encadenó las etapas siguientes.
+        // Cerrar pasa a ser una decisión explícita en vez de un silencio.
+        if (!this.cierrePedido && this.mensajesEntreRoles() > 0) {
+          this.cierrePedido = true;
+          const responsable =
+            this.state.roles.find((rol) => rol.authority === "executive") ?? this.state.roles[0];
+          if (responsable) {
+            void this.state.forActor(null).sendMessage({
+              toRoleId: responsable.id,
+              toDepartmentId: null,
+              type: "human",
+              subject: "Antes de cerrar: ¿está cumplido el encargo?",
+              body:
+                `Nadie tiene trabajo pendiente y la corrida está por cerrarse. Revisá contra el ` +
+                `objetivo original si falta alguna etapa del trabajo.\n\n` +
+                `Objetivo: ${this.run.objective}\n\n` +
+                `Si falta algo —una etapa que no se hizo, un entregable que nadie consolidó, una ` +
+                `verificación que no se pidió—, asignalo ahora con assign_task o pedilo con ` +
+                `send_message. Si está todo, terminá tu turno sin llamar ninguna herramienta y la ` +
+                `corrida cierra.`,
+              threadId: null,
+              inReplyTo: null,
+            });
+            return { advanced: true, reason: "se le pidió al responsable que confirme el cierre" };
+          }
+        }
+
+        // "No queda trabajo pendiente" y "nadie hizo nada" se ven igual desde
+        // acá: las dos dejan las bandejas vacías. Distinguirlas importa porque
+        // un `completed` se lee como éxito, y una corrida donde el rol que
+        // recibió el encargo leyó un artefacto y cortó el turno sin delegar ni
+        // escribir es un pedido perdido. Nos pasó con el encargo de auditoría:
+        // cerró en dos ciclos, sin un mensaje ni un entregable, informando que
+        // no quedaba trabajo.
+        if (this.state.artifacts.length === 0 && this.mensajesEntreRoles() === 0) {
+          const reason =
+            `La corrida terminó sin producir nada: ningún entregable escrito y ningún ` +
+            `mensaje entre roles. El encargo llegó a destino pero no se ejecutó. ` +
+            `Revisá la traza del primer ciclo: lo habitual es que quien lo recibió no ` +
+            `haya delegado ni usado una herramienta que deje resultado.`;
+          this.finish("failed", reason);
+          return { advanced: false, reason };
+        }
         this.finish("completed", "No queda trabajo pendiente: todas las bandejas y tableros están vacíos.");
         return { advanced: false, reason: this.stopReason ?? "" };
       }
@@ -95,7 +182,26 @@ export class Orchestrator {
       const before = this.state.messages.length;
       const costBefore = this.deps.ledger.spentUsd;
 
-      await this.runTurns(activeRoleIds);
+      const { intentados, fallidos } = await this.runTurns(activeRoleIds);
+
+      // Si ningún turno del ciclo terminó, el problema no es de un agente: el
+      // proveedor está rechazando todo (sin crédito, caído, saturado). Sin este
+      // corte, una corrida así quema los ciclos restantes en un minuto —cada
+      // turno falla al instante— y termina en "completed" sin haber hecho nada.
+      if (intentados > 0 && fallidos === intentados) {
+        this.ticksSinTurnosOk += 1;
+        if (this.ticksSinTurnosOk >= TICKS_FALLIDOS_TOLERADOS) {
+          const reason =
+            `${TICKS_FALLIDOS_TOLERADOS} ciclos seguidos sin un solo turno completado: ` +
+            `el proveedor está rechazando todas las llamadas` +
+            (this.ultimoErrorDeTurno ? ` (último error: ${this.ultimoErrorDeTurno})` : "") +
+            `. Se corta acá para no quemar los ciclos y el presupuesto restantes.`;
+          this.finish("failed", reason);
+          return { advanced: true, reason };
+        }
+      } else {
+        this.ticksSinTurnosOk = 0;
+      }
 
       this.deps.bus.emit({
         type: "tick.end",
@@ -135,6 +241,14 @@ export class Orchestrator {
 
   /** Corre ciclos hasta que no quede trabajo, se agote el presupuesto o se corte. */
   async runContinuous(): Promise<void> {
+    // Si quedó esperando a una persona y ya le contestaron, se destraba sola.
+    // Sin esto, retomar era un no-op: el bucle se salta entero mientras el
+    // estado sea `awaiting_approval`, así que la corrida quedaba trabada
+    // informando que esperaba respuestas que ya estaban dadas.
+    if (this.status === "awaiting_approval" && !this.esperaAlgo()) {
+      this.setStatus("paused");
+    }
+
     while (!isTerminal(this.status) && this.status !== "awaiting_approval") {
       if (this.stopRequested) {
         this.finish("stopped", "Detenida por la persona a cargo.");
@@ -214,13 +328,42 @@ export class Orchestrator {
     return true;
   }
 
-  private async runTurns(roleIds: string[]): Promise<void> {
+  /**
+   * Mensajes que se escribieron entre sí los roles. El encargo de la persona a
+   * cargo no cuenta: existe siempre y diría que hubo actividad aunque nadie
+   * haya movido un dedo.
+   */
+  private mensajesEntreRoles(): number {
+    return this.state.messages.filter((message) => message.fromRoleId !== null).length;
+  }
+
+  /** Si todavía hay algo que dependa de una persona: una aprobación o una consulta. */
+  private esperaAlgo(): boolean {
+    return (
+      this.state.pendingApprovals().length > 0 ||
+      this.state.requests.some((pedido) => pedido.status === "pending")
+    );
+  }
+
+  /** Turnos seguidos en los que un rol habló sin ejecutar ninguna herramienta. */
+  private readonly turnosSinHacerNada = new Map<string, number>();
+
+  /** Ya se le ofreció al responsable revisar el cierre. Pasa una sola vez. */
+  private cierrePedido = false;
+
+  /** Ciclos consecutivos en los que ningún turno pudo completarse. */
+  private ticksSinTurnosOk = 0;
+  private ultimoErrorDeTurno: string | null = null;
+
+  private async runTurns(roleIds: string[]): Promise<{ intentados: number; fallidos: number }> {
     // Nadie espera un lugar: el ciclo termina cuando termina el último, así que
     // dejar a un agente en cola no ahorra nada y alarga el ciclo entero. Con 5
     // roles y un tope de 4, uno arrancaba recién cuando otro terminaba.
     // El tope configurado se respeta como piso, no como techo.
     const concurrency = Math.max(1, this.deps.concurrency ?? 4, roleIds.length);
     const queue = [...roleIds];
+    let intentados = 0;
+    let fallidos = 0;
 
     const worker = async (): Promise<void> => {
       while (queue.length > 0) {
@@ -230,16 +373,38 @@ export class Orchestrator {
         const role = this.state.getRole(roleId);
         if (!role) continue;
 
+        intentados += 1;
         try {
-          await runAgentTurn(this.state, role, {
+          const resultado = await runAgentTurn(this.state, role, {
             bus: this.deps.bus,
             providers: this.deps.providers,
             tools: this.deps.tools,
             ledger: this.deps.ledger,
             objective: this.run.objective,
             maxTicks: this.run.maxTicks,
+            ...(this.deps.fechaHoy ? { fechaHoy: this.deps.fechaHoy() } : {}),
             ...(this.abort ? { signal: this.abort.signal } : {}),
           });
+          // El contador se reinicia en cuanto hace algo: lo que se persigue es
+          // la racha, no un turno suelto en el que no tenía nada que hacer.
+          if (resultado.herramientas > 0) {
+            this.turnosSinHacerNada.delete(role.id);
+          } else {
+            const vacios = (this.turnosSinHacerNada.get(role.id) ?? 0) + 1;
+            this.turnosSinHacerNada.set(role.id, vacios);
+            if (vacios === TURNOS_VACIOS_TOLERADOS) {
+              this.deps.bus.emit({
+                type: "log",
+                runId: this.run.id,
+                tick: this.state.tick,
+                level: "warn",
+                roleId: role.id,
+                message:
+                  `${role.name} lleva ${vacios} turnos hablando sin ejecutar nada. Deja de ` +
+                  `convocarse por sus tareas abiertas hasta que le llegue un mensaje nuevo.`,
+              });
+            }
+          }
         } catch (error) {
           // El fallo de un agente no puede tumbar la empresa: que un proveedor
           // esté saturado o un modelo caído es el equivalente a que alguien no
@@ -249,15 +414,15 @@ export class Orchestrator {
           // El presupuesto es la excepción: es un límite de la corrida entera,
           // así que se propaga y la detiene.
           if (error instanceof BudgetExceededError) throw error;
+          fallidos += 1;
+          this.ultimoErrorDeTurno = error instanceof Error ? error.message : String(error);
           this.deps.bus.emit({
             type: "log",
             runId: this.run.id,
             tick: this.state.tick,
             level: "error",
             roleId: role.id,
-            message: `${role.name} no pudo completar su turno: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
+            message: `${role.name} no pudo completar su turno: ${this.ultimoErrorDeTurno}`,
           });
         }
       }
@@ -267,6 +432,7 @@ export class Orchestrator {
     // seguro porque JavaScript es de un solo hilo y `RunState` no cede el
     // control (`await`) entre leer y escribir sus estructuras.
     await Promise.all(Array.from({ length: Math.min(concurrency, queue.length) }, worker));
+    return { intentados, fallidos };
   }
 
   /** Motivo por el que no se puede avanzar, o `null` si se puede. */
@@ -315,6 +481,20 @@ export class Orchestrator {
     this.setStatus(status, reason);
   }
 }
+
+/**
+ * Cuántos ciclos enteros sin un solo turno exitoso se toleran antes de cortar.
+ * Tres da margen a un pico transitorio del proveedor sin dejar que una cuenta
+ * sin crédito consuma los 50 ciclos de la corrida.
+ */
+const TICKS_FALLIDOS_TOLERADOS = 3;
+
+/**
+ * Turnos seguidos sin ejecutar nada antes de dejar de convocar a un rol por sus
+ * tareas abiertas. Dos da margen a un turno donde genuinamente no había nada que
+ * hacer; a partir del tercero es una racha y quema un ciclo por vez.
+ */
+const TURNOS_VACIOS_TOLERADOS = 2;
 
 function isTerminal(status: RunStatus): boolean {
   return (

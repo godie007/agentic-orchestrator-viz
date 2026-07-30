@@ -1,4 +1,4 @@
-import type { TraceEvent } from "@orq/shared";
+import type { TaskStatus, TraceEvent } from "@orq/shared";
 
 /**
  * Deriva el estado visible de la empresa a partir de la traza.
@@ -40,9 +40,37 @@ export interface McpActivity {
   at: number;
 }
 
+/**
+ * Una tarea reconstruida desde la traza.
+ *
+ * Se deriva en vez de consultarse por dos motivos: se mueve en el instante en
+ * que el agente la mueve —sin esperar el próximo poll— y al retroceder en el
+ * timeline el tablero muestra cómo estaba en ese momento, no cómo está ahora.
+ */
+export interface DerivedTask {
+  id: string;
+  title: string;
+  assigneeRoleId: string;
+  status: TaskStatus;
+  /** Ciclo en el que se movió por última vez. */
+  tick: number;
+  /** Cuándo se movió, para destacar lo que acaba de cambiar. */
+  changedAt: number;
+  /** Etapa anterior, o `null` si recién se creó. Es la flecha del movimiento. */
+  from: TaskStatus | null;
+  /**
+   * Cada paso por una etapa, en orden. Es la historia del ticket: sin esto
+   * sólo se ve dónde está, y lo que explica un trabajo es por dónde pasó y
+   * cuánto se quedó en cada lugar.
+   */
+  historia: Array<{ status: TaskStatus; tick: number; at: number }>;
+}
+
 export interface DerivedState {
   roles: Map<string, RoleActivity>;
   flows: MessageFlow[];
+  /** Tareas por id, en el orden en que aparecieron. */
+  tasks: Map<string, DerivedTask>;
   mcpCalls: McpActivity[];
   toolSelections: Map<string, { exposed: string[]; candidates: string[]; reason: string }>;
   tick: number;
@@ -81,6 +109,7 @@ function emptyRole(): RoleActivity {
 export function derive(events: TraceEvent[], upTo = events.length): DerivedState {
   const roles = new Map<string, RoleActivity>();
   const flows: MessageFlow[] = [];
+  const tasks = new Map<string, DerivedTask>();
   const mcpCalls: McpActivity[] = [];
   const toolSelections = new Map<string, { exposed: string[]; candidates: string[]; reason: string }>();
   const eventsPerTick = new Map<number, number>();
@@ -120,6 +149,29 @@ export function derive(events: TraceEvent[], upTo = events.length): DerivedState
         const role = roleOf(event.roleId);
         role.thinking = true;
         role.modelSlug = event.modelSlug;
+        break;
+      }
+
+      case "task.changed": {
+        const previa = tasks.get(event.taskId);
+        // Sólo se anota un paso cuando la etapa cambió de verdad: un
+        // `update_task` que reafirma el mismo estado no es historia.
+        const historia = previa ? [...previa.historia] : [];
+        if (!previa || previa.status !== event.status) {
+          historia.push({ status: event.status, tick: event.tick, at: event.at });
+        }
+        tasks.set(event.taskId, {
+          id: event.taskId,
+          title: event.title,
+          assigneeRoleId: event.assigneeRoleId,
+          status: event.status,
+          tick: event.tick,
+          changedAt: event.at,
+          // En la creación no hay movimiento que dibujar; en una actualización
+          // sí, y de dónde viene es la mitad de la información.
+          from: previa && previa.status !== event.status ? previa.status : null,
+          historia,
+        });
         break;
       }
 
@@ -194,6 +246,7 @@ export function derive(events: TraceEvent[], upTo = events.length): DerivedState
   return {
     roles,
     flows,
+    tasks,
     mcpCalls,
     toolSelections,
     tick,

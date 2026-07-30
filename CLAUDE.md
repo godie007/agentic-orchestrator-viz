@@ -234,6 +234,43 @@ orquestador vivo escribiendo eventos de algo que ya no existe.
 - **Los roles nuevos nacen en la posición (0,0)** y se apilarían en el organigrama;
   `OrgGraph.autoLayout` los acomoda por jerarquía cuando detecta posiciones
   repetidas, y respeta las que hayas movido a mano.
+- **Un rol se convoca por sus tareas abiertas, y eso puede volverse un livelock.**
+  Un agente que habla y no ejecuta nada sigue teniendo la tarea abierta, así que
+  vuelve a ser convocado el ciclo siguiente: medimos catorce ciclos seguidos así,
+  hasta morir por límite de ciclos sin producir nada. El scheduler cuenta ahora
+  las herramientas que ejecuta cada turno y deja de convocar por tareas al que
+  hace dos turnos vacíos seguidos; un mensaje nuevo en la bandeja lo reactiva.
+- **Insistir no acelera a nadie.** `send_message` rechaza escribirle de nuevo a
+  quien todavía no contestó. Sin la guardia los agentes mandaban pedido,
+  recordatorio, seguimiento y escalamiento sobre lo mismo —diez mensajes a la
+  misma persona en una corrida— y, peor, se quedaban esperando en vez de avanzar
+  con lo que sí podían hacer solos.
+- **Una pregunta se contesta con una respuesta, no con un permiso.** Antes toda
+  resolución de `request_context` salía como `approval_grant` con el asunto "Tu
+  solicitud fue aprobada": el agente veía "Aprobación concedida" y el dato que
+  había pedido quedaba escondido en el cuerpo. Lo medimos volviendo a preguntar
+  lo mismo al ciclo siguiente.
+- **La corrida tiene su propia copia de las solicitudes.** Resolver una por la
+  API toca la base; hay que reflejarla también en `RunState.resolverSolicitud`, o
+  la corrida queda esperando para siempre una respuesta que ya está dada. Y
+  `runContinuous` se destraba sola si el estado es `awaiting_approval` pero ya no
+  hay nada pendiente: sin eso, retomar era un no-op.
+- **Un argumento inventado derrota al memo de lecturas.** El modelo cree que
+  puede paginar un entregable largo y llama `read_artifact` con `start=4000`,
+  `start=8000`… La herramienta no declara ese campo, lo ignora y devuelve el
+  documento **entero** cada vez. Como la huella del memo se calculaba sobre todos
+  los argumentos, cada llamada parecía nueva: el mismo texto de 40k caracteres
+  entró once veces al contexto y la corrida gastó 534k tokens de entrada para
+  2k de salida (259:1). La huella ahora se calcula sólo sobre lo que el esquema
+  declara cuando cierra con `additionalProperties: false`, y una relectura
+  devuelve un puntero en vez del contenido: ahorrar el viaje al servidor no
+  servía de nada, el costo está en los tokens que se reenvían en cada iteración.
+- **Los agentes no tienen reloj.** `TurnDeps.fechaHoy` entra formateada desde el
+  llamador —igual que en el render de documentos— y aparece en el encabezado del
+  ciclo. Sin eso un auditor marcó como typo una fecha correcta y pidió cambiarla
+  a un año anterior; el corrector le hizo caso y **corrompió el dato**. Un
+  verificador que no puede verificar inventa hallazgos, y sus falsos positivos se
+  propagan aguas abajo con la misma autoridad que los reales.
 - **`write_artifact` rechaza claves que son variantes de una existente**
   (`-ciclo3`, `_v2`, `-final`, y sufijos colgados como `-detalle`) y le pide al
   agente que versione la original. Los modelos baratos fragmentan el entregable si
