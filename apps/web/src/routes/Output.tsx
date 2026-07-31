@@ -355,6 +355,20 @@ function VistaPrevia({
           />
         )}
 
+        {preview.data?.kind === "video" && (
+          // Sin `controls` no hay forma de pausar ni de adelantar; el servidor
+          // responde rangos, así que la barra de tiempo se puede arrastrar.
+          <video
+            src={url}
+            controls
+            className="mx-auto max-h-full w-full rounded border border-line bg-black"
+          />
+        )}
+
+        {preview.data?.kind === "audio" && (
+          <audio src={url} controls className="w-full" />
+        )}
+
         {preview.data?.kind === "text" && (
           <pre className="rounded bg-canvas p-3 text-[11px] leading-relaxed whitespace-pre-wrap text-ink-dim">
             {preview.data.text}

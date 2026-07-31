@@ -16,7 +16,7 @@ import {
 import { resolveAllTiers, type ProviderRegistry } from "@orq/llm";
 import type { Store } from "./db.js";
 import type { Runtime } from "./runtime.js";
-import { contentTypeOf, previewDe } from "./exports.js";
+import { contentTypeOf, previewDe, previewLiviano } from "./exports.js";
 
 /**
  * API HTTP.
@@ -403,10 +403,20 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
   app.get("/api/companies/:companyId/exports-preview/*", async (request, reply) => {
     const { companyId } = request.params as { companyId: string };
     const ruta = (request.params as Record<string, string>)["*"] ?? "";
+    const nombre = ruta.split("/").at(-1) ?? ruta;
+
+    // El video, el PDF y las imágenes los dibuja el navegador desde su URL: se
+    // responde con el tamaño y nada más. Leerlos acá era cargar el archivo
+    // entero en memoria para después descartarlo.
+    const liviano = previewLiviano(nombre);
+    if (liviano) {
+      const sizeBytes = await runtime.exports.pesoDe(companyId, ruta);
+      if (sizeBytes == null) return notFound(reply, "documento", ruta);
+      return { ...liviano, sizeBytes };
+    }
+
     const bytes = await runtime.exports.read(companyId, ruta);
     if (!bytes) return notFound(reply, "documento", ruta);
-
-    const nombre = ruta.split("/").at(-1) ?? ruta;
     return { ...(await previewDe(nombre, bytes)), sizeBytes: bytes.length };
   });
 
@@ -426,6 +436,22 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
       "content-disposition",
       `${inline ? "inline" : "attachment"}; filename="${nombre}"`,
     );
+
+    // Un `<video>` pide rangos para poder adelantar: sin esto la barra de
+    // tiempo no se puede arrastrar y el archivo se reproduce sólo de corrido.
+    reply.header("accept-ranges", "bytes");
+    const rango = /^bytes=(\d*)-(\d*)$/.exec(String(request.headers.range ?? ""));
+    if (rango) {
+      const desde = rango[1] ? Number(rango[1]) : 0;
+      const hasta = rango[2] ? Math.min(Number(rango[2]), bytes.length - 1) : bytes.length - 1;
+      if (desde > hasta || desde >= bytes.length) {
+        reply.code(416).header("content-range", `bytes */${bytes.length}`);
+        return reply.send();
+      }
+      reply.code(206).header("content-range", `bytes ${desde}-${hasta}/${bytes.length}`);
+      return reply.send(bytes.subarray(desde, hasta + 1));
+    }
+
     return reply.send(bytes);
   });
 

@@ -75,18 +75,46 @@ concurrentes en `scheduler.test.ts`.
 
 **Las habilidades son un origen de herramienta, no un sistema aparte.**
 `origin: "skill"` (`packages/tools/src/skills/`) agrupa lo que un rol sabe
-*producir*: hoy `export_docx` y `export_pdf`. Se asignan por rol como cualquier
-otra. Reciben la **clave de un entregable ya escrito**, nunca el contenido por
-argumento: un documento largo pasado como argumento se trunca cuando el modelo
-agota `max_tokens` a mitad del JSON. El markdown se parsea una sola vez a bloques
-neutros (`markdown.ts`) y de ahí salen las dos salidas; el `SkillStorage` lo
-inyecta el servidor, así que `packages/tools` no decide dónde van los archivos.
+*producir*: hoy `export_docx`, `export_pdf` y `export_video`. Se asignan por rol
+como cualquier otra. Reciben la **clave de un entregable ya escrito**, nunca el
+contenido por argumento: un documento largo pasado como argumento se trunca
+cuando el modelo agota `max_tokens` a mitad del JSON. El markdown se parsea una
+sola vez a bloques neutros (`markdown.ts`) y de ahí salen las tres salidas; el
+`SkillStorage` lo inyecta el servidor, así que `packages/tools` no decide dónde
+van los archivos.
 
 Los documentos se arman para que alguien los abra: portada con quién firma,
 encabezado y pie con numeración, tablas con bordes y encabezado repetido, listas
 numeradas de verdad y control de huérfanos. La portada la compone el sistema con
 datos que ya tiene (`DocumentMeta`), no el modelo. **La fecha entra formateada
 desde el llamador**: el render no tiene reloj, y así los tests son deterministas.
+
+**El video es el mismo markdown leído como línea de tiempo.** `export_video`
+(`skills/video.ts`) no maqueta un documento: interpreta el guion como una
+secuencia. `guion.ts` traduce los bloques a escenas —`#` es la portada, cada
+`##` abre una escena, los párrafos son la voz en off, las viñetas se muestran
+mientras se habla— y `**Nombre:** texto` marca diálogo, donde **cada personaje
+recibe una voz distinta** y su línea aparece en pantalla cuando le toca.
+
+Se arma con lo que ffmpeg ya trae —libass para la tipografía, `gradients` para
+el fondo— y **en una sola pasada**: no hay un clip por escena ni cadena de
+`xfade`, así que no hay archivos intermedios de video que sincronizar. La única
+fuente de verdad del tiempo son las duraciones medidas del audio; todo lo que se
+ve se calcula a partir de ellas. Agregar un navegador headless para maquetar seis
+placas de texto sería cambiar 150 MB de dependencia por un `<div>`.
+
+La voz sale de **Kokoro** local (gratis, ilimitado; se busca en `ORQ_KOKORO_HOME`
+y en `~/.cache/`), con `say` de macOS como respaldo. El respaldo no es un lujo:
+sin él, una máquina sin el modelo descargado no puede producir un video y la
+habilidad quedaría rota sin decir por qué.
+
+Tres trampas que ya costaron un video mal filmado: **un diálogo se escribe sin
+renglones en blanco** —una línea por personaje, como en un guion— y en markdown
+eso es *un solo párrafo*, así que hay que volver a partirlo por cada `**Nombre:**`
+o las cuatro intervenciones las dice de corrido el primero que habló, leyendo en
+voz alta los nombres de los demás. Lo que no entra en el alto útil **pasa de
+página** en vez de desbordarse por abajo del cuadro. Y **la viñeta de ffmpeg
+apaga los bordes**, que es justo donde vive el texto alineado a la izquierda.
 
 **Un archivo por entregable y formato**, no uno por versión: `key.pdf`, no
 `key-v3.pdf`. Con la versión en el nombre cada re-exportación dejaba otro

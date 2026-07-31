@@ -1,6 +1,7 @@
-import { fail, ok, type RegisteredTool } from "../types.js";
+import { fail, ok, type RegisteredTool, type ToolContext, type ToolResult } from "../types.js";
 import { renderDocx, renderPdf } from "./render.js";
 import { puedeBorrar } from "./permisos.js";
+import { renderVideo } from "./video.js";
 
 export { parseMarkdown, parseSpans, spansToText } from "./markdown.js";
 export type { Block, Span } from "./markdown.js";
@@ -8,6 +9,12 @@ export { renderDocx, renderPdf, cuerpoSinTituloRepetido } from "./render.js";
 export type { DocumentMeta } from "./render.js";
 export { puedeBorrar } from "./permisos.js";
 export type { ArchivoParaBorrar, VeredictoBorrado } from "./permisos.js";
+export { parseGuion, caracteresHablados } from "./guion.js";
+export type { Guion, Escena, Linea } from "./guion.js";
+export { renderVideo } from "./video.js";
+export type { OpcionesVideo, ResultadoVideo } from "./video.js";
+export { crearNarrador, motorDisponible } from "./narracion.js";
+export type { Narrador, Motor, OpcionesNarrador } from "./narracion.js";
 
 /**
  * Habilidades: lo que un agente sabe *producir*, no con quién habla ni de dónde
@@ -67,6 +74,88 @@ const FORMATOS = {
 
 type Formato = keyof typeof FORMATOS;
 
+type Entregable = NonNullable<Awaited<ReturnType<ToolContext["workspace"]["readArtifact"]>>>;
+
+/**
+ * Resuelve la clave a un entregable, o explica qué claves sí existen.
+ *
+ * Lo comparten todas las habilidades que exportan: el error importa tanto como
+ * el camino feliz, porque un agente que recibe "no existe" a secas vuelve a
+ * intentar con la misma clave inventada.
+ */
+async function buscarEntregable(
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+): Promise<{ artifact: Entregable } | { error: ToolResult }> {
+  const key = String(args.artifact_key ?? "").trim();
+  if (!key) {
+    return {
+      error: fail(
+        `Falta artifact_key. Es la clave del entregable que querés exportar; ` +
+          `si todavía no lo escribiste, usá write_artifact primero.`,
+      ),
+    };
+  }
+
+  const artifact = await ctx.workspace.readArtifact(key);
+  if (!artifact) {
+    const existentes = await ctx.workspace.listArtifacts();
+    return {
+      error: fail(
+        existentes.length === 0
+          ? `No existe ningún entregable todavía. Escribí el contenido con write_artifact ` +
+              `y después exportalo.`
+          : `No existe el entregable "${key}". Los que hay son: ` +
+              `${existentes.map((a) => a.key).join(", ")}.`,
+      ),
+    };
+  }
+
+  return { artifact };
+}
+
+/**
+ * Nada con plata sale sin que alguien haya verificado las cuentas.
+ *
+ * Es el mismo principio que el resto de las guardias: se verifica en el
+ * ejecutor y no en el prompt. Le pedimos exhaustividad al auditor de cinco
+ * maneras distintas —la herramienta, el prompt, la versión en lote, abaratar la
+ * lectura, más iteraciones— y verificó una cifra de seis y se dio por
+ * satisfecho. Acá deja de ser algo que *debería* hacer.
+ *
+ * Sólo aplica a documentos con cifras: un instructivo sin números no tiene nada
+ * que verificar. Devuelve el rechazo, o `null` si puede salir.
+ */
+function revisarCifras(artifact: Entregable, ctx: ToolContext): ToolResult | null {
+  const tieneCifras = /(\$\s?[\d.,]{4,})|(\d[\d.,]*\s?%)/.test(artifact.content);
+  if (!tieneCifras) return null;
+
+  const verificacion = ctx.workspace.verificacionDe(artifact.key);
+  if (!verificacion) {
+    return fail(
+      `"${artifact.key}" tiene cifras de plata o porcentajes y nadie las verificó, así que ` +
+        `no sale. Corré verificar_cifras con entregable: "${artifact.key}" y una fila por ` +
+        `cada número que el documento afirma. Si no es tu tarea, pedísela a Control de ` +
+        `Calidad y exportá cuando te confirme.`,
+    );
+  }
+  if (verificacion.version !== artifact.version) {
+    return fail(
+      `La verificación de "${artifact.key}" es de la v${verificacion.version} y el ` +
+        `documento ya va por la v${artifact.version}: se reescribió después de revisarlo. ` +
+        `Volvé a correr verificar_cifras sobre la versión actual.`,
+    );
+  }
+  if (verificacion.malas > 0) {
+    return fail(
+      `"${artifact.key}" no sale: la verificación encontró ${verificacion.malas} de ` +
+        `${verificacion.total} cifras que no coinciden con su cuenta. Corregilas en el ` +
+        `documento, volvé a verificar y después exportá.`,
+    );
+  }
+  return null;
+}
+
 function crearSkill(formato: Formato, storage: SkillStorage): RegisteredTool {
   const { etiqueta, extension, render } = FORMATOS[formato];
 
@@ -100,62 +189,12 @@ function crearSkill(formato: Formato, storage: SkillStorage): RegisteredTool {
     },
 
     async execute(args, ctx) {
-      const key = String(args.artifact_key ?? "").trim();
-      if (!key) {
-        return fail(
-          `Falta artifact_key. Es la clave del entregable que querés exportar; ` +
-            `si todavía no lo escribiste, usá write_artifact primero.`,
-        );
-      }
+      const entregable = await buscarEntregable(args, ctx);
+      if ("error" in entregable) return entregable.error;
+      const { artifact } = entregable;
 
-      const artifact = await ctx.workspace.readArtifact(key);
-      if (!artifact) {
-        const existentes = await ctx.workspace.listArtifacts();
-        return fail(
-          existentes.length === 0
-            ? `No existe ningún entregable todavía. Escribí el contenido con write_artifact ` +
-                `y después exportalo.`
-            : `No existe el entregable "${key}". Los que hay son: ` +
-                `${existentes.map((a) => a.key).join(", ")}.`,
-        );
-      }
-
-      // Nada con plata sale sin que alguien haya verificado las cuentas.
-      //
-      // Es el mismo principio que el resto de las guardias: se verifica en el
-      // ejecutor y no en el prompt. Le pedimos exhaustividad al auditor de
-      // cinco maneras distintas —la herramienta, el prompt, la versión en lote,
-      // abaratar la lectura, más iteraciones— y verificó una cifra de seis y se
-      // dio por satisfecho. Acá deja de ser algo que *debería* hacer.
-      //
-      // Sólo aplica a documentos con cifras: un instructivo sin números no
-      // tiene nada que verificar.
-      const tieneCifras = /(\$\s?[\d.,]{4,})|(\d[\d.,]*\s?%)/.test(artifact.content);
-      if (tieneCifras) {
-        const verificacion = ctx.workspace.verificacionDe(artifact.key);
-        if (!verificacion) {
-          return fail(
-            `"${artifact.key}" tiene cifras de plata o porcentajes y nadie las verificó, así que ` +
-              `no sale. Corré verificar_cifras con entregable: "${artifact.key}" y una fila por ` +
-              `cada número que el documento afirma. Si no es tu tarea, pedísela a Control de ` +
-              `Calidad y exportá cuando te confirme.`,
-          );
-        }
-        if (verificacion.version !== artifact.version) {
-          return fail(
-            `La verificación de "${artifact.key}" es de la v${verificacion.version} y el ` +
-              `documento ya va por la v${artifact.version}: se reescribió después de revisarlo. ` +
-              `Volvé a correr verificar_cifras sobre la versión actual.`,
-          );
-        }
-        if (verificacion.malas > 0) {
-          return fail(
-            `"${artifact.key}" no sale: la verificación encontró ${verificacion.malas} de ` +
-              `${verificacion.total} cifras que no coinciden con su cuenta. Corregilas en el ` +
-              `documento, volvé a verificar y después exportá.`,
-          );
-        }
-      }
+      const bloqueo = revisarCifras(artifact, ctx);
+      if (bloqueo) return bloqueo;
 
       const carpeta = String(args.folder ?? "").trim();
 
@@ -436,9 +475,112 @@ export function sinVersionEnNombre(path: string): string {
   return limpia ? `${carpeta}${limpia}${extension}` : path;
 }
 
+/**
+ * Video narrado a partir de un guion.
+ *
+ * No comparte el factory de Word y PDF porque no comparte el contrato: aquellos
+ * maquetan un documento, éste interpreta el markdown como una línea de tiempo.
+ * El resto —clave del entregable, guardia de cifras, carpeta de salida, un
+ * archivo por entregable— sí es igual, y por eso reusa los mismos ayudantes.
+ */
+function crearVideo(storage: SkillStorage): RegisteredTool {
+  return {
+    name: "export_video",
+    origin: "skill",
+    readOnly: false,
+    requiresApproval: false,
+    description:
+      "Convierte un guion ya escrito en un video MP4 narrado con voz. Primero guardá el " +
+      "guion con write_artifact y después pasá su clave acá. El guion es markdown y se " +
+      "lee así: el título con `#` es la portada; cada `##` abre una escena y su texto es " +
+      "la placa que se ve; los párrafos son lo que dice el narrador; las viñetas aparecen " +
+      "en pantalla mientras se habla; una cita con `>` se muestra destacada. Para un " +
+      "diálogo, escribí cada intervención como `**Nombre:** lo que dice` — cada personaje " +
+      "recibe una voz distinta y su línea aparece en pantalla cuando le toca hablar. " +
+      "Calculá unas 15 palabras habladas por cada 6 segundos de video.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        artifact_key: {
+          type: "string",
+          description: "Clave del guion a filmar, tal como la usaste en write_artifact",
+        },
+        folder: {
+          type: "string",
+          description:
+            'Carpeta del directorio de salida donde dejarlo, por ejemplo "marketing/videos". ' +
+            "Se crea sola si no existe.",
+        },
+      },
+      required: ["artifact_key"],
+      additionalProperties: false,
+    },
+
+    async execute(args, ctx) {
+      const entregable = await buscarEntregable(args, ctx);
+      if ("error" in entregable) return entregable.error;
+      const { artifact } = entregable;
+
+      const bloqueo = revisarCifras(artifact, ctx);
+      if (bloqueo) return bloqueo;
+
+      const carpeta = String(args.folder ?? "").trim();
+
+      let resultado;
+      try {
+        resultado = await renderVideo(
+          artifact.content,
+          {
+            title: artifact.title,
+            company: ctx.workspace.company.name,
+            author: ctx.actor.name,
+            authorTitle: ctx.actor.title,
+            version: artifact.version,
+            date: new Date(artifact.createdAt).toLocaleDateString("es-AR", {
+              day: "2-digit",
+              month: "long",
+              year: "numeric",
+            }),
+          },
+          ctx.signal ? { signal: ctx.signal } : {},
+        );
+      } catch (error) {
+        // Filmar depende de programas del sistema: si falta ffmpeg o no hay
+        // voz, el agente tiene que enterarse de eso y no de un stack trace.
+        const detalle = error instanceof Error ? error.message : String(error);
+        return fail(
+          `No se pudo filmar "${artifact.key}": ${detalle.split("\n")[0]}. ` +
+            `Si el guion no tiene escenas, revisá que tenga títulos con "##". Si falta ` +
+            `ffmpeg en el sistema, avisale a quien opera la empresa: no es algo que puedas ` +
+            `resolver vos.`,
+        );
+      }
+
+      const guardado = await storage.save({
+        filename: `${artifact.key}.mp4`,
+        ...(carpeta ? { folder: carpeta } : {}),
+        bytes: resultado.bytes,
+      });
+
+      const reparto =
+        resultado.personajes.length > 0
+          ? ` Habla ${resultado.personajes.join(", ")}, cada uno con su voz.`
+          : "";
+      return ok(
+        `Video generado en ${guardado.path}: "${artifact.title}", ` +
+          `${resultado.escenas} escenas, ${Math.round(resultado.segundos)} segundos, ` +
+          `${Math.max(1, Math.round(guardado.sizeBytes / 1024))} KB.${reparto} ` +
+          `Queda en el directorio de salida y se puede mirar desde la pestaña Salida.`,
+        guardado.path,
+      );
+    },
+  };
+}
+
 export function createSkillTools(storage: SkillStorage): RegisteredTool[] {
   return [
     ...(Object.keys(FORMATOS) as Formato[]).map((formato) => crearSkill(formato, storage)),
+    crearVideo(storage),
     crearListado(storage),
     crearEscritura(storage),
     crearBorrado(storage),

@@ -160,7 +160,7 @@ export const api = {
     `/api/companies/${companyId}/exports/${encodePath(path)}?inline`,
   exportPreview: (companyId: string, path: string) =>
     request<{
-      kind: "pdf" | "image" | "text" | "none";
+      kind: "pdf" | "image" | "video" | "audio" | "text" | "none";
       text?: string;
       motivo?: string;
       sizeBytes: number;

@@ -288,6 +288,7 @@ describe("herramienta de exportación", () => {
       "delete_files",
       "export_docx",
       "export_pdf",
+      "export_video",
       "list_output",
       "write_output_file",
     ]);

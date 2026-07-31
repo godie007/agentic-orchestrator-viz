@@ -414,6 +414,23 @@ export class ExportStore {
       return null;
     }
   }
+
+  /**
+   * Tamaño sin traer el contenido.
+   *
+   * Existe por el video: la vista previa sólo necesita saber que el archivo
+   * está y cuánto pesa, y cargar cien megas en memoria para después descartarlos
+   * es la diferencia entre una pestaña que abre y uno que tumba el servidor.
+   */
+  async pesoDe(companyId: string, ruta: string): Promise<number | null> {
+    const ubicacion = this.resolveDentro(companyId, ruta);
+    if (!ubicacion) return null;
+    try {
+      return (await stat(ubicacion.destino)).size;
+    } catch {
+      return null;
+    }
+  }
 }
 
 /** Tipo de contenido según la extensión, para que el navegador sepa qué abrir. */
@@ -439,7 +456,7 @@ export function contentTypeOf(filename: string): string {
 }
 
 /** Qué se puede mostrar sin descargar, y cómo. */
-export type PreviewKind = "pdf" | "image" | "text" | "none";
+export type PreviewKind = "pdf" | "image" | "video" | "audio" | "text" | "none";
 
 export interface Preview {
   kind: PreviewKind;
@@ -451,11 +468,29 @@ export interface Preview {
 
 const EXTENSIONES_TEXTO = new Set(["md", "txt", "csv", "json", "log", "yml", "yaml", "html", "xml"]);
 const EXTENSIONES_IMAGEN = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"]);
+const EXTENSIONES_VIDEO = new Set(["mp4", "webm", "mov", "m4v"]);
+const EXTENSIONES_AUDIO = new Set(["mp3", "wav", "m4a", "ogg", "aac", "flac"]);
 
 const extensionDe = (nombre: string): string => {
   const punto = nombre.lastIndexOf(".");
   return punto < 0 ? "" : nombre.slice(punto + 1).toLowerCase();
 };
+
+/**
+ * Lo que se resuelve mirando sólo el nombre.
+ *
+ * El navegador dibuja el PDF, la imagen y el video desde la URL del archivo, así
+ * que no hace falta leer un byte para saber cómo mostrarlos. Devuelve `null`
+ * cuando sí hay que abrir el archivo —texto y Word— para poder decidir.
+ */
+export function previewLiviano(nombre: string): Preview | null {
+  const ext = extensionDe(nombre);
+  if (ext === "pdf") return { kind: "pdf" };
+  if (EXTENSIONES_IMAGEN.has(ext)) return { kind: "image" };
+  if (EXTENSIONES_VIDEO.has(ext)) return { kind: "video" };
+  if (EXTENSIONES_AUDIO.has(ext)) return { kind: "audio" };
+  return null;
+}
 
 /**
  * Texto de un `.docx`, para poder leerlo sin abrir Word.
@@ -506,8 +541,8 @@ async function textoDeDocx(bytes: Buffer): Promise<string> {
 export async function previewDe(nombre: string, bytes: Buffer): Promise<Preview> {
   const ext = extensionDe(nombre);
 
-  if (ext === "pdf") return { kind: "pdf" };
-  if (EXTENSIONES_IMAGEN.has(ext)) return { kind: "image" };
+  const liviano = previewLiviano(nombre);
+  if (liviano) return liviano;
   if (EXTENSIONES_TEXTO.has(ext)) return { kind: "text", text: bytes.toString("utf8") };
 
   if (ext === "docx") {
