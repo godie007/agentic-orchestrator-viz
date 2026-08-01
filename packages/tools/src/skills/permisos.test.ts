@@ -92,6 +92,9 @@ describe("la herramienta aplica la jerarquía", () => {
         enDisco.set(path, false);
         return { ok: true, path, sizeBytes: content.length };
       },
+      async resolve() {
+        return null;
+      },
     };
 
     const tools = createSkillTools(storage);

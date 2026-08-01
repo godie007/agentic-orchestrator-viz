@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type CompanyBundle, type TreeFile, type TreeFolder } from "../api.js";
-import { Button, Empty, Panel, inputClass } from "../lib/ui.js";
+import { Button, Empty, Panel, inputClass, peso } from "../lib/ui.js";
 
 /**
  * Directorio de salida: el árbol de lo que la empresa produjo.
@@ -31,11 +31,6 @@ const ICONO: Record<string, string> = {
 
 const iconoDe = (nombre: string): string =>
   ICONO[nombre.slice(nombre.lastIndexOf(".") + 1).toLowerCase()] ?? "📄";
-
-const peso = (bytes: number): string =>
-  bytes >= 1024 * 1024
-    ? `${(bytes / 1024 / 1024).toFixed(1)} MB`
-    : `${Math.max(1, Math.round(bytes / 1024))} KB`;
 
 export function Output({ company }: { company: CompanyBundle }) {
   const companyId = company.company.id;
@@ -73,6 +68,17 @@ export function Output({ company }: { company: CompanyBundle }) {
       refrescar();
     },
     // El servidor rechaza borrar un entregable; el motivo se muestra tal cual.
+    onError: (e: Error) => setError(e.message),
+  });
+
+  // Publicar es la decisión que cierra el circuito de una misión: el equipo
+  // produjo y avisó por correo, y acá alguien dice que sí.
+  const publicar = useMutation({
+    mutationFn: (path: string) => api.publishFile(companyId, path),
+    onSuccess: () => {
+      setError(null);
+      refrescar();
+    },
     onError: (e: Error) => setError(e.message),
   });
 
@@ -140,7 +146,12 @@ export function Output({ company }: { company: CompanyBundle }) {
         </div>
       </Panel>
 
-      <VistaPrevia companyId={companyId} archivo={seleccion} />
+      <VistaPrevia
+        companyId={companyId}
+        archivo={seleccion}
+        onPublicar={(path) => publicar.mutate(path)}
+        publicando={publicar.isPending}
+      />
     </div>
   );
 }
@@ -299,9 +310,13 @@ function contarArchivos(carpeta: TreeFolder): number {
 function VistaPrevia({
   companyId,
   archivo,
+  onPublicar,
+  publicando,
 }: {
   companyId: string;
   archivo: TreeFile | null;
+  onPublicar: (path: string) => void;
+  publicando: boolean;
 }) {
   const preview = useQuery({
     queryKey: ["export-preview", companyId, archivo?.path],
@@ -326,6 +341,17 @@ function VistaPrevia({
       actions={
         <div className="flex items-center gap-2">
           <span className="text-[10px] normal-case text-ink-faint">{peso(archivo.sizeBytes)}</span>
+          {!archivo.path.startsWith("publicado/") && (
+            <button
+              type="button"
+              onClick={() => onPublicar(archivo.path)}
+              disabled={publicando}
+              title="Lo mueve a publicado/. Es la aprobación: nada sale de la carpeta de trabajo sin que alguien apriete esto."
+              className="rounded border border-ok/40 bg-ok/10 px-1.5 py-0.5 text-[10px] normal-case text-ok hover:bg-ok/20 disabled:opacity-50"
+            >
+              ✓ publicar
+            </button>
+          )}
           <a
             href={api.exportUrl(companyId, archivo.path)}
             download
@@ -345,6 +371,18 @@ function VistaPrevia({
         {preview.data?.kind === "pdf" && (
           // `title` es lo que anuncian los lectores de pantalla del iframe.
           <iframe src={url} title={archivo.name} className="h-full min-h-[70vh] w-full rounded border border-line bg-white" />
+        )}
+
+        {preview.data?.kind === "page" && (
+          // `sandbox` sin `allow-same-origin`: la presentación se sirve desde el
+          // mismo origen que la aplicación, y un `.html` que escribió un agente
+          // no puede leer su sesión. Se le permite dibujarse y nada más.
+          <iframe
+            src={url}
+            title={archivo.name}
+            sandbox=""
+            className="h-full min-h-[70vh] w-full rounded border border-line bg-canvas"
+          />
         )}
 
         {preview.data?.kind === "image" && (

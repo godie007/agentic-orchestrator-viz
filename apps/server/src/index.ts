@@ -5,11 +5,13 @@ import { Store } from "./db.js";
 import { loadEnv } from "./env.js";
 import { Runtime } from "./runtime.js";
 import { registerRoutes } from "./routes.js";
+import { MisionScheduler } from "./misiones.js";
 
 const env = loadEnv();
 const store = new Store(env.databaseUrl);
 const providers = buildRegistry(process.env);
 const runtime = new Runtime(store, providers, env);
+const misiones = new MisionScheduler(store, runtime, runtime.correo, env.appUrl, env.misionTickMs);
 
 const app = Fastify({
   logger: { transport: { target: "pino-pretty", options: { translateTime: "HH:MM:ss" } } },
@@ -18,7 +20,15 @@ const app = Fastify({
 });
 
 await app.register(cors, { origin: true });
-await registerRoutes(app, { store, runtime, providers });
+await registerRoutes(app, { store, runtime, providers, misiones });
+
+misiones.start();
+if (!env.emailWebhookUrl) {
+  app.log.warn(
+    "Sin N8N_EMAIL_WEBHOOK_URL: las misiones van a correr pero no van a poder avisar por " +
+      "correo, y send_email va a fallar diciendo justamente eso.",
+  );
+}
 
 if (providers.list().length === 0) {
   app.log.warn(
@@ -38,6 +48,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
     void (async () => {
       app.log.info("Cerrando…");
+      misiones.stop();
       await runtime.shutdown();
       await app.close();
       store.close();

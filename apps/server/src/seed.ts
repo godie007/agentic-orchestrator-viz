@@ -10,7 +10,8 @@ import type {
   Role,
   Tool,
 } from "@orq/shared";
-import { ToolRegistry } from "@orq/tools";
+import { ToolRegistry, createSkillTools } from "@orq/tools";
+import { ExportStore } from "./exports.js";
 import { Store } from "./db.js";
 import { fromRoot, loadEnv } from "./env.js";
 
@@ -43,6 +44,8 @@ const company: Company = {
   name: "Codytion S.A.",
   mission:
     "Diseñamos e implementamos software a medida para empresas medianas de Latinoamérica.",
+  // La marca no se lee como se escribe: en los videos se dice "codishon".
+  voz: { unaSolaVoz: true, pronunciacion: { Codytion: "códishon" } },
   context: `Somos una consultora de software de 40 personas con sede en Bogotá.
 Vendemos proyectos de entre US$30.000 y US$250.000, con ciclos de venta de 4 a 10 semanas.
 Nuestros clientes típicos son retail, logística y servicios financieros.
@@ -75,11 +78,24 @@ const departments = [dirección, comercial, operaciones, finanzas, marketing, so
 // --- Herramientas built-in que se asignan a los roles ------------------------
 // El registro conoce las herramientas; acá se les da un id para poder
 // referenciarlas desde la configuración de cada rol.
+//
+// Van las capacidades **y** las habilidades: `forRole` sólo otorga sin preguntar
+// las de coordinación, así que una habilidad que no está en esta tabla no existe
+// para ningún rol. Con el filtro anterior —sólo `capability`— la empresa de
+// ejemplo no podía exportar un PDF ni aunque se lo pidieras.
 const registry = new ToolRegistry();
+for (const skill of createSkillTools(new ExportStore(env.exportsDir).forCompany("seed"))) {
+  registry.register(skill);
+}
 const builtinTools: Tool[] = registry
   .describe()
-  .filter((tool) => tool.origin === "capability")
+  .filter((tool) => tool.origin === "capability" || tool.origin === "skill")
   .map((tool) => ({ ...tool, id: ids.tool() }));
+
+/** Las habilidades de documento, que cualquier rol que entregue algo necesita. */
+const entregar = ["export_docx", "export_pdf", "list_output"]
+  .map((name) => builtinTools.find((tool) => tool.name === name)?.id ?? "")
+  .filter(Boolean);
 
 const toolId = (name: string): string =>
   builtinTools.find((tool) => tool.name === name)?.id ?? "";
@@ -137,7 +153,7 @@ const comercialDir = rol(
   `Conducís la venta. Calificás la oportunidad, definís la estrategia comercial y
 armás la propuesta con lo que te dan Operaciones (alcance y esfuerzo) y Finanzas (precio).
 No inventás números técnicos ni precios: los pedís. Cerrás vos la propuesta final.`,
-  { toolIds: web },
+  { toolIds: [...web, ...entregar] },
 );
 
 const opsDir = rol(

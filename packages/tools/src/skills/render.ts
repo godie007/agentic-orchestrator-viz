@@ -149,6 +149,17 @@ function bloqueADocx(block: Block): Paragraph | Table {
         spacing: { before: 140, after: 140 },
       });
 
+    // El documento no incrusta la imagen: el render recibe texto, no archivos
+    // —quién puede leer el disco lo decide el servidor—. Queda el epígrafe, que
+    // es lo que le da sentido en un informe; la imagen se ve en el video.
+    case "image":
+      return new Paragraph({
+        children: [
+          new TextRun({ text: block.alt || "Imagen", italics: true, color: GRIS, size: 18 }),
+        ],
+        spacing: { before: 120, after: 160 },
+      });
+
     case "rule":
       return new Paragraph({
         text: "",
@@ -603,6 +614,13 @@ export async function renderPdf(markdown: string, meta: DocumentMeta | string): 
           doc.moveDown(0.5);
           break;
         }
+
+        case "image":
+          asegurarEspacio(doc, 24);
+          doc.font("Helvetica-Oblique").fontSize(PDF.cuerpo - 1).fillColor(PDF.gris);
+          doc.text(sinEmoji(block.alt || "Imagen"), PDF.margen, doc.y, { width: anchoUtil(doc) });
+          doc.moveDown(0.5);
+          break;
 
         case "rule":
           asegurarEspacio(doc, 20);

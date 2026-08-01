@@ -248,6 +248,30 @@ describe("un entregable tiene que parecer un documento", () => {
     expect((await escribir("Informe de estado", documento)).ok).toBe(true);
   });
 
+  // Un revisor guardando su dictamen sobre la clave del documento revisado: así
+  // el guion del video se convirtió en la lista de correcciones, y lo que se
+  // filmó después fue esa lista leída en voz alta.
+  const titulosDeDictamen = [
+    "Guion video institucional Codytion (v1) — Correcciones de revisión",
+    "Revisión de calidad del informe trimestral",
+    "Observaciones sobre la propuesta comercial",
+    "Feedback del guion",
+  ];
+  for (const titulo of titulosDeDictamen) {
+    it(`rechaza el dictamen "${titulo.slice(0, 34)}…"`, async () => {
+      const result = await escribir(titulo, documento);
+      expect(result.ok).toBe(false);
+      // El rechazo tiene que ofrecer el camino correcto, que es contestar.
+      expect(result.content).toMatch(/reply/i);
+    });
+  }
+
+  it("no confunde un documento que sólo menciona una revisión", async () => {
+    // "Manual de revisión de tableros" es un entregable de verdad: la palabra
+    // aparece, pero el documento no es un dictamen sobre otro documento.
+    expect((await escribir("Informe de estado", documento)).ok).toBe(true);
+  });
+
   // Títulos observados de verdad, escritos por los agentes.
   const titulosDeProceso = [
     "Respuesta a pedido de exportación (Ciclo 4 - Bandeja de entrada)",

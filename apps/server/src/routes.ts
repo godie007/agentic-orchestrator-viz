@@ -12,11 +12,13 @@ import {
   resolveApprovalSchema,
   roleProposalSchema,
   roleSchema,
+  misionSchema,
 } from "@orq/shared";
 import { resolveAllTiers, type ProviderRegistry } from "@orq/llm";
 import type { Store } from "./db.js";
 import type { Runtime } from "./runtime.js";
 import { contentTypeOf, previewDe, previewLiviano } from "./exports.js";
+import type { MisionScheduler } from "./misiones.js";
 
 /**
  * API HTTP.
@@ -30,10 +32,27 @@ export interface RouteDeps {
   store: Store;
   runtime: Runtime;
   providers: ProviderRegistry;
+  misiones: MisionScheduler;
 }
 
 export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Promise<void> {
-  const { store, runtime, providers } = deps;
+  const { store, runtime, providers, misiones } = deps;
+
+  /**
+   * Saca de la lista las corridas que ya no van a avanzar.
+   *
+   * "Terminada" es "no está viva ahora", que incluye la pausada: si no avanza,
+   * se puede limpiar. Cada una se suelta del runtime antes de borrarla de la
+   * base, o queda un orquestador escribiendo eventos de algo que ya no existe.
+   */
+  const limpiarTerminadas = (corridas: readonly { id: string }[]): number => {
+    const terminadas = corridas.filter((run) => !runtime.estaViva(run.id));
+    for (const run of terminadas) {
+      runtime.olvidarCorrida(run.id);
+      store.deleteRun(run.id);
+    }
+    return terminadas.length;
+  };
 
   // --- Salud y proveedores -------------------------------------------------
 
@@ -65,6 +84,26 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
 
   app.get("/api/companies", async () => store.listCompanies());
 
+  /**
+   * Una línea por proyecto, con lo que hace falta para elegir sin abrirlo.
+   *
+   * Es lo que alimenta la pantalla de Proyectos. Convive con `/companies/:id`
+   * porque el router resuelve el segmento estático antes que el paramétrico.
+   *
+   * El peso en disco se mide con `medirEmpresa`, que **no crea la carpeta**:
+   * hacerlo acá dejaría un directorio por proyecto con sólo mirar la lista.
+   */
+  app.get("/api/companies/resumen", async () => {
+    const resumenes = store.resumenEmpresas();
+    return Promise.all(
+      resumenes.map(async (resumen) => ({
+        ...resumen,
+        corridaViva: runtime.tieneCorridaViva(resumen.id),
+        disco: await runtime.exports.medirEmpresa(resumen.id),
+      })),
+    );
+  });
+
   app.get("/api/companies/:id", async (request, reply) => {
     const { id } = request.params as { id: string };
     const company = store.getCompany(id);
@@ -93,6 +132,10 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
       updatedAt: now,
     };
     store.saveCompany(company);
+    // Un proyecto nuevo nace con sus herramientas built-in registradas: si no,
+    // no hay nada que asignarle a un agente y el primero que intente exportar
+    // algo va a informar que no encuentra la herramienta.
+    await runtime.sembrarHerramientas(company.id);
     reply.code(201);
     return company;
   });
@@ -112,10 +155,20 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
     return merged.data;
   });
 
-  app.delete("/api/companies/:id", async (request) => {
+  /**
+   * Borra la empresa y todo lo suyo: memoria del servidor, base y disco.
+   *
+   * No alcanza con `store.deleteCompany`: eso deja las conexiones MCP vivas y la
+   * carpeta de salida con los archivos producidos, sin nadie a quien pertenecer.
+   */
+  app.delete("/api/companies/:id", async (request, reply) => {
     const { id } = request.params as { id: string };
-    store.deleteCompany(id);
-    return { ok: true };
+    const resultado = await runtime.eliminarEmpresa(id);
+    if (!resultado.ok) {
+      reply.code(409);
+      return { error: resultado.motivo };
+    }
+    return { ok: true, archivos: resultado.archivos, bytes: resultado.bytes };
   });
 
   // Exportar / importar: la empresa entera como un JSON versionable en git.
@@ -218,6 +271,72 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
     save: (value) => store.savePolicy(value),
     remove: (id) => store.deletePolicy(id),
   });
+  // Las misiones no usan `registerChild`: al guardarlas hay que recalcular el
+  // próximo disparo, y ese cálculo lo hace el planificador.
+  app.get("/api/companies/:companyId/misiones", async (request) => {
+    const { companyId } = request.params as { companyId: string };
+    return store.listMisiones(companyId);
+  });
+
+  app.post("/api/companies/:companyId/misiones", async (request, reply) => {
+    const { companyId } = request.params as { companyId: string };
+    const now = Date.now();
+    const parsed = misionSchema.safeParse({
+      ...(request.body as object),
+      companyId,
+      id: (request.body as { id?: string }).id ?? ids.mision(),
+      createdAt: now,
+      updatedAt: now,
+    });
+    if (!parsed.success) return invalid(reply, parsed.error);
+
+    const mision = misiones.reprogramar(parsed.data);
+    reply.code(201);
+    return mision;
+  });
+
+  app.patch("/api/companies/:companyId/misiones/:id", async (request, reply) => {
+    const { companyId, id } = request.params as { companyId: string; id: string };
+    const actual = store.listMisiones(companyId).find((mision) => mision.id === id);
+    if (!actual) return notFound(reply, "misión", id);
+
+    const parsed = misionSchema.safeParse({
+      ...actual,
+      ...(request.body as object),
+      id,
+      companyId,
+    });
+    if (!parsed.success) return invalid(reply, parsed.error);
+
+    // Cambiar la programación —o volver a habilitarla— corre el próximo turno.
+    return misiones.reprogramar(parsed.data);
+  });
+
+  app.delete("/api/companies/:companyId/misiones/:id", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    store.deleteMision(id);
+    reply.code(204);
+    return null;
+  });
+
+  /** Dispara la misión ahora, sin esperar su turno. Para probarla. */
+  app.post("/api/companies/:companyId/misiones/:id/run", async (request, reply) => {
+    const { companyId, id } = request.params as { companyId: string; id: string };
+    const mision = store.listMisiones(companyId).find((m) => m.id === id);
+    if (!mision) return notFound(reply, "misión", id);
+
+    const run = await misiones.disparar(mision);
+    if (!run) {
+      reply.code(409);
+      return {
+        error:
+          "La empresa ya tiene una corrida en curso. Esperá a que termine: dos equipos " +
+          "trabajando a la vez se pisan los entregables.",
+      };
+    }
+    return run;
+  });
+
   registerChild(app, "mcp-servers", mcpServerSchema, ids.mcpServer, {
     list: (companyId) => store.listMcpServers(companyId),
     save: (value) => store.saveMcpServer(value),
@@ -420,6 +539,40 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
     return { ...(await previewDe(nombre, bytes)), sizeBytes: bytes.length };
   });
 
+  /**
+   * Publicar: la decisión humana del circuito de misiones.
+   *
+   * Un agente puede producir el video y avisar por correo, pero no puede
+   * publicarlo. Esto es lo que aprieta la persona cuando lo revisó.
+   */
+  app.post("/api/companies/:companyId/exports-publicar/*", async (request, reply) => {
+    const { companyId } = request.params as { companyId: string };
+    const ruta = (request.params as Record<string, string>)["*"] ?? "";
+    const resultado = await runtime.exports.publicar(companyId, ruta);
+    if (!resultado.ok) {
+      reply.code(400);
+      return { error: resultado.motivo };
+    }
+    return resultado;
+  });
+
+  /**
+   * Vacía la salida de una empresa dejando lo que trajo una persona.
+   *
+   * El criterio es el manifiesto de procedencia, no la extensión: el logo de la
+   * marca es un `.png` que subiste vos y vive en una ruta fija, así que un
+   * "borrá toda la multimedia" se lo lleva y no se vuelve a generar solo.
+   */
+  app.post("/api/companies/:companyId/exports-vaciar", async (request) => {
+    const { companyId } = request.params as { companyId: string };
+    const resultado = await runtime.exports.vaciarGenerado(companyId);
+    return {
+      borrados: resultado.borrados.length,
+      conservados: resultado.conservados.length,
+      bytes: resultado.bytes,
+    };
+  });
+
   app.get("/api/companies/:companyId/exports/*", async (request, reply) => {
     const { companyId } = request.params as { companyId: string };
     const ruta = (request.params as Record<string, string>)["*"] ?? "";
@@ -475,14 +628,107 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
   /** Limpieza en lote: saca de la lista todo lo que ya terminó. */
   app.delete("/api/companies/:companyId/runs/terminadas", async (request) => {
     const { companyId } = request.params as { companyId: string };
-    const terminadas = store.listRuns(companyId).filter((run) => !runtime.estaViva(run.id));
-
-    for (const run of terminadas) {
-      runtime.olvidarCorrida(run.id);
-      store.deleteRun(run.id);
-    }
-    return { borradas: terminadas.length };
+    return { borradas: limpiarTerminadas(store.listRuns(companyId)) };
   });
+
+  // --- Mantenimiento --------------------------------------------------------
+
+  /**
+   * Qué hay para limpiar, sin borrar nada.
+   *
+   * Va separado del borrado a propósito: lo que se acumula acá es invisible
+   * desde el resto de la aplicación —una carpeta sin empresa no aparece en
+   * ninguna pantalla, porque todas navegan por empresa— y una acción destructiva
+   * a ciegas no es una que alguien vaya a apretar.
+   */
+  app.get("/api/mantenimiento", async () => {
+    const vivas = store.listCompanies().map((company) => company.id);
+    return {
+      base: { bytes: store.pesoEnDisco(), residuos: store.residuos() },
+      carpetas: await runtime.exports.carpetasResiduales(vivas),
+      corridasTerminadas: store.listAllRuns().filter((run) => !runtime.estaViva(run.id)).length,
+    };
+  });
+
+  const purgaSchema = z.object({
+    /** Filas que quedaron apuntando a una empresa o corrida inexistente. */
+    residuos: z.boolean().default(false),
+    /** Nombres de carpeta, tal como los devuelve el diagnóstico. */
+    carpetas: z.array(z.string()).default([]),
+    /** Corridas terminadas de todas las empresas. */
+    corridas: z.boolean().default(false),
+    /** `VACUUM`. Sin esto el archivo sigue pesando lo mismo después de purgar. */
+    compactar: z.boolean().default(false),
+  });
+
+  app.post("/api/mantenimiento/purgar", async (request, reply) => {
+    const parsed = purgaSchema.safeParse(request.body ?? {});
+    if (!parsed.success) return invalid(reply, parsed.error);
+    const { residuos, carpetas, corridas, compactar } = parsed.data;
+
+    // Se mide antes de tocar nada: si se leyera después de purgar, "la base pasó
+    // de X a Y" estaría informando sólo el efecto del `VACUUM` y no el de la
+    // limpieza. Sin compactar los dos números son iguales a propósito —SQLite
+    // marca las páginas libres y las reusa— y eso es justamente lo que explica
+    // para qué está la opción.
+    const baseAntes = store.pesoEnDisco();
+
+    const corridasBorradas = corridas ? limpiarTerminadas(store.listAllRuns()) : 0;
+    // Después de borrar corridas, porque cada una deja huérfanas sus propias
+    // filas: purgar antes obliga a correrlo dos veces para que quede limpio.
+    const residuosPurgados = residuos ? store.purgarResiduos() : null;
+
+    // Sólo se borran carpetas que el diagnóstico marcó como residuales: si entre
+    // el diagnóstico y el borrado alguien creó la empresa, su carpeta ya no está
+    // en la lista y no se toca.
+    const residualesAhora = new Set(
+      (await runtime.exports.carpetasResiduales(store.listCompanies().map((c) => c.id))).map(
+        (entrada) => entrada.carpeta,
+      ),
+    );
+    let carpetasBorradas = 0;
+    let bytesEnDisco = 0;
+    const rechazadas: Array<{ carpeta: string; motivo: string }> = [];
+    for (const carpeta of carpetas) {
+      if (!residualesAhora.has(carpeta)) {
+        rechazadas.push({ carpeta, motivo: "Ya no figura como residual." });
+        continue;
+      }
+      const resultado = await runtime.exports.removeCarpeta(carpeta);
+      if (resultado.ok) {
+        carpetasBorradas += 1;
+        bytesEnDisco += resultado.bytes;
+      } else {
+        rechazadas.push({ carpeta, motivo: resultado.motivo });
+      }
+    }
+
+    // `VACUUM` va al final y fuera de toda transacción: SQLite no lo admite
+    // adentro de una.
+    if (compactar) store.vacuum();
+
+    return {
+      corridas: corridasBorradas,
+      residuos: residuosPurgados,
+      carpetas: carpetasBorradas,
+      rechazadas,
+      bytesEnDisco,
+      base: { antes: baseAntes, despues: store.pesoEnDisco() },
+    };
+  });
+
+  /**
+   * Lo mismo, para todas las empresas de una.
+   *
+   * Convive con `DELETE /api/runs/:id` porque el router de Fastify resuelve el
+   * segmento estático antes que el paramétrico, sin importar en qué orden se
+   * declaren: `terminadas` no se toma por el id de una corrida. Si alguna vez
+   * hace falta borrar una corrida que se llame así, este es el motivo por el que
+   * no se puede.
+   */
+  app.delete("/api/runs/terminadas", async () => ({
+    borradas: limpiarTerminadas(store.listAllRuns()),
+  }));
 
   app.post("/api/runs", async (request, reply) => {
     const parsed = createRunSchema.safeParse(request.body);

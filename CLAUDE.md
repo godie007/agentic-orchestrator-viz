@@ -24,7 +24,16 @@ npm run db:migrate     # aplica el esquema y lista las tablas con sus filas
 npm run db:seed        # empresa de ejemplo "Codytion S.A."
 npm run check:models   # qué modelo resuelve cada tier, con precio real
 npm run check:llm      # una llamada real con tool-calling, por proveedor
+
+npm run db:estudio     # el estudio audiovisual de Codytion: 4 roles, un video
+npm run musica:cama    # genera una cama musical propia en data/musica
 ```
+
+`check:llm` acepta `--model=<slug>` para probar uno puntual. Vale la pena
+correrlo antes de una corrida larga: una cuenta sin crédito contesta **402 a
+todo**, y eso se ve como una corrida que muere en el tercer ciclo sin producir
+nada. El seed del estudio usa el tier `free` por ese motivo; con
+`ORQ_SEED_TIER=standard` corre con modelos pagos.
 
 Un solo archivo o un solo caso:
 
@@ -75,8 +84,10 @@ concurrentes en `scheduler.test.ts`.
 
 **Las habilidades son un origen de herramienta, no un sistema aparte.**
 `origin: "skill"` (`packages/tools/src/skills/`) agrupa lo que un rol sabe
-*producir*: hoy `export_docx`, `export_pdf` y `export_video`. Se asignan por rol
-como cualquier otra. Reciben la **clave de un entregable ya escrito**, nunca el
+*producir*: hoy `export_docx`, `export_pdf`, `export_video` y —sólo si hay una
+API key de imágenes— `generar_imagen`. Se asignan por rol como cualquier otra.
+La que no se puede cumplir no se registra: ofrecerle al agente una herramienta
+que siempre falla le hace gastar turnos intentándola. Reciben la **clave de un entregable ya escrito**, nunca el
 contenido por argumento: un documento largo pasado como argumento se trunca
 cuando el modelo agota `max_tokens` a mitad del JSON. El markdown se parsea una
 sola vez a bloques neutros (`markdown.ts`) y de ahí salen las tres salidas; el
@@ -115,6 +126,153 @@ o las cuatro intervenciones las dice de corrido el primero que habló, leyendo e
 voz alta los nombres de los demás. Lo que no entra en el alto útil **pasa de
 página** en vez de desbordarse por abajo del cuadro. Y **la viñeta de ffmpeg
 apaga los bordes**, que es justo donde vive el texto alineado a la izquierda.
+
+**Los íconos se dibujan, no se instalan** (`skills/iconos.ts`). `:objetivo:` al
+empezar una viñeta o un `##` mete un trazo vectorial de ASS —el mismo `{\p1}` de
+la regla y la barra de progreso—, así que escalan sin perder nitidez, toman el
+color del estilo y no hay assets que empaquetar. Los emojis quedaron descartados
+a propósito: libass los dibuja en monocromo o los saltea según la fuente
+instalada, y un video que en una máquina muestra un cohete y en otra un cuadrado
+no es una salida confiable. Las coordenadas van en una caja de 100×100 y **un
+agujero se dibuja con el contorno invertido**: ASS rellena por regla non-zero, y
+sin invertirlo un candado es una mancha con forma de candado. Ojo también con
+superponer contornos: si el hueco del arco pisa la tapa, el candado termina
+pareciendo un bolso. Un nombre que no está devuelve `null` y quien llama dibuja
+la viñeta cuadrada de siempre — un `:crecimiiento:` mal escrito degrada, no
+rompe la escena, y **la marca queda a la vista** para que el agente vea el error.
+
+Dos trampas que aparecen con cualquier modelo. El **encabezado del documento**
+arriba del guion —"# Guion video institucional (v4)" y recién abajo el `#` con el
+título real—: la portada anunciaba el número de versión del borrador y el título
+de verdad quedaba como una placa del medio. Un segundo `#` con la portada todavía
+sin cuerpo pisa el título en vez de abrir escena; si la portada ya dijo algo, sí
+abre.
+
+Y la marca de ícono escrita **sola en
+su renglón**, debajo del título, en vez de al principio del `##` o de la viñeta.
+En markdown eso es un párrafo, y un párrafo es voz en off: el video decía
+":objetivo:" en el medio. Un párrafo que es sólo una marca conocida se toma como
+el ícono de la escena. Una marca *desconocida* sí se dice, a propósito, porque es
+la única forma de que el error se note.
+
+**Un diagrama no es una foto de peor calidad** (`skills/visuales.ts`).
+`![lo que muestra](visual:flujo)` dibuja una composición —un chat, un flujo de
+proceso, tarjetas de dato, un tablero, una ficha de contacto—. Cuando lo que hay
+que mostrar es de dónde sale un dato y a dónde llega, una foto de gente en una
+oficina no dice nada y un diagrama lo dice todo; además no depende de ningún
+proveedor, no cuesta nada y sale siempre en la paleta de la marca. Cada visual se
+define **una vez** en una caja de 100×100 y se emite en los dos medios, igual que
+los íconos, con una diferencia: acá hay texto adentro del dibujo y ASS no sabe
+poner una palabra dentro de una forma, así que `visualAss` devuelve el dibujo
+**despiezado** —formas primero, rótulos después— y quien renderiza los apila. Ojo
+con el ancla del texto: en SVG la `y` es la línea de base y en ASS es el techo,
+así que hay que restar un cuerpo o los rótulos caen un renglón más abajo que su
+caja.
+
+**Las personas se dibujan con curvas.** `visual:llamada|Cuénteme cómo cierra el
+día` pone un personaje en un escenario —bodega, escritorio, llamada— con lo que
+dice en un globo, y **lo que dice lo escribe el guion**, después del `|`: el
+mismo escenario sirve para otra campaña con otra frase. El cuerpo se arma con
+`M`/`L`/`C` y no con círculos y rectángulos porque un cuerpo hecho de cajas se
+lee como un muñeco de bloques, y una lámina de venta con muñecos de bloques se ve
+como una plantilla gratis. Esa es también la razón de la restricción a cuatro
+comandos de SVG: `trazoAAss` los traduce a `m`/`l`/`b` sin escribir un intérprete,
+y si sobrevive una `M` libass descarta el dibujo entero y la persona no aparece.
+Las caras van sin rasgos a propósito —un ojo mal puesto por un generador arruina
+la figura— y hay dos tonos de piel, no una paleta: media docena elegida por un
+programa termina en un reparto que parece un folleto.
+
+El globo **calcula su propio corte** a partir del ancho que tiene; pasarle un
+número de caracteres a ojo es lo que hacía que la frase se saliera por el
+costado. Y cuando muevas una figura, acordate de mover los props: el teléfono y
+la vincha del auricular están en coordenadas absolutas de la caja, así que una
+persona que se corre seis unidades deja el teléfono flotando en el aire.
+
+**El logo va chico y quieto**, en `marca/logo.png` dentro del directorio de la
+empresa —una ruta fija, no una opción de configuración: se sube por la misma
+pestaña que todo lo demás—. Grande en la portada, discreto en la esquina del
+resto. No se recorta ni se le hace el acercamiento lento de las fotos: un logo
+deformado es peor que ningún logo. La posición se da como **expresión** de
+ffmpeg (`W-w-180`) y así se ancla al borde derecho sin que nadie mida el archivo.
+La paleta también sale del logo y no del CSS del sitio: el sitio usa un azul
+plano y un ámbar de botón, el logo es un lazo de turquesa, azul y violeta, y eso
+es lo que hace reconocible a la marca.
+
+**Una imagen entra por markdown y sale por overlay.** `![lo que se ve](fotos/x.jpg)`
+muestra un archivo del directorio de salida; `![lo que se ve](generar)` describe
+una imagen que todavía no existe, y esa descripción *es* el prompt
+(`skills/imagenes.ts`, primer proveedor con credencial: Google, OpenAI, NVIDIA).
+Las generadas quedan en `imagenes/` **dentro del directorio de salida** y con un
+nombre derivado del prompt: sin ese caché, re-exportar vuelve a pagarlas todas y
+además cambia el aspecto del video sin que nadie lo haya tocado. La imagen no va
+de fondo con el texto encima —una foto detrás de un párrafo lo vuelve ilegible
+justo cuando alguien lo está leyendo—: van en dos columnas, y la única que ocupa
+el cuadro entero es la de la portada, con un velo oscuro que sostiene el título.
+`packages/tools` no lee el disco: recibe `resolverImagen` del servidor, que es
+quien sanea la ruta que propuso un modelo.
+
+Dos detalles del render que no son estéticos: la imagen se **sobremuestrea**
+antes del acercamiento, porque `zoompan` amplía sobre lo que recibe y con el
+tamaño final el movimiento es puro reescalado; y hay que **correrla en el tiempo**
+con `setpts`, o el fundido de entrada ocurre en el segundo cero del video y la
+escena la recibe ya entrada.
+
+**El mismo guion también es un deck** (`skills/slides.ts`, `export_slides`). Un
+video no se puede citar, ni copiar una frase, ni saltar a la escena siete, y la
+mitad de las veces lo que hace falta es exactamente eso. Sale del mismo
+`parseGuion`, así que las dos salidas no pueden decir cosas distintas. Lo que en
+el video es voz en off acá es la nota al pie de la lámina: en pantalla nadie la
+escucha, pero sí la lee. **Los íconos son los mismos**: `iconoSvg` traduce los
+trazos de ASS a SVG —`m`/`l`/`b` contra `M`/`L`/`C`, y las dos rellenan por regla
+non-zero, así que los agujeros siguen siendo agujeros— porque un segundo set
+dibujado aparte se desincroniza a la primera corrección. El archivo es **uno
+solo y sin pedidos a la red**: las imágenes viajan como `data:`, porque un deck
+que depende de rutas relativas se rompe apenas alguien lo adjunta a un correo,
+que es justo lo que se hace con un deck. **La firma es la empresa**, no el rol que lo produjo: un
+Word interno lleva el nombre de quien lo escribió porque alguien responde por él;
+una pieza que se le manda a un cliente, no —ahí el autor es la marca, y el nombre
+del agente no le dice nada a quien la recibe—. En la UI se dibuja en un iframe con
+`sandbox` vacío: el archivo se sirve desde el mismo origen que la aplicación, y
+un `.html` que escribió un agente no puede correr con su sesión.
+
+**Cómo suena la marca es un dato de la empresa** (`vozSchema`), no del guion:
+el nombre se pronuncia igual en todos sus videos. `pronunciacion` se aplica
+**sólo al texto que va al sintetizador** —escribir "codishon" en el guion sería
+una falta de ortografía en pantalla— y compara por palabra entera, porque una
+regla para "IA" sin ese corte reescribe "familia" por dentro. `unaSolaVoz` apaga
+el reparto: varias voces suenan a elenco de actores, y una pieza institucional
+la dice la empresa.
+
+**La música la ponés vos.** Las pistas viven en `MUSICA_DIR` (`data/musica/`) y no
+en el repo: la música tiene licencia, y un orquestador que baja un mp3 y lo pega
+en el video de una empresa la mete en un problema que no sabe que tiene. El clima
+se lee del **nombre del archivo y de su carpeta**, así que agregar una pista es
+copiarla. La biblioteca se recorre en profundidad: quien compra música deja el
+paquete tal cual —`Corporate/Corporate Harmonics.mp3`— y con un `readdir` a secas
+esas pistas no existían para el sistema; el video salía en silencio con el
+archivo ahí, a la vista de todos menos del programa. Del mismo tema en `.wav` y
+`.mp3` entra uno solo, y **entre pistas que empatan gana la más larga**: una cama
+que se repite cada cuarenta segundos se escucha como una cama que se repite.
+
+**La cama se mide en sonoridad, no en volumen.** Un `volume` fijo no significa
+nada: una pista comprada llega a −14 LUFS y una sintetizada a −24, así que el
+mismo número deja una inaudible y la otra encima de la voz. Se normaliza con
+`loudnorm` a `MUSICA.lufs` y recién ahí se la acuesta bajo la narración. `loudnorm`
+devuelve **192 kHz sí o sí**, así que el `aresample` va después: antes, la cama
+entraba a la mezcla al triple de velocidad y sonaba a cinta acelerada.
+`npm run musica:cama` sintetiza dos con ffmpeg para arrancar sin nada: una en
+modo menor para institucional y otra en modo mayor **con pulso** para campañas.
+El clima no es decoración — el menor suena a reflexión y sirve para "así
+trabajamos"; para que alguien sienta ganas de poner plata hace falta modo mayor,
+más brillo y un pulso audible, que es lo que da sensación de que algo avanza. El
+pulso va **sólo en la nota grave y más fuerte que las sostenidas**: parejo con el
+acorde, la modulación cae de 6 dB a 4 y la cama vuelve a ser quieta. La cama
+se aparta sola cuando alguien habla (`sidechaincompress` con la voz de cadena
+lateral): sin eso hay que elegir entre una cama inaudible y una voz tapada, y las
+dos suenan a video hecho a las apuradas. **Nada de esto puede hacer fallar un
+video**: sin biblioteca se filma en silencio, y una imagen que no se pudo mostrar
+vuelve como aviso en el resultado de la herramienta —que es lo único que el
+agente puede leer para corregir el guion— en vez de tirar la corrida abajo.
 
 **Un archivo por entregable y formato**, no uno por versión: `key.pdf`, no
 `key-v3.pdf`. Con la versión en el nombre cada re-exportación dejaba otro
@@ -195,6 +353,44 @@ modelo; sin techo, `smart` elige algo de US$60/MTok y un turno se come el
 presupuesto. Los `QUALITY_HINTS` penalizan variantes `-fast` (cobran el doble por
 velocidad, no por calidad).
 
+**Una misión es la receta de una corrida, más cuándo repetirla.** No confundir
+`mode: "cron"` de una corrida —que pacea los ciclos *dentro* de una corrida— con
+una **misión** (`misionSchema`, `apps/server/src/misiones.ts`), que es un encargo
+que se dispara solo. El próximo disparo se guarda en la base (`proximaAt`), no en
+un timer: un timer por misión se pierde entero al reiniciar y obliga a
+reprogramarlo cada vez que alguien edita la misión. El planificador se despierta
+cada `MISION_TICK_MS`, mira qué venció y larga.
+
+El cálculo de cuándo toca es puro y vive en `packages/shared/src/programacion.ts`,
+separado del servidor a propósito: el bug clásico de un scheduler es que anda en
+la máquina de quien lo escribió y no el domingo a medianoche. Tres formas, las
+mismas del nodo Schedule de n8n —intervalo, día y hora, o cron—. Dos cosas que se
+verifican con tests y no se dan por obvias: el próximo disparo es **estrictamente
+posterior** a `desde` (si no, una misión que acaba de correr se redispara en el
+mismo minuto para siempre), y una expresión inválida deja `proximaAt` en `null` en
+vez de disparar a cualquier hora. En cron, día-del-mes y día-de-semana
+restringidos son un **OR**, no un AND: es el comportamiento histórico, y con AND
+`0 0 1 * 1` casi no dispararía.
+
+**Una misión no larga una corrida si la empresa ya tiene una viva**
+(`tieneCorridaViva`): dos equipos completos escribiendo sobre los mismos
+entregables se pisan, y queda una versión que mezcla dos trabajos. Se pierde el
+turno y se reprograma, que es más sano.
+
+**Publicar es lo único del circuito que un agente no puede hacer.** La misión
+produce, avisa por correo y espera. `ExportStore.publicar` mueve el archivo a
+`publicado/`, así "aprobado" es un hecho verificable en el disco y no un estado
+que hay que creer. El botón está en la pestaña Salida.
+
+**El correo sale por un webhook de n8n, no por SMTP.** `packages/tools/src/correo.ts`
+le pasa el mensaje al flujo y ese decide con qué cuenta sale; el contrato usa
+nombres en inglés (`to`, `subject`, `text`, `attachments`) porque son los campos
+del nodo Send Email, y así el otro lado es un mapeo y no una traducción. Los
+adjuntos viajan como **enlace al servidor local**, no como bytes: sirve para que
+quien recibe el aviso lo abra desde la misma red, no desde cualquier lado. Sin
+`N8N_EMAIL_WEBHOOK_URL` la herramienta falla diciendo exactamente qué falta y de
+quién es el problema.
+
 **Todo lo que pasa tiene que emitir un evento.** El motor emite a `EventBus`, el
 servidor persiste y reemite por SSE, y la UI deriva su estado de la traza — no
 hace polling. "Ver en vivo" y "retroceder en el timeline" son la misma operación.
@@ -219,6 +415,71 @@ existe para eso, y `listArtifactsByCompany` filtra por ahí en vez de unir con
 `runs`. `deleteRun` se lleva eventos, mensajes, tareas, aprobaciones y ledger
 —el registro de *cómo* se llegó— pero nunca los artefactos. Limpiar la lista de
 corridas no puede costarle a la empresa el trabajo que produjo.
+
+**Borrar una empresa toca tres lugares, no uno** (`Runtime.eliminarEmpresa`).
+`store.deleteCompany` limpia la base, pero el runtime de empresa sostiene
+**procesos de servidores MCP** —que no se caen porque borres filas— y
+`data/exports/<empresa>/` queda con todo lo producido y sin ninguna pantalla
+desde la cual verlo, porque todas navegan por empresa. `olvidarEmpresa` es
+`olvidarCorrida` un nivel más arriba y existe por lo mismo. En la UI, además, hay
+que soltar la empresa seleccionada (`onCompanyGone`) o la pantalla queda cargando
+un id muerto para siempre.
+
+**`TABLAS_POR_EMPRESA` y `TABLAS_POR_CORRIDA` se comparten** entre el borrado en
+cascada y el barrido de residuos (`Store.residuos` / `purgarResiduos`). Una tabla
+nueva agregada en un solo lado deja basura que el barrido no ve, o hace que el
+barrido se lleve filas que sí tenían dueño. `artifacts` va en la de empresa
+—sobrevive a su corrida, no a su empresa—; `runs` no está en ninguna porque su
+cascada se hace a mano, pero `residuos()` la cuenta aparte.
+
+**Un diagnóstico tiene que anunciar exactamente lo que va a borrar.** El barrido
+decía 1 fila y borraba 3: no contaba la corrida huérfana ni sus mensajes, porque
+comparaba contra `runs` a secas y esa corrida todavía existía. Se compara contra
+las corridas que **van a sobrevivir**. Un botón destructivo que subdeclara no se
+vuelve a creer, y hay un test que lo fija.
+
+**Consultar el disco no puede escribirlo.** `ExportStore.dirFor` crea la carpeta
+al pasar, así que un barrido de carpetas residuales que lo use **produce los
+residuos que viene a buscar**: pedir el árbol de una empresa borrada alcanzaba
+para dejarla de nuevo en disco. Todo el camino de medición usa `pathFor`.
+
+**Vaciar la salida se guía por el manifiesto, no por la extensión.** El logo es
+un `.png` que subió una persona, vive en una ruta fija y no se vuelve a generar
+solo: un `kind: "all"` se lo lleva. Y `VACUUM` va suelto y al final — SQLite no
+lo admite dentro de una transacción—, porque sin compactar el archivo pesa lo
+mismo después de purgar y parece que la limpieza no hizo nada.
+
+**Una empresa creada por la API tiene que sembrar sus herramientas**
+(`Runtime.sembrarHerramientas`, en `POST /api/companies`). Es el mismo problema
+que el seed: sin filas en `tools`, `role.toolIds` no puede apuntar a nada y el
+proyecto nace sin nada que asignarle a un agente. Sólo `capability` y `skill`;
+las de coordinación se otorgan siempre y mostrarlas las presentaría como
+quitables.
+
+**"Proyecto" es el rótulo de una pantalla, no una entidad.** `apps/web/src/routes/Proyectos.tsx`
+gestiona empresas y las llama proyectos porque esa es la unidad de trabajo; el
+dominio sigue siendo `Company` y adentro se sigue hablando de empresa, agentes y
+departamentos. No renombres el dominio: toda la metáfora del producto es
+organizacional y sin ella el organigrama no significa nada.
+
+**El resumen de proyectos se cuenta con `GROUP BY`, y parte de `listCompanies`.**
+Traer las filas para contarlas se lleva el contenido entero de cada entregable a
+memoria; y un `GROUP BY` a secas **pierde los proyectos vacíos**, que son
+justamente los recién creados.
+
+**Una habilidad no se otorga sola.** `ToolRegistry.forRole` sólo regala las de
+coordinación: `origin: "skill"` y `origin: "capability"` dependen de `toolIds`.
+Si armás una empresa por código, registrá también las habilidades en la tabla
+`tools` —`npm run db:seed` filtraba sólo `capability`, así que sus roles no
+podían exportar nada— o vas a ver a un agente explicando que no encuentra
+`export_video`.
+
+**Un proveedor que no contesta cuelga la corrida entera.** No basta con manejar
+el error: un endpoint que acepta la conexión y se queda callado deja el turno
+esperando para siempre —el agente no falla, no sigue, y no se le puede pedir que
+cambie de enfoque—. Toda llamada de red que salga de una herramienta lleva corte
+por tiempo (`imagenes.ts`, `CORTE_MS`). Lo medimos con el endpoint de imágenes de
+NVIDIA, que hoy no responde.
 
 **La salida se mira antes de descargar.** El PDF y las imágenes los dibuja el
 navegador desde la misma URL con `?inline` —un `attachment` dentro de un iframe

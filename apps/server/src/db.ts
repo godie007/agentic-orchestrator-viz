@@ -11,6 +11,7 @@ import type {
   Learning,
   McpServer,
   Message,
+  Mision,
   Policy,
   Role,
   Run,
@@ -46,6 +47,11 @@ CREATE TABLE IF NOT EXISTS roles (
   data TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS policies (
+  id TEXT PRIMARY KEY,
+  company_id TEXT NOT NULL,
+  data TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS misiones (
   id TEXT PRIMARY KEY,
   company_id TEXT NOT NULL,
   data TEXT NOT NULL
@@ -122,6 +128,7 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_departments_company ON departments(company_id);
 CREATE INDEX IF NOT EXISTS idx_roles_company ON roles(company_id);
 CREATE INDEX IF NOT EXISTS idx_policies_company ON policies(company_id);
+CREATE INDEX IF NOT EXISTS idx_misiones_company ON misiones(company_id);
 CREATE INDEX IF NOT EXISTS idx_mcp_company ON mcp_servers(company_id);
 CREATE INDEX IF NOT EXISTS idx_tools_company ON tools(company_id);
 CREATE INDEX IF NOT EXISTS idx_runs_company ON runs(company_id, started_at DESC);
@@ -134,6 +141,52 @@ CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id, seq);
 CREATE INDEX IF NOT EXISTS idx_learnings_company ON learnings(company_id);
 CREATE INDEX IF NOT EXISTS idx_requests_company ON agent_requests(company_id);
 `;
+
+/**
+ * Tablas que cuelgan de una empresa y de una corrida.
+ *
+ * Están acá y no repetidas en cada método porque son las mismas listas que usan
+ * el borrado en cascada y el barrido de residuos: si aparece una tabla nueva y
+ * se agrega en un solo lado, el borrado deja basura que el barrido no ve —o al
+ * revés, el barrido se lleva filas que sí tenían dueño.
+ *
+ * `artifacts` va por empresa a propósito: un entregable sobrevive a su corrida
+ * —para eso existe `artifacts.company_id`— pero no a su empresa.
+ */
+const TABLAS_POR_EMPRESA = [
+  "departments",
+  "roles",
+  "policies",
+  "misiones",
+  "mcp_servers",
+  "tools",
+  "learnings",
+  "agent_requests",
+  "artifacts",
+] as const;
+
+const TABLAS_POR_CORRIDA = ["events", "messages", "tasks", "approvals", "ledger"] as const;
+
+/** Lo que hace falta para elegir un proyecto sin tener que abrirlo. */
+export interface ResumenEmpresa {
+  id: string;
+  name: string;
+  mission: string;
+  updatedAt: number;
+  roles: number;
+  departamentos: number;
+  corridas: number;
+  entregables: number;
+  misiones: number;
+  ultimaCorridaAt: number | null;
+}
+
+/** Filas sueltas, contadas por tabla. Sólo aparecen las que tienen alguna. */
+export interface Residuos {
+  porEmpresa: Record<string, number>;
+  porCorrida: Record<string, number>;
+  filas: number;
+}
 
 export class Store {
   private db: Database.Database;
@@ -217,24 +270,160 @@ export class Store {
    * entregables y 21 corridas apuntando a empresas inexistentes.
    */
   deleteCompany(id: string): void {
-    const tables = ["departments", "roles", "policies", "mcp_servers", "tools", "learnings", "agent_requests"];
     const tx = this.db.transaction(() => {
       const runIds = this.db
         .prepare("SELECT id FROM runs WHERE json_extract(data, '$.companyId') = ?")
         .all(id) as Array<{ id: string }>;
       for (const { id: runId } of runIds) {
-        for (const tabla of ["events", "messages", "tasks", "approvals", "ledger"]) {
+        for (const tabla of TABLAS_POR_CORRIDA) {
           this.db.prepare(`DELETE FROM ${tabla} WHERE run_id = ?`).run(runId);
         }
       }
       this.db.prepare("DELETE FROM runs WHERE json_extract(data, '$.companyId') = ?").run(id);
-      this.db.prepare("DELETE FROM artifacts WHERE company_id = ?").run(id);
-      for (const table of tables) {
+      // `TABLAS_POR_EMPRESA` incluye `artifacts`: acá sí se van, porque ya no
+      // queda empresa a la que pertenezcan.
+      for (const table of TABLAS_POR_EMPRESA) {
         this.db.prepare(`DELETE FROM ${table} WHERE company_id = ?`).run(id);
       }
       this.db.prepare("DELETE FROM companies WHERE id = ?").run(id);
     });
     tx();
+  }
+
+  /**
+   * Una línea por empresa con lo que hace falta para decidir sin entrar.
+   *
+   * Va con cuentas agregadas y no trayendo las filas: la pantalla de proyectos
+   * las muestra todas juntas, y cargar los entregables de cada una para después
+   * contarlos es traerse el contenido entero de cada documento a memoria.
+   */
+  resumenEmpresas(): ResumenEmpresa[] {
+    const contarPor = (tabla: string): Map<string, number> => {
+      const filas = this.db
+        .prepare(`SELECT company_id AS id, COUNT(*) AS n FROM ${tabla} GROUP BY company_id`)
+        .all() as Array<{ id: string; n: number }>;
+      return new Map(filas.map((fila) => [fila.id, fila.n]));
+    };
+
+    const roles = contarPor("roles");
+    const departamentos = contarPor("departments");
+    const corridas = contarPor("runs");
+    const entregables = contarPor("artifacts");
+    const misiones = contarPor("misiones");
+    const ultimas = new Map(
+      (
+        this.db
+          .prepare("SELECT company_id AS id, MAX(started_at) AS at FROM runs GROUP BY company_id")
+          .all() as Array<{ id: string; at: number }>
+      ).map((fila) => [fila.id, fila.at]),
+    );
+
+    return this.listCompanies().map((company) => ({
+      id: company.id,
+      name: company.name,
+      mission: company.mission,
+      updatedAt: company.updatedAt,
+      roles: roles.get(company.id) ?? 0,
+      departamentos: departamentos.get(company.id) ?? 0,
+      corridas: corridas.get(company.id) ?? 0,
+      entregables: entregables.get(company.id) ?? 0,
+      misiones: misiones.get(company.id) ?? 0,
+      ultimaCorridaAt: ultimas.get(company.id) ?? null,
+    }));
+  }
+
+  // --- Limpieza ------------------------------------------------------------
+
+  /**
+   * Filas que quedaron apuntando a algo que ya no existe.
+   *
+   * Hoy `deleteCompany` y `deleteRun` no dejan nada suelto, pero antes sí: se
+   * midieron 10 entregables y 21 corridas apuntando a empresas inexistentes. Una
+   * base que viene de esa época sigue arrastrando esa basura, y no hay forma de
+   * verla desde la UI porque justamente lo que le falta es el padre por el que
+   * se navega. Esto la cuenta; `purgarResiduos` la borra.
+   */
+  residuos(): Residuos {
+    const contar = (sql: string): number =>
+      (this.db.prepare(sql).get() as { n: number }).n;
+
+    const porEmpresa: Record<string, number> = {};
+    // La corrida sin empresa va primero y aparte: no está en
+    // `TABLAS_POR_EMPRESA` porque su cascada la maneja el borrado a mano, pero
+    // sin contarla el diagnóstico anuncia menos filas de las que va a borrar, y
+    // un botón destructivo que subdeclara lo que se lleva no se vuelve a creer.
+    const corridas = contar(
+      "SELECT COUNT(*) AS n FROM runs WHERE company_id NOT IN (SELECT id FROM companies)",
+    );
+    if (corridas > 0) porEmpresa["runs"] = corridas;
+
+    for (const tabla of TABLAS_POR_EMPRESA) {
+      const n = contar(
+        `SELECT COUNT(*) AS n FROM ${tabla} WHERE company_id NOT IN (SELECT id FROM companies)`,
+      );
+      if (n > 0) porEmpresa[tabla] = n;
+    }
+
+    // Contra las corridas que **van a sobrevivir**, no contra las que hay ahora:
+    // las de una empresa inexistente se borran primero y arrastran sus filas, y
+    // comparar contra `runs` a secas las dejaba fuera de la cuenta.
+    const porCorrida: Record<string, number> = {};
+    for (const tabla of TABLAS_POR_CORRIDA) {
+      const n = contar(
+        `SELECT COUNT(*) AS n FROM ${tabla}
+         WHERE run_id NOT IN (SELECT id FROM runs WHERE company_id IN (SELECT id FROM companies))`,
+      );
+      if (n > 0) porCorrida[tabla] = n;
+    }
+
+    const filas =
+      Object.values(porEmpresa).reduce((a, b) => a + b, 0) +
+      Object.values(porCorrida).reduce((a, b) => a + b, 0);
+    return { porEmpresa, porCorrida, filas };
+  }
+
+  /**
+   * Borra los residuos y devuelve qué se llevó.
+   *
+   * El orden importa: primero las corridas sin empresa, porque al irse dejan
+   * huérfanas sus propias filas, y recién después el barrido por corrida. Al
+   * revés hay que correrlo dos veces para que quede limpio.
+   */
+  purgarResiduos(): Residuos {
+    const antes = this.residuos();
+    const tx = this.db.transaction(() => {
+      this.db.exec("DELETE FROM runs WHERE company_id NOT IN (SELECT id FROM companies)");
+      for (const tabla of TABLAS_POR_CORRIDA) {
+        this.db.exec(`DELETE FROM ${tabla} WHERE run_id NOT IN (SELECT id FROM runs)`);
+      }
+      for (const tabla of TABLAS_POR_EMPRESA) {
+        this.db.exec(`DELETE FROM ${tabla} WHERE company_id NOT IN (SELECT id FROM companies)`);
+      }
+    });
+    tx();
+    return antes;
+  }
+
+  /**
+   * Compacta el archivo de la base.
+   *
+   * SQLite no devuelve al sistema el espacio de lo que borrás: lo marca libre y
+   * lo reusa. Después de purgar una corrida de miles de eventos, el archivo
+   * sigue pesando lo mismo y parece que la limpieza no hizo nada.
+   *
+   * `VACUUM` **no puede correr dentro de una transacción**, así que va suelto y
+   * al final de todo.
+   */
+  vacuum(): void {
+    this.db.exec("VACUUM");
+  }
+
+  /** Peso del archivo de la base, para poder mostrar el antes y el después. */
+  pesoEnDisco(): number {
+    const fila = this.db
+      .prepare("SELECT page_count * page_size AS bytes FROM pragma_page_count(), pragma_page_size()")
+      .get() as { bytes: number } | undefined;
+    return fila?.bytes ?? 0;
   }
 
   saveDepartment(department: Department): void {
@@ -278,6 +467,20 @@ export class Store {
   listPolicies(companyId: string): Policy[] {
     return this.many<Policy>("SELECT data FROM policies WHERE company_id = ?", companyId);
   }
+  saveMision(mision: Mision): void {
+    this.upsertScoped("misiones", mision.id, mision.companyId, mision);
+  }
+  listMisiones(companyId: string): Mision[] {
+    return this.many<Mision>("SELECT data FROM misiones WHERE company_id = ?", companyId);
+  }
+  /** Todas las misiones de todas las empresas: es lo que mira el planificador. */
+  listAllMisiones(): Mision[] {
+    return this.many<Mision>("SELECT data FROM misiones");
+  }
+  deleteMision(id: string): void {
+    this.db.prepare("DELETE FROM misiones WHERE id = ?").run(id);
+  }
+
   deletePolicy(id: string): void {
     this.db.prepare("DELETE FROM policies WHERE id = ?").run(id);
   }
@@ -329,6 +532,17 @@ export class Store {
           companyId,
         )
       : this.many<Run>("SELECT data FROM runs ORDER BY started_at DESC LIMIT 100");
+  }
+
+  /**
+   * Todas las corridas, sin el tope de 100 de la lista.
+   *
+   * `listRuns()` acota porque alimenta una pantalla; una limpieza que use ese
+   * tope borra de a 100 y hay que apretar el botón cuatro veces sin que nada
+   * explique por qué.
+   */
+  listAllRuns(): Run[] {
+    return this.many<Run>("SELECT data FROM runs ORDER BY started_at DESC");
   }
 
   saveMessage(message: Message): void {

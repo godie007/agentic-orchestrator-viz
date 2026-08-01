@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ModelTier, Role } from "@orq/shared";
 import { api, type CompanyBundle } from "../api.js";
-import { Button, Empty, Field, Panel, Status, inputClass, money } from "../lib/ui.js";
+import { Button, Empty, Field, Panel, Status, inputClass, money, peso } from "../lib/ui.js";
 
 /**
  * Pantallas de apoyo: proveedores y modelos, diseñador de la empresa y costos.
@@ -84,7 +84,14 @@ export function Providers() {
 
 // --- Diseñador de la empresa -------------------------------------------------
 
-export function CompanyDesigner({ company }: { company: CompanyBundle }) {
+export function CompanyDesigner({
+  company,
+  onCompanyGone,
+}: {
+  company: CompanyBundle;
+  /** La empresa dejó de existir: quien elige cuál se muestra tiene que soltarla. */
+  onCompanyGone?: () => void;
+}) {
   const companyId = company.company.id;
   const queryClient = useQueryClient();
   const [selectedId, setSelectedId] = useState<string | null>(company.roles[0]?.id ?? null);
@@ -206,7 +213,10 @@ export function CompanyDesigner({ company }: { company: CompanyBundle }) {
   });
 
   return (
-    <div className="grid h-full min-h-0 grid-cols-[280px_1fr] gap-2 p-2">
+    // `min-h-0` en la fila del contenido: sin eso el alto del organigrama empuja
+    // la sección de mantenimiento fuera de la pantalla en vez de hacer scroll.
+    <div className="grid h-full min-h-0 grid-rows-[1fr_auto] gap-2 p-2">
+      <div className="grid min-h-0 grid-cols-[280px_1fr] gap-2">
       <Panel
         title={`Organización (${company.roles.length})`}
         actions={
@@ -310,6 +320,381 @@ export function CompanyDesigner({ company }: { company: CompanyBundle }) {
           </Empty>
         </Panel>
       )}
+      </div>
+
+      <Mantenimiento company={company} onCompanyGone={onCompanyGone} />
+    </div>
+  );
+}
+
+// --- Mantenimiento -----------------------------------------------------------
+
+type Confirmacion = "vaciar" | "empresa" | "corridas" | "residuos" | "carpetas";
+
+/**
+ * Lo que se limpia, no lo que se configura.
+ *
+ * Va al pie y arranca cerrado a propósito: son las únicas acciones de esta
+ * pantalla que destruyen trabajo y **ninguna es reversible** —no hay papelera ni
+ * en el disco ni en la base—. Cada una dice antes qué se lleva y qué no, porque
+ * la pregunta que uno se hace frente a un botón así es exactamente esa.
+ *
+ * Los residuos son el motivo por el que esto existe: una carpeta sin empresa no
+ * aparece en ninguna otra pantalla, porque todas navegan por empresa y esa
+ * empresa ya no está. Se acumulan sin que nadie los vea.
+ */
+function Mantenimiento({
+  company,
+  onCompanyGone,
+}: {
+  company: CompanyBundle;
+  onCompanyGone?: () => void;
+}) {
+  const companyId = company.company.id;
+  const queryClient = useQueryClient();
+  const [abierto, setAbierto] = useState(false);
+  const [confirmando, setConfirmando] = useState<Confirmacion | null>(null);
+  const [seleccion, setSeleccion] = useState<string[]>([]);
+  const [aviso, setAviso] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  // Sólo se consulta con la sección abierta: el diagnóstico recorre el disco
+  // entero, y no tiene por qué correr cada vez que alguien edita un agente.
+  const estado = useQuery({
+    queryKey: ["mantenimiento"],
+    queryFn: () => api.mantenimiento(),
+    enabled: abierto,
+  });
+
+  const refrescar = () => {
+    void queryClient.invalidateQueries({ queryKey: ["mantenimiento"] });
+    void queryClient.invalidateQueries({ queryKey: ["runs"] });
+  };
+
+  // Lo que comparten las cinco acciones. No es un hook: son objetos que se le
+  // pasan a `useMutation`, así que la cantidad y el orden de hooks no dependen
+  // de nada.
+  const comun = {
+    onMutate: () => {
+      setAviso(null);
+      setError(null);
+    },
+    onError: (fallo: Error) => {
+      setConfirmando(null);
+      setError(fallo.message);
+    },
+  };
+
+  const listo = (texto: string) => {
+    setConfirmando(null);
+    setAviso(texto);
+    refrescar();
+  };
+
+  const vaciar = useMutation({
+    mutationFn: () => api.vaciarSalida(companyId),
+    ...comun,
+    onSuccess: (r) =>
+      listo(
+        r.borrados === 0
+          ? "No había nada generado para borrar."
+          : `Se borraron ${r.borrados} archivo(s), ${peso(r.bytes)}. Se conservaron ${r.conservados} que no generó la empresa.`,
+      ),
+  });
+
+  const borrarEmpresa = useMutation({
+    mutationFn: () => api.deleteCompany(companyId),
+    ...comun,
+    onSuccess: (r) => {
+      listo(`Empresa borrada, con ${r.archivos} archivo(s) de salida (${peso(r.bytes)}).`);
+      void queryClient.invalidateQueries({ queryKey: ["companies"] });
+      // Quien elige qué empresa se muestra sigue apuntando a ésta: si no la
+      // suelta, la pantalla queda cargando una empresa que ya no existe.
+      onCompanyGone?.();
+    },
+  });
+
+  const limpiarCorridas = useMutation({
+    mutationFn: () => api.limpiarCorridasTodas(),
+    ...comun,
+    onSuccess: (r) => listo(`Se borraron ${r.borradas} corrida(s). Los entregables se conservan.`),
+  });
+
+  const purgarResiduos = useMutation({
+    mutationFn: () => api.purgar({ residuos: true, compactar: true }),
+    ...comun,
+    onSuccess: (r) =>
+      listo(
+        `Se purgaron ${r.residuos?.filas ?? 0} fila(s) sueltas. ` +
+          `La base pasó de ${peso(r.base.antes)} a ${peso(r.base.despues)}.`,
+      ),
+  });
+
+  const purgarCarpetas = useMutation({
+    mutationFn: () => api.purgar({ carpetas: seleccion }),
+    ...comun,
+    onSuccess: (r) => {
+      setSeleccion([]);
+      const problema =
+        r.rechazadas.length > 0 ? ` ${r.rechazadas.length} no se pudo(ieron) borrar.` : "";
+      listo(`Se borraron ${r.carpetas} carpeta(s), ${peso(r.bytesEnDisco)}.${problema}`);
+    },
+  });
+
+  const trabajando =
+    vaciar.isPending ||
+    borrarEmpresa.isPending ||
+    limpiarCorridas.isPending ||
+    purgarResiduos.isPending ||
+    purgarCarpetas.isPending;
+
+  const datos = estado.data;
+  const carpetas = datos?.carpetas ?? [];
+  const bytesResiduales = carpetas.reduce((total, entrada) => total + entrada.bytes, 0);
+  const filasSueltas = datos?.base.residuos.filas ?? 0;
+  // El punto rojo del encabezado: es lo único que se ve con la sección cerrada.
+  const hayQueLimpiar = carpetas.length > 0 || filasSueltas > 0;
+
+  const confirmaciones: Record<Confirmacion, { texto: string; ejecutar: () => void }> = {
+    vaciar: {
+      texto: `¿Borrar todo lo que generó ${company.company.name}? Se conserva lo que subiste vos, incluido el logo.`,
+      ejecutar: () => vaciar.mutate(),
+    },
+    empresa: {
+      texto: `¿Borrar ${company.company.name} entera? Se van sus agentes, corridas, entregables, memoria y su carpeta de salida.`,
+      ejecutar: () => borrarEmpresa.mutate(),
+    },
+    corridas: {
+      texto: `¿Borrar ${datos?.corridasTerminadas ?? 0} corrida(s) terminada(s) de todas las empresas? Los entregables se conservan.`,
+      ejecutar: () => limpiarCorridas.mutate(),
+    },
+    residuos: {
+      texto: `¿Purgar ${filasSueltas} fila(s) que apuntan a una empresa o corrida que ya no existe, y compactar la base?`,
+      ejecutar: () => purgarResiduos.mutate(),
+    },
+    carpetas: {
+      texto: `¿Borrar ${seleccion.length} carpeta(s) sin empresa? Se pierde todo lo que tengan adentro.`,
+      ejecutar: () => purgarCarpetas.mutate(),
+    },
+  };
+
+  return (
+    <Panel
+      title={
+        <span className="flex items-center gap-2">
+          Mantenimiento
+          {abierto && hayQueLimpiar && (
+            <span className="rounded-full bg-warn/15 px-1.5 py-0.5 text-[10px] font-medium text-warn">
+              hay residuos
+            </span>
+          )}
+        </span>
+      }
+      actions={
+        <Button variant="ghost" onClick={() => setAbierto((previo) => !previo)}>
+          {abierto ? "ocultar" : "limpiar…"}
+        </Button>
+      }
+    >
+      {!abierto ? (
+        <p className="px-3 py-2 text-[11px] text-ink-faint">
+          Borrar la empresa, vaciar su salida y purgar lo que quedó de empresas que ya no
+          están. Ninguna de estas acciones se puede deshacer.
+        </p>
+      ) : (
+        <div className="space-y-3 p-3 text-xs">
+          {confirmando && (
+            <div className="flex flex-wrap items-center gap-2 rounded border border-warn/40 bg-warn/10 px-2 py-1.5">
+              <span className="text-[11px] text-warn">{confirmaciones[confirmando].texto}</span>
+              <Button
+                variant="danger"
+                disabled={trabajando}
+                onClick={confirmaciones[confirmando].ejecutar}
+              >
+                sí, borrar
+              </Button>
+              <Button variant="ghost" onClick={() => setConfirmando(null)}>
+                cancelar
+              </Button>
+            </div>
+          )}
+
+          {aviso && (
+            <p className="rounded border border-ok/40 bg-ok/10 px-2 py-1.5 text-[11px] text-ok">
+              {aviso}
+            </p>
+          )}
+          {error && (
+            <p className="rounded border border-danger/40 bg-danger/10 px-2 py-1.5 text-[11px] text-danger">
+              {error}
+            </p>
+          )}
+
+          <section className="space-y-1.5">
+            <h3 className="text-[10px] font-semibold tracking-wide text-ink-dim uppercase">
+              {company.company.name}
+            </h3>
+            <Accion
+              titulo="Vaciar la salida"
+              detalle="Borra los Word, PDF, videos y presentaciones que produjo la empresa. Lo que subiste vos —el logo, las fotos— se conserva."
+              boton="vaciar"
+              disabled={trabajando}
+              onClick={() => setConfirmando("vaciar")}
+            />
+            <Accion
+              titulo="Borrar la empresa"
+              detalle="Se lleva agentes, políticas, corridas, entregables, memoria, misiones y la carpeta de salida. Si tiene una corrida en curso, hay que detenerla antes."
+              boton="borrar"
+              disabled={trabajando}
+              onClick={() => setConfirmando("empresa")}
+            />
+          </section>
+
+          <section className="space-y-1.5 border-t border-line pt-3">
+            <h3 className="text-[10px] font-semibold tracking-wide text-ink-dim uppercase">
+              Todas las empresas
+            </h3>
+            {estado.isLoading ? (
+              <p className="text-[11px] text-ink-faint">Revisando…</p>
+            ) : !datos ? (
+              <p className="text-[11px] text-danger">No se pudo leer el estado de mantenimiento.</p>
+            ) : (
+              <>
+                <Accion
+                  titulo={`Corridas terminadas (${datos.corridasTerminadas})`}
+                  detalle="Saca de la lista todo lo que ya no va a avanzar, de cualquier empresa. Los entregables se conservan: son de la empresa, no de la corrida."
+                  boton="limpiar"
+                  disabled={trabajando || datos.corridasTerminadas === 0}
+                  onClick={() => setConfirmando("corridas")}
+                />
+                <Accion
+                  titulo={`Filas sueltas en la base (${filasSueltas})`}
+                  detalle={
+                    filasSueltas === 0
+                      ? `La base pesa ${peso(datos.base.bytes)} y no tiene nada apuntando a algo inexistente.`
+                      : `Apuntan a una empresa o corrida que ya no existe. Se purgan y se compacta el archivo, que hoy pesa ${peso(datos.base.bytes)}. ${detallarResiduos(datos.base.residuos)}`
+                  }
+                  boton="purgar"
+                  disabled={trabajando || filasSueltas === 0}
+                  onClick={() => setConfirmando("residuos")}
+                />
+
+                <div className="space-y-1.5 pt-1">
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span className="font-medium text-ink">
+                      Carpetas sin empresa ({carpetas.length})
+                    </span>
+                    {carpetas.length > 0 && (
+                      <span className="text-[10px] text-ink-faint">{peso(bytesResiduales)}</span>
+                    )}
+                  </div>
+                  {carpetas.length === 0 ? (
+                    <p className="text-[11px] text-ink-faint">
+                      Cada carpeta de <code className="text-ink-dim">data/exports/</code> tiene su
+                      empresa. No hay nada que limpiar.
+                    </p>
+                  ) : (
+                    <>
+                      <p className="text-[11px] text-ink-faint">
+                        Quedaron de empresas que ya se borraron. Nadie las ve desde el resto de la
+                        aplicación, porque todas las pantallas navegan por empresa.
+                      </p>
+                      <ul className="divide-y divide-line rounded border border-line">
+                        {carpetas.map((entrada) => (
+                          <li
+                            key={entrada.carpeta}
+                            className="flex items-center gap-2 px-2 py-1.5"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={seleccion.includes(entrada.carpeta)}
+                              onChange={(event) =>
+                                setSeleccion((previa) =>
+                                  event.target.checked
+                                    ? [...previa, entrada.carpeta]
+                                    : previa.filter((nombre) => nombre !== entrada.carpeta),
+                                )
+                              }
+                            />
+                            <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink">
+                              {entrada.carpeta}
+                            </span>
+                            <span className="shrink-0 text-[10px] text-ink-faint">
+                              {entrada.archivos} arch · {peso(entrada.bytes)}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          variant="ghost"
+                          onClick={() =>
+                            setSeleccion(
+                              seleccion.length === carpetas.length
+                                ? []
+                                : carpetas.map((entrada) => entrada.carpeta),
+                            )
+                          }
+                        >
+                          {seleccion.length === carpetas.length ? "ninguna" : "todas"}
+                        </Button>
+                        <Button
+                          variant="danger"
+                          disabled={trabajando || seleccion.length === 0}
+                          onClick={() => setConfirmando("carpetas")}
+                        >
+                          borrar {seleccion.length || ""}
+                        </Button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              </>
+            )}
+          </section>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+/** El residuo se informa por tabla: "31 filas" no dice qué se va a borrar. */
+function detallarResiduos(residuos: {
+  porEmpresa: Record<string, number>;
+  porCorrida: Record<string, number>;
+}): string {
+  const partes = [
+    ...Object.entries(residuos.porEmpresa),
+    ...Object.entries(residuos.porCorrida),
+  ].map(([tabla, cantidad]) => `${cantidad} en ${tabla}`);
+  return partes.join(", ") + ".";
+}
+
+/** Fila de acción destructiva: qué hace, qué se lleva, y el botón. */
+function Accion({
+  titulo,
+  detalle,
+  boton,
+  disabled,
+  onClick,
+}: {
+  titulo: string;
+  detalle: string;
+  boton: string;
+  disabled: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <div className="flex items-start gap-3">
+      <div className="min-w-0 flex-1">
+        <p className="font-medium text-ink">{titulo}</p>
+        <p className="text-[11px] leading-snug text-ink-faint">{detalle}</p>
+      </div>
+      <div className="shrink-0 pt-0.5">
+        <Button variant="danger" disabled={disabled} onClick={onClick}>
+          {boton}
+        </Button>
+      </div>
     </div>
   );
 }

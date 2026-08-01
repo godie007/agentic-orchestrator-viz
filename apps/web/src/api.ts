@@ -85,6 +85,52 @@ export interface CompanyBundle {
   tools: Tool[];
 }
 
+/** Lo que hace falta para elegir un proyecto sin tener que abrirlo. */
+export interface ResumenProyecto {
+  id: string;
+  name: string;
+  mission: string;
+  updatedAt: number;
+  roles: number;
+  departamentos: number;
+  corridas: number;
+  entregables: number;
+  misiones: number;
+  ultimaCorridaAt: number | null;
+  corridaViva: boolean;
+  disco: { archivos: number; bytes: number };
+}
+
+/** Filas sueltas, por tabla. Sólo vienen las que tienen alguna. */
+export interface Residuos {
+  porEmpresa: Record<string, number>;
+  porCorrida: Record<string, number>;
+  filas: number;
+}
+
+/** Una carpeta de salida que ya no tiene empresa detrás. */
+export interface CarpetaResidual {
+  carpeta: string;
+  archivos: number;
+  bytes: number;
+  modifiedAt: number;
+}
+
+export interface Mantenimiento {
+  base: { bytes: number; residuos: Residuos };
+  carpetas: CarpetaResidual[];
+  corridasTerminadas: number;
+}
+
+export interface ResultadoPurga {
+  corridas: number;
+  residuos: Residuos | null;
+  carpetas: number;
+  rechazadas: Array<{ carpeta: string; motivo: string }>;
+  bytesEnDisco: number;
+  base: { antes: number; despues: number };
+}
+
 export interface RunBundle {
   run: Run;
   messages: Message[];
@@ -100,7 +146,12 @@ export const api = {
   models: (refresh = false) => request<ModelInfo[]>(`/models?refresh=${refresh}`),
 
   companies: () => request<Company[]>("/companies"),
+  /** Una línea por proyecto, con sus cuentas y su peso en disco. */
+  resumenProyectos: () => request<ResumenProyecto[]>("/companies/resumen"),
   company: (id: string) => request<CompanyBundle>(`/companies/${id}`),
+  /** Crea un proyecto vacío, ya con sus herramientas built-in registradas. */
+  createCompany: (input: { name: string; mission: string; defaultModel: Company["defaultModel"] }) =>
+    request<Company>("/companies", { method: "POST", body: JSON.stringify(input) }),
   blueprint: (id: string) => request<unknown>(`/companies/${id}/blueprint`),
   importCompany: (blueprint: unknown) =>
     request<{ companyId: string }>("/companies/import", {
@@ -137,6 +188,15 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(company),
     }),
+  /**
+   * Borra la empresa entera: base, conexiones MCP y directorio de salida.
+   *
+   * Devuelve qué se llevó del disco. Responde 409 si hay una corrida en curso.
+   */
+  deleteCompany: (companyId: string) =>
+    request<{ ok: true; archivos: number; bytes: number }>(`/companies/${companyId}`, {
+      method: "DELETE",
+    }),
 
   tools: (companyId: string) => request<Tool[]>(`/companies/${companyId}/tools`),
 
@@ -153,6 +213,17 @@ export const api = {
     request<{ ok: boolean }>(`/companies/${companyId}/exports/${encodePath(path)}`, {
       method: "DELETE",
     }),
+  /**
+   * Publica un archivo: lo mueve a `publicado/`.
+   *
+   * Es la decisión que la misión no puede tomar sola. Un agente produce y avisa;
+   * esto lo aprieta una persona después de mirarlo.
+   */
+  publishFile: (companyId: string, path: string) =>
+    request<{ ok: true; path: string }>(
+      `/companies/${companyId}/exports-publicar/${encodePath(path)}`,
+      { method: "POST" },
+    ),
   exportUrl: (companyId: string, path: string) =>
     `/api/companies/${companyId}/exports/${encodePath(path)}`,
   /** Misma URL, servida para mostrarse en pantalla en vez de descargarse. */
@@ -160,7 +231,7 @@ export const api = {
     `/api/companies/${companyId}/exports/${encodePath(path)}?inline`,
   exportPreview: (companyId: string, path: string) =>
     request<{
-      kind: "pdf" | "image" | "video" | "audio" | "text" | "none";
+      kind: "pdf" | "image" | "video" | "audio" | "text" | "page" | "none";
       text?: string;
       motivo?: string;
       sizeBytes: number;
@@ -213,6 +284,29 @@ export const api = {
   deleteRun: (id: string) => request<{ ok: boolean }>(`/runs/${id}`, { method: "DELETE" }),
   limpiarCorridas: (companyId: string) =>
     request<{ borradas: number }>(`/companies/${companyId}/runs/terminadas`, { method: "DELETE" }),
+  /** Lo mismo, pero de todas las empresas. */
+  limpiarCorridasTodas: () =>
+    request<{ borradas: number }>("/runs/terminadas", { method: "DELETE" }),
+
+  /** Vacía la salida de una empresa conservando lo que subiste vos. */
+  vaciarSalida: (companyId: string) =>
+    request<{ borrados: number; conservados: number; bytes: number }>(
+      `/companies/${companyId}/exports-vaciar`,
+      { method: "POST" },
+    ),
+
+  /** Qué hay para limpiar, sin borrar nada. */
+  mantenimiento: () => request<Mantenimiento>("/mantenimiento"),
+  purgar: (opciones: {
+    residuos?: boolean;
+    carpetas?: string[];
+    corridas?: boolean;
+    compactar?: boolean;
+  }) =>
+    request<ResultadoPurga>("/mantenimiento/purgar", {
+      method: "POST",
+      body: JSON.stringify(opciones),
+    }),
   createRun: (input: CreateRunInput) =>
     request<Run>("/runs", { method: "POST", body: JSON.stringify(input) }),
   tick: (id: string) =>

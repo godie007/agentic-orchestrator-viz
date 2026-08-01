@@ -249,6 +249,9 @@ describe("herramienta de exportación", () => {
     async writeText(path, content) {
       return { ok: true, path, sizeBytes: content.length };
     },
+    async resolve() {
+      return null;
+    },
     async save(input) {
       guardados.push(input);
       const path = input.folder ? `${input.folder}/${input.filename}` : input.filename;
@@ -288,6 +291,7 @@ describe("herramienta de exportación", () => {
       "delete_files",
       "export_docx",
       "export_pdf",
+      "export_slides",
       "export_video",
       "list_output",
       "write_output_file",
@@ -404,6 +408,9 @@ describe("limpieza del directorio de salida por el agente", () => {
       async writeText(path, content) {
         enDisco.set(path, false);
         return { ok: true, path, sizeBytes: content.length };
+      },
+      async resolve() {
+        return null;
       },
     };
     const tools = createSkillTools(storage);
@@ -538,6 +545,9 @@ describe("crear y modificar documentos", () => {
       async writeText(path, content) {
         escritos.set(path, content);
         return { ok: true, path, sizeBytes: content.length };
+      },
+      async resolve() {
+        return null;
       },
     };
     const tools = createSkillTools(storage);

@@ -1,6 +1,11 @@
+import { createHash } from "node:crypto";
 import { fail, ok, type RegisteredTool, type ToolContext, type ToolResult } from "../types.js";
 import { renderDocx, renderPdf } from "./render.js";
 import { puedeBorrar } from "./permisos.js";
+import { ICONOS_DISPONIBLES } from "./iconos.js";
+import { crearGeneradorImagenes, type GeneradorImagenes } from "./imagenes.js";
+import type { ImagenGuion } from "./guion.js";
+import { renderSlides } from "./slides.js";
 import { renderVideo } from "./video.js";
 
 export { parseMarkdown, parseSpans, spansToText } from "./markdown.js";
@@ -13,6 +18,13 @@ export { parseGuion, caracteresHablados } from "./guion.js";
 export type { Guion, Escena, Linea } from "./guion.js";
 export { renderVideo } from "./video.js";
 export type { OpcionesVideo, ResultadoVideo } from "./video.js";
+export { renderSlides } from "./slides.js";
+export type { OpcionesSlides, ResultadoSlides } from "./slides.js";
+export { iconoAss, iconoSvg, separarIcono, ICONOS_DISPONIBLES } from "./iconos.js";
+export { elegirMusica } from "./musica.js";
+export type { Pista, EleccionMusical } from "./musica.js";
+export { crearGeneradorImagenes } from "./imagenes.js";
+export type { GeneradorImagenes, PedidoImagen } from "./imagenes.js";
 export { crearNarrador, motorDisponible } from "./narracion.js";
 export type { Narrador, Motor, OpcionesNarrador } from "./narracion.js";
 
@@ -62,6 +74,28 @@ export interface SkillStorage {
     path: string,
     content: string,
   ): Promise<{ ok: true; path: string; sizeBytes: number } | { ok: false; motivo: string }>;
+
+  /**
+   * La ruta real de un archivo del directorio de salida, o `null` si no está.
+   *
+   * Existe para el video, que necesita **abrir** una imagen y no puede recibirla
+   * como texto. Devuelve una ruta absoluta ya saneada: la ruta la propone un
+   * agente, así que quien resuelve sigue siendo el servidor.
+   */
+  resolve(path: string): Promise<string | null>;
+}
+
+/** Lo que el servidor le presta a las habilidades además del almacenamiento. */
+export interface OpcionesHabilidades {
+  /** Carpeta con las pistas de música de fondo. */
+  musicaHome?: string;
+  /**
+   * Quién produce las imágenes que el guion describe pero nadie preparó.
+   *
+   * `null` es una configuración válida —una empresa sin proveedor de imágenes—
+   * y entonces el video se filma con lo que ya existe en el directorio.
+   */
+  generadorImagenes?: GeneradorImagenes | null;
 }
 
 /** Escapa una clave para usarla dentro de una expresión regular. */
@@ -483,7 +517,94 @@ export function sinVersionEnNombre(path: string): string {
  * El resto —clave del entregable, guardia de cifras, carpeta de salida, un
  * archivo por entregable— sí es igual, y por eso reusa los mismos ayudantes.
  */
-function crearVideo(storage: SkillStorage): RegisteredTool {
+/**
+ * Nombre estable para una imagen generada.
+ *
+ * El mismo prompt tiene que dar el mismo archivo: sin eso, re-exportar un guion
+ * paga otra vez todas las imágenes y el video cambia de aspecto entre una
+ * versión y la siguiente sin que nadie haya tocado el guion.
+ */
+const nombreDeImagen = (prompt: string, extension: string): string => {
+  const base =
+    prompt
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[̀-ͯ]/g, "")
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 44) || "imagen";
+  return `${base}-${createHash("sha1").update(prompt).digest("hex").slice(0, 8)}.${extension}`;
+};
+
+/**
+ * Dónde busca el sistema el logo de la empresa.
+ *
+ * Una ruta fija dentro del directorio de salida y no una opción de
+ * configuración: el logo es un archivo de la empresa como cualquier otro, se
+ * sube por la misma pestaña y quien lo cambia no necesita tocar un `.env`.
+ */
+const LOGO = "marca/logo.png";
+
+/** JPEG y PNG se distinguen por sus primeros bytes, no por lo que diga nadie. */
+const extensionDe = (bytes: Buffer): string =>
+  bytes[0] === 0xff && bytes[1] === 0xd8 ? "jpg" : "png";
+
+/**
+ * Cómo el video consigue cada imagen que pide el guion.
+ *
+ * Un archivo del directorio se resuelve y listo. Una imagen descrita —`(generar)`—
+ * se busca primero en disco por su nombre derivado del prompt y sólo se produce
+ * si no está: así una segunda exportación no vuelve a pagarla.
+ *
+ * Las generadas quedan en `imagenes/` **dentro del directorio de salida**, no en
+ * un temporal: alguien tiene que poder verlas, reemplazar la que no le gustó y
+ * volver a exportar.
+ */
+export function crearResolutorImagenes(
+  storage: SkillStorage,
+  generador: GeneradorImagenes | null | undefined,
+  carpeta: string,
+  ctx: ToolContext,
+): (imagen: ImagenGuion) => Promise<string | null> {
+  const destino = [carpeta, "imagenes"].filter(Boolean).join("/");
+
+  return async (imagen) => {
+    if (!imagen.generar) return storage.resolve(imagen.src);
+
+    const prompt = imagen.alt.trim();
+    if (!prompt) {
+      throw new Error(
+        "una imagen con (generar) necesita entre corchetes la descripción de lo que se ve",
+      );
+    }
+
+    for (const extension of ["png", "jpg"]) {
+      const ruta = await storage.resolve(`${destino}/${nombreDeImagen(prompt, extension)}`);
+      if (ruta) return ruta;
+    }
+
+    if (!generador) {
+      throw new Error(
+        "no hay ningún proveedor de imágenes configurado. Poné la ruta de un archivo " +
+          "del directorio de salida en vez de (generar), o pedile a quien opera la " +
+          "empresa que configure una API key de imágenes",
+      );
+    }
+
+    const bytes = await generador.generar({
+      prompt,
+      ...(ctx.signal ? { signal: ctx.signal } : {}),
+    });
+    const guardado = await storage.save({
+      filename: nombreDeImagen(prompt, extensionDe(bytes)),
+      folder: destino,
+      bytes,
+    });
+    return storage.resolve(guardado.path);
+  };
+}
+
+function crearVideo(storage: SkillStorage, opciones: OpcionesHabilidades): RegisteredTool {
   return {
     name: "export_video",
     origin: "skill",
@@ -491,13 +612,39 @@ function crearVideo(storage: SkillStorage): RegisteredTool {
     requiresApproval: false,
     description:
       "Convierte un guion ya escrito en un video MP4 narrado con voz. Primero guardá el " +
-      "guion con write_artifact y después pasá su clave acá. El guion es markdown y se " +
-      "lee así: el título con `#` es la portada; cada `##` abre una escena y su texto es " +
-      "la placa que se ve; los párrafos son lo que dice el narrador; las viñetas aparecen " +
-      "en pantalla mientras se habla; una cita con `>` se muestra destacada. Para un " +
-      "diálogo, escribí cada intervención como `**Nombre:** lo que dice` — cada personaje " +
-      "recibe una voz distinta y su línea aparece en pantalla cuando le toca hablar. " +
-      "Calculá unas 15 palabras habladas por cada 6 segundos de video.",
+      "guion con write_artifact y después pasá su clave acá. Lo que va bajo esa clave es " +
+      "el guion mismo —lo que se va a decir y ver—, nunca un informe sobre el video ni " +
+      "una lista de requisitos cumplidos: eso se filma tal cual y sale un video leyendo " +
+      "una checklist en voz alta. Un guion se ve así:\n" +
+      "```\n" +
+      "# Título del video\n\n" +
+      "## Lo que hacemos\n" +
+      "Esto lo dice la voz en off, en una o dos frases.\n" +
+      "- Aparece escrito en pantalla\n" +
+      "- Corto, menos de siete palabras\n\n" +
+      "## :grafico: Lo que medimos\n" +
+      "![Un taller eléctrico al amanecer, con la luz entrando de costado](generar)\n" +
+      "- :chequeo: Ya está resuelto\n" +
+      "- :reloj: Entrega en 48 horas\n\n" +
+      "## Una conversación\n" +
+      "**Cliente:** Lo que pregunta el cliente.\n" +
+      "**Asesora:** Lo que le responde.\n\n" +
+      "## Cierre\n" +
+      "> Una frase que se muestra grande.\n" +
+      "```\n" +
+      "El `#` arma la portada; cada `##` abre una escena y su texto es la placa que se ve; " +
+      "los párrafos son la voz en off; las viñetas aparecen mientras se habla; `>` se " +
+      "muestra destacado. En el diálogo, **cada personaje recibe una voz distinta** y su " +
+      "línea aparece en pantalla cuando le toca hablar. Calculá unas 15 palabras habladas " +
+      "por cada 6 segundos de video.\n" +
+      "**Imágenes:** `![lo que se ve](generar)` describe una imagen y el sistema la produce; " +
+      "`![epígrafe](marketing/foto.jpg)` muestra un archivo que ya está en el directorio de " +
+      "salida. Va una por escena —dos o tres si la escena es larga—; en la portada ocupa " +
+      "todo el cuadro y en el resto, la mitad derecha. La descripción tiene que ser una " +
+      "escena concreta, no un concepto: \"un tablero eléctrico abierto con las manos de un " +
+      "técnico\" da una foto, \"eficiencia\" no.\n" +
+      `**Íconos:** poné \`:nombre:\` al empezar una viñeta o un \`##\` para que aparezca ` +
+      `el ícono. Los que hay: ${ICONOS_DISPONIBLES.join(", ")}.`,
     inputSchema: {
       type: "object",
       properties: {
@@ -510,6 +657,12 @@ function crearVideo(storage: SkillStorage): RegisteredTool {
           description:
             'Carpeta del directorio de salida donde dejarlo, por ejemplo "marketing/videos". ' +
             "Se crea sola si no existe.",
+        },
+        musica: {
+          type: "string",
+          description:
+            'Clima o nombre de la pista de fondo, por ejemplo "corporativo" o "calmo". ' +
+            'Sin esto se elige una neutra; poné "ninguna" para filmar en silencio.',
         },
       },
       required: ["artifact_key"],
@@ -525,6 +678,9 @@ function crearVideo(storage: SkillStorage): RegisteredTool {
       if (bloqueo) return bloqueo;
 
       const carpeta = String(args.folder ?? "").trim();
+      // El logo vive en el directorio de la empresa, como cualquier otro
+      // archivo suyo. Sin configuración: si está, firma la pieza; si no, no.
+      const logo = await storage.resolve(LOGO);
 
       let resultado;
       try {
@@ -542,7 +698,22 @@ function crearVideo(storage: SkillStorage): RegisteredTool {
               year: "numeric",
             }),
           },
-          ctx.signal ? { signal: ctx.signal } : {},
+          {
+            ...(ctx.signal ? { signal: ctx.signal } : {}),
+            // Cómo suena la marca lo decide la empresa, no el guion ni el
+            // agente: el nombre se pronuncia igual en todos sus videos.
+            unaSolaVoz: ctx.workspace.company.voz.unaSolaVoz,
+            ...(logo ? { logo } : {}),
+            lexico: ctx.workspace.company.voz.pronunciacion,
+            ...(opciones.musicaHome !== undefined ? { musicaHome: opciones.musicaHome } : {}),
+            ...(args.musica !== undefined ? { musica: String(args.musica) } : {}),
+            resolverImagen: crearResolutorImagenes(
+              storage,
+              opciones.generadorImagenes,
+              carpeta,
+              ctx,
+            ),
+          },
         );
       } catch (error) {
         // Filmar depende de programas del sistema: si falta ffmpeg o no hay
@@ -566,21 +737,217 @@ function crearVideo(storage: SkillStorage): RegisteredTool {
         resultado.personajes.length > 0
           ? ` Habla ${resultado.personajes.join(", ")}, cada uno con su voz.`
           : "";
+      const visual = resultado.imagenes > 0 ? ` ${resultado.imagenes} imágenes en pantalla.` : "";
+      const cama = resultado.musica ? ` Música de fondo: ${resultado.musica}.` : "";
+      // Los avisos van en el mismo resultado y no en un log: lo único que el
+      // agente puede leer para corregir el guion es lo que devuelve la
+      // herramienta, y una imagen que no apareció es exactamente eso.
+      const problemas =
+        resultado.avisos.length > 0 ? ` Atención: ${resultado.avisos.join(" ")}` : "";
       return ok(
         `Video generado en ${guardado.path}: "${artifact.title}", ` +
           `${resultado.escenas} escenas, ${Math.round(resultado.segundos)} segundos, ` +
-          `${Math.max(1, Math.round(guardado.sizeBytes / 1024))} KB.${reparto} ` +
-          `Queda en el directorio de salida y se puede mirar desde la pestaña Salida.`,
+          `${Math.max(1, Math.round(guardado.sizeBytes / 1024))} KB.${reparto}${visual}${cama} ` +
+          `Queda en el directorio de salida y se puede mirar desde la pestaña Salida.` +
+          problemas,
         guardado.path,
       );
     },
   };
 }
 
-export function createSkillTools(storage: SkillStorage): RegisteredTool[] {
+/**
+ * Producir una imagen suelta, fuera de un video.
+ *
+ * Es la misma capacidad que usa `export_video` por dentro, expuesta aparte
+ * porque una imagen sirve para más que una escena: la portada de un informe, el
+ * adjunto de un correo, una pieza para redes. Se registra sólo si hay proveedor:
+ * ofrecerle al agente una herramienta que siempre falla le hace gastar turnos
+ * intentándola.
+ */
+function crearImagen(storage: SkillStorage, generador: GeneradorImagenes): RegisteredTool {
+  return {
+    name: "generar_imagen",
+    origin: "skill",
+    readOnly: false,
+    requiresApproval: false,
+    description:
+      "Produce una imagen a partir de una descripción y la deja en el directorio de " +
+      "salida. Describí una escena concreta y visible —qué se ve, con qué luz, desde " +
+      "dónde—, no un concepto: \"dos técnicas revisando un tablero eléctrico, luz de " +
+      "mañana entrando por una ventana lateral\" da una foto; \"innovación\" no. El " +
+      "estilo y la paleta los pone el sistema, y la imagen sale sin texto adentro: si " +
+      "necesitás una palabra en pantalla, va en el documento o en el guion del video.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        descripcion: { type: "string", description: "Lo que se tiene que ver en la imagen" },
+        folder: {
+          type: "string",
+          description: 'Carpeta del directorio de salida, por ejemplo "marketing/imagenes".',
+        },
+        orientacion: {
+          type: "string",
+          enum: ["apaisada", "vertical"],
+          description: "Apaisada por defecto, que es lo que entra en un video o una portada.",
+        },
+      },
+      required: ["descripcion"],
+      additionalProperties: false,
+    },
+
+    async execute(args, ctx) {
+      const descripcion = String(args.descripcion ?? "").trim();
+      if (!descripcion) {
+        return fail("Falta la descripción: es lo que se tiene que ver en la imagen.");
+      }
+
+      const vertical = String(args.orientacion ?? "") === "vertical";
+      let bytes: Buffer;
+      try {
+        bytes = await generador.generar({
+          prompt: descripcion,
+          ancho: vertical ? 1024 : 1344,
+          alto: vertical ? 1344 : 768,
+          ...(ctx.signal ? { signal: ctx.signal } : {}),
+        });
+      } catch (error) {
+        const detalle = error instanceof Error ? error.message : String(error);
+        return fail(`No se pudo generar la imagen: ${detalle.split("\n")[0]}`);
+      }
+
+      const carpeta = String(args.folder ?? "").trim() || "imagenes";
+      const guardado = await storage.save({
+        filename: nombreDeImagen(descripcion, extensionDe(bytes)),
+        folder: carpeta,
+        bytes,
+      });
+      return ok(
+        `Imagen generada en ${guardado.path} ` +
+          `(${Math.max(1, Math.round(guardado.sizeBytes / 1024))} KB, ${generador.modelo}). ` +
+          `Para usarla en un video, referenciala en el guion como ` +
+          `![lo que se ve](${guardado.path}).`,
+        guardado.path,
+      );
+    },
+  };
+}
+
+/**
+ * El mismo guion, como presentación.
+ *
+ * Comparte con el video la clave del entregable y el resolutor de imágenes, y
+ * por eso las dos salidas no pueden contradecirse. Lo que cambia es para qué
+ * sirve cada una: el video se mira, el deck se cita, se saltea y se adjunta.
+ */
+function crearSlides(storage: SkillStorage, opciones: OpcionesHabilidades): RegisteredTool {
+  return {
+    name: "export_slides",
+    origin: "skill",
+    readOnly: false,
+    requiresApproval: false,
+    description:
+      "Convierte un guion ya escrito en una presentación HTML que se abre en cualquier " +
+      "navegador y se imprime a PDF. Usa exactamente el mismo guion que export_video y la " +
+      "misma clave: cada `##` es una lámina, las viñetas y sus `:iconos:` se ven igual, `>` " +
+      "sale destacado, y los párrafos —que en el video son la voz en off— quedan como nota " +
+      "al pie de cada lámina. Las imágenes viajan adentro del archivo, así que es un solo " +
+      "archivo que se puede adjuntar. Sirve para lo que un video no puede: citar una frase, " +
+      "saltar a una lámina o mandarle a alguien sólo la parte que le toca.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        artifact_key: {
+          type: "string",
+          description: "Clave del guion, la misma que le pasás a export_video",
+        },
+        folder: {
+          type: "string",
+          description: 'Carpeta del directorio de salida, por ejemplo "marketing/videos".',
+        },
+      },
+      required: ["artifact_key"],
+      additionalProperties: false,
+    },
+
+    async execute(args, ctx) {
+      const entregable = await buscarEntregable(args, ctx);
+      if ("error" in entregable) return entregable.error;
+      const { artifact } = entregable;
+
+      const bloqueo = revisarCifras(artifact, ctx);
+      if (bloqueo) return bloqueo;
+
+      const carpeta = String(args.folder ?? "").trim();
+      const logoSlides = await storage.resolve(LOGO);
+
+      let resultado;
+      try {
+        resultado = await renderSlides(
+          artifact.content,
+          {
+            title: artifact.title,
+            company: ctx.workspace.company.name,
+            author: ctx.actor.name,
+            authorTitle: ctx.actor.title,
+            version: artifact.version,
+            date: new Date(artifact.createdAt).toLocaleDateString("es-AR", {
+              day: "2-digit",
+              month: "long",
+              year: "numeric",
+            }),
+          },
+          {
+            resolverImagen: crearResolutorImagenes(
+              storage,
+              opciones.generadorImagenes,
+              carpeta,
+              ctx,
+            ),
+            ...(logoSlides ? { logo: logoSlides } : {}),
+          },
+        );
+      } catch (error) {
+        const detalle = error instanceof Error ? error.message : String(error);
+        return fail(`No se pudo armar la presentación de "${artifact.key}": ${detalle.split("\n")[0]}`);
+      }
+
+      const guardado = await storage.save({
+        filename: `${artifact.key}.html`,
+        ...(carpeta ? { folder: carpeta } : {}),
+        bytes: Buffer.from(resultado.html, "utf8"),
+      });
+
+      const problemas =
+        resultado.avisos.length > 0 ? ` Atención: ${resultado.avisos.join(" ")}` : "";
+      return ok(
+        `Presentación generada en ${guardado.path}: ${resultado.laminas} láminas, ` +
+          `${resultado.imagenes} imágenes incrustadas, ` +
+          `${Math.max(1, Math.round(guardado.sizeBytes / 1024))} KB. ` +
+          `Se abre en el navegador desde la pestaña Salida.` +
+          problemas,
+        guardado.path,
+      );
+    },
+  };
+}
+
+export function createSkillTools(
+  storage: SkillStorage,
+  opciones: OpcionesHabilidades = {},
+): RegisteredTool[] {
+  // Sin proveedor configurado, `crearGeneradorImagenes` devuelve `null` y no se
+  // registra la herramienta: el resto de las habilidades funciona igual.
+  const generador =
+    opciones.generadorImagenes === undefined
+      ? crearGeneradorImagenes()
+      : opciones.generadorImagenes;
+
   return [
     ...(Object.keys(FORMATOS) as Formato[]).map((formato) => crearSkill(formato, storage)),
-    crearVideo(storage),
+    crearVideo(storage, { ...opciones, generadorImagenes: generador }),
+    crearSlides(storage, { ...opciones, generadorImagenes: generador }),
+    ...(generador ? [crearImagen(storage, generador)] : []),
     crearListado(storage),
     crearEscritura(storage),
     crearBorrado(storage),

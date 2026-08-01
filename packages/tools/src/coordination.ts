@@ -884,6 +884,22 @@ const listArtifacts: RegisteredTool = {
 const PALABRAS_DE_PROCESO =
   /\b(ciclo\s*\d|bandeja de entrada|respuesta a pedido|seguimiento del pedido|mi turno|herramientas? (?:no )?disponibles?)\b/i;
 
+/**
+ * Un dictamen sobre un entregable **no es** un entregable.
+ *
+ * Es la falla más cara que vimos: un rol revisor recibe un guion, escribe sus
+ * correcciones con `write_artifact` y —peor— reusa la clave del original. La
+ * versión siguiente del guion ya no es el guion: son las notas de la revisión, y
+ * lo que se filma después es una lista de correcciones leída en voz alta.
+ *
+ * La guardia anterior no lo agarraba porque el documento *tiene* estructura:
+ * títulos, listas, hasta tablas. Lo que está mal no es la forma sino de qué
+ * habla. Una revisión se manda con `reply`, que es su lugar: el que la recibe la
+ * lee y guarda **el guion corregido**, no el dictamen.
+ */
+const PALABRAS_DE_DICTAMEN =
+  /\b(correcciones?|revisi[óo]n|observaciones|hallazgos|devoluci[óo]n|feedback|checklist de (?:calidad|revisi[óo]n)|control de calidad|informe de revisi[óo]n)\b/i;
+
 export interface Calidad {
   /** Impide guardar: el documento no sirve así. */
   rechazo?: string;
@@ -892,6 +908,17 @@ export interface Calidad {
 }
 
 export function revisarCalidad(title: string, content: string): Calidad {
+  if (PALABRAS_DE_DICTAMEN.test(title)) {
+    return {
+      rechazo:
+        `"${title}" es una revisión, no un entregable. Una devolución se manda con ` +
+        `reply a quien escribió el documento —ahí la lee y la aplica—; guardarla ` +
+        `como entregable pisa el original y lo que se publica después son tus ` +
+        `notas en vez del documento. Si lo que querés es guardar el documento ya ` +
+        `corregido, escribilo entero con su título propio.`,
+    };
+  }
+
   if (PALABRAS_DE_PROCESO.test(title)) {
     return {
       rechazo:

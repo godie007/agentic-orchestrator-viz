@@ -281,3 +281,87 @@ describe("vista previa", () => {
     expect(preview.motivo).toContain("Descargalo");
   });
 });
+
+/**
+ * Limpieza. Lo que se acumula acá es invisible desde el resto de la aplicación:
+ * una carpeta sin empresa no aparece en ninguna pantalla, porque todas navegan
+ * por empresa y esa empresa ya no está.
+ */
+describe("limpieza del directorio de salida", () => {
+  it("borra el directorio entero de una empresa y dice qué se llevó", async () => {
+    await guardar("informe.docx", "propuestas", "contenido largo");
+    await guardar("video.mp4", "institucional", "bytes");
+
+    const antes = await store.medirEmpresa(empresa);
+    expect(antes.archivos).toBeGreaterThanOrEqual(2);
+
+    const resultado = await store.removeCompany(empresa);
+
+    expect(resultado.ok).toBe(true);
+    if (resultado.ok) expect(resultado.archivos).toBe(antes.archivos);
+    expect((await store.medirEmpresa(empresa)).archivos).toBe(0);
+  });
+
+  it("medir no crea la carpeta que va a buscar", async () => {
+    // `dirFor` crea al pasar, y con él un diagnóstico de residuos **produce los
+    // residuos que viene a buscar**: cada consulta dejaba la carpeta de vuelta.
+    expect((await store.medirEmpresa("cmp_nunca_existio")).archivos).toBe(0);
+    expect(await store.carpetasResiduales([])).toHaveLength(0);
+  });
+
+  it("marca como residual sólo lo que no tiene empresa viva", async () => {
+    await guardar("a.docx");
+    const otra = new ExportStore(dir).forCompany("cmp_borrada");
+    await otra.save({ filename: "viejo.pdf", bytes: Buffer.from("12345") });
+
+    const residuales = await store.carpetasResiduales([empresa]);
+
+    expect(residuales.map((entrada) => entrada.carpeta)).toEqual(["cmp_borrada"]);
+    expect(residuales[0]?.archivos).toBeGreaterThanOrEqual(1);
+    expect(residuales[0]?.bytes).toBeGreaterThan(0);
+  });
+
+  it("compara contra el id saneado, que es el nombre real de la carpeta", async () => {
+    // Comparar contra el id crudo marcaría como residual el directorio de una
+    // empresa perfectamente viva, y el barrido borraría su trabajo.
+    const conEspacios = "cmp con espacios";
+    await new ExportStore(dir)
+      .forCompany(conEspacios)
+      .save({ filename: "x.docx", bytes: Buffer.from("x") });
+
+    expect(await store.carpetasResiduales([conEspacios])).toHaveLength(0);
+  });
+
+  it("no borra fuera del directorio raíz", async () => {
+    for (const intento of ["..", ".", "", "../otra", "sub/dir"]) {
+      const resultado = await store.removeCarpeta(intento);
+      expect(resultado.ok).toBe(false);
+    }
+  });
+
+  it("vaciar conserva el logo aunque sea multimedia", async () => {
+    await guardar("informe.docx", "propuestas", "generado");
+    await guardar("portada.png", "imagenes", "generada");
+    // El logo lo subís vos: no pasa por `save`, así que no entra al manifiesto.
+    mkdirSync(join(dir, empresa, "marca"), { recursive: true });
+    writeFileSync(join(dir, empresa, "marca", "logo.png"), "png");
+
+    const resultado = await store.vaciarGenerado(empresa);
+
+    // Un `removeMany({ kind: "all" })` se lleva el logo: es multimedia. Acá el
+    // criterio es el manifiesto, y el logo vive en una ruta fija que no se
+    // vuelve a generar sola.
+    expect(resultado.conservados).toContain("marca/logo.png");
+    expect(resultado.borrados).toContain("propuestas/informe.docx");
+    expect(resultado.borrados).toContain("imagenes/portada.png");
+    expect(readFileSync(join(dir, empresa, "marca", "logo.png"), "utf8")).toBe("png");
+  });
+
+  it("vaciar dos veces no falla ni borra de más", async () => {
+    await guardar("informe.docx");
+    await store.vaciarGenerado(empresa);
+
+    const segunda = await store.vaciarGenerado(empresa);
+    expect(segunda.borrados).toHaveLength(0);
+  });
+});

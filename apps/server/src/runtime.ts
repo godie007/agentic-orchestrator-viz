@@ -10,7 +10,14 @@ import type {
   TraceEvent,
 } from "@orq/shared";
 import { RunLedger, type ProviderRegistry } from "@orq/llm";
-import { McpBridge, ToolRegistry, createSkillTools } from "@orq/tools";
+import {
+  McpBridge,
+  ToolRegistry,
+  crearCorreo,
+  createEmailTools,
+  createSkillTools,
+  type Correo,
+} from "@orq/tools";
 import { EventBus, Orchestrator, RunState, type CompanyConfig } from "@orq/engine";
 import type { Store } from "./db.js";
 import type { Env } from "./env.js";
@@ -54,12 +61,16 @@ export class Runtime {
   /** Documentos que producen las habilidades, uno por empresa. */
   readonly exports: ExportStore;
 
+  /** Salida de correo de todo el servidor. La comparten misiones y agentes. */
+  readonly correo: Correo;
+
   constructor(
     private readonly store: Store,
     private readonly providers: ProviderRegistry,
     private readonly env: Env,
   ) {
     this.exports = new ExportStore(env.exportsDir);
+    this.correo = crearCorreo({ webhookUrl: env.emailWebhookUrl });
   }
 
   // --- Runtime de empresa (MCP + herramientas) -----------------------------
@@ -71,8 +82,19 @@ export class Runtime {
       const tools = new ToolRegistry();
       // Las habilidades se registran por empresa porque escriben en su propio
       // directorio: cada una exporta a lo suyo y no ve los documentos de otra.
-      for (const skill of createSkillTools(this.exports.forCompany(companyId))) {
+      for (const skill of createSkillTools(this.exports.forCompany(companyId), {
+        musicaHome: this.env.musicaDir,
+      })) {
         tools.register(skill);
+      }
+      // El correo también se registra por empresa: el enlace de un adjunto
+      // lleva el id de la empresa adentro, así que no puede ser una tool global.
+      const base = this.env.apiUrl.replace(/\/$/, "");
+      for (const email of createEmailTools(
+        this.correo,
+        (ruta) => `${base}/api/companies/${companyId}/exports/${ruta}`,
+      )) {
+        tools.register(email);
       }
       const health = new Map<string, McpServerHealth>();
       const mcp = new McpBridge(tools, resolveSecret, (update) => {
@@ -88,6 +110,32 @@ export class Runtime {
   }
 
   /**
+   * Deja registradas en la base las herramientas built-in de una empresa.
+   *
+   * Sin esto, un proyecto creado desde la UI nace **sin nada que asignarle a un
+   * agente**: `ToolRegistry.forRole` sólo regala las de coordinación, y las de
+   * `capability` y `skill` dependen de `role.toolIds`, que apunta a filas de la
+   * tabla `tools`. El resultado era un agente explicando que no encuentra
+   * `export_docx`. Es la misma siembra que hace `npm run db:seed`.
+   *
+   * Las de coordinación quedan afuera a propósito: se otorgan siempre, y
+   * mostrarlas en el asignador las presentaría como si se pudieran quitar.
+   */
+  async sembrarHerramientas(companyId: string): Promise<number> {
+    const { tools } = await this.companyRuntime(companyId);
+    const existentes = new Set(this.store.listTools(companyId).map((tool) => tool.name));
+
+    let nuevas = 0;
+    for (const descripta of tools.describe()) {
+      if (descripta.origin !== "capability" && descripta.origin !== "skill") continue;
+      if (existentes.has(descripta.name)) continue;
+      this.store.saveTool(companyId, { ...descripta, id: ids.tool() });
+      nuevas += 1;
+    }
+    return nuevas;
+  }
+
+  /**
    * ¿Está avanzando ahora mismo? Es lo único que impide borrarla.
    *
    * El estado se lee del orquestador y no de `active.run`, que queda viejo: al
@@ -97,6 +145,23 @@ export class Runtime {
   estaViva(runId: string): boolean {
     const activa = this.runs.get(runId);
     return activa != null && activa.orchestrator.snapshot.status === "running";
+  }
+
+  /**
+   * Si la empresa ya tiene una corrida en curso.
+   *
+   * Lo consulta el planificador de misiones antes de largar otra: dos equipos
+   * completos escribiendo sobre los mismos entregables se pisan, y el resultado
+   * es una versión que mezcla dos trabajos distintos. Cuenta también la que
+   * espera una aprobación, porque esa corrida sigue viva aunque no avance.
+   */
+  tieneCorridaViva(companyId: string): boolean {
+    for (const activa of this.runs.values()) {
+      const corrida = activa.orchestrator.snapshot;
+      if (corrida.companyId !== companyId) continue;
+      if (corrida.status === "running" || corrida.status === "awaiting_approval") return true;
+    }
+    return false;
   }
 
   /**
@@ -112,6 +177,52 @@ export class Runtime {
     activa.orchestrator.stop();
     this.runs.delete(runId);
     this.runSubscribers.delete(runId);
+  }
+
+  /**
+   * Suelta una empresa entera de la memoria del servidor.
+   *
+   * Es `olvidarCorrida` un nivel más arriba, y hace falta por lo mismo: el
+   * runtime de empresa sostiene **procesos de servidores MCP**, que no se caen
+   * porque borres filas en SQLite. Sin esto, borrar una empresa dejaba sus
+   * conexiones vivas hasta reiniciar el servidor, y el Hub seguía mostrando en
+   * verde los servidores de algo que ya no existe.
+   */
+  async olvidarEmpresa(companyId: string): Promise<void> {
+    for (const [runId, activa] of [...this.runs]) {
+      if (activa.companyId === companyId) this.olvidarCorrida(runId);
+    }
+    const runtime = this.companies.get(companyId);
+    if (!runtime) return;
+    this.companies.delete(companyId);
+    await runtime.mcp.disconnectAll();
+  }
+
+  /**
+   * Borra una empresa de los tres lados donde vive: memoria, base y disco.
+   *
+   * Están juntos a propósito. Borrar sólo la base es lo que había antes, y
+   * dejaba la carpeta con los Word, los PDF y los videos sin nadie a quien
+   * pertenecer — invisible desde la UI, porque la UI navega por empresa y la
+   * empresa ya no está.
+   */
+  async eliminarEmpresa(
+    companyId: string,
+  ): Promise<{ ok: true; archivos: number; bytes: number } | { ok: false; motivo: string }> {
+    if (this.tieneCorridaViva(companyId)) {
+      return {
+        ok: false,
+        motivo: "La empresa tiene una corrida en curso. Detenela antes de borrarla.",
+      };
+    }
+
+    await this.olvidarEmpresa(companyId);
+    this.store.deleteCompany(companyId);
+
+    const disco = await this.exports.removeCompany(companyId);
+    // Que no hubiera carpeta no es un error: una empresa que nunca produjo un
+    // archivo se borra igual.
+    return disco.ok ? disco : { ok: true, archivos: 0, bytes: 0 };
   }
 
   mcpHealth(companyId: string): McpServerHealth[] {

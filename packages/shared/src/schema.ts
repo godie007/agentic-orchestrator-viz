@@ -55,10 +55,28 @@ export type ModelSelection = z.infer<typeof modelSelectionSchema>;
 // Empresa
 // ---------------------------------------------------------------------------
 
+/**
+ * Cómo suena la empresa cuando habla.
+ *
+ * Vive en la empresa y no en el guion porque es un dato de la marca, no una
+ * decisión de cada video: el nombre se pronuncia igual en todos. Y no se
+ * arregla escribiéndolo mal en el guion —"codishon" en pantalla sería un error
+ * de ortografía—: la corrección se aplica sólo al texto que va al sintetizador.
+ */
+export const vozSchema = z.object({
+  /** Todos los personajes con la misma voz: habla la empresa, no un elenco. */
+  unaSolaVoz: z.boolean().default(false),
+  /** Lo escrito → cómo se dice. Se compara por palabra entera, sin acentuar. */
+  pronunciacion: z.record(z.string(), z.string()).default({}),
+});
+export type Voz = z.infer<typeof vozSchema>;
+
 export const companySchema = z.object({
   id: idSchema,
   name: z.string().min(1).max(200),
   mission: z.string().max(4000).default(""),
+  /** Reparto de voces y pronunciación para los videos que produce. */
+  voz: vozSchema.default({ unaSolaVoz: false, pronunciacion: {} }),
   /** Contexto de negocio que todos los agentes reciben en su prompt. */
   context: z.string().max(20000).default(""),
   currency: z.string().length(3).default("USD"),
@@ -144,6 +162,70 @@ export const policySchema = z.object({
     .default(null),
 });
 export type Policy = z.infer<typeof policySchema>;
+
+/**
+ * Cuándo se dispara una misión.
+ *
+ * Las tres formas del nodo Schedule de n8n, porque son las que la gente
+ * necesita de verdad: cada tanto, tal día a tal hora, o una expresión cron para
+ * lo que no entra en las otras dos. Sin `cron` no se puede pedir "el primer
+ * lunes del mes"; sin `semanal` hay que escribir cron para "todos los días a las
+ * 7", que es el caso más común de todos.
+ */
+export const programacionSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("intervalo"),
+    cada: z.number().int().positive(),
+    unidad: z.enum(["minutos", "horas", "dias", "semanas"]),
+  }),
+  z.object({
+    type: z.literal("semanal"),
+    /** Días de la semana, 0 = domingo. Vacío no se acepta: nunca dispararía. */
+    dias: z.array(z.number().int().min(0).max(6)).min(1),
+    hora: z.number().int().min(0).max(23),
+    minuto: z.number().int().min(0).max(59).default(0),
+  }),
+  z.object({
+    type: z.literal("cron"),
+    /** Cinco campos: minuto hora día-del-mes mes día-de-semana. */
+    expresion: z.string().min(1).max(200),
+  }),
+]);
+export type Programacion = z.infer<typeof programacionSchema>;
+
+/**
+ * Una misión es un encargo que se dispara solo.
+ *
+ * No es una corrida: es la *receta* de una corrida más cuándo repetirla. Se
+ * guarda a nivel empresa y sobrevive a los reinicios; lo que no sobrevive es la
+ * corrida que genera, igual que cualquier otra.
+ */
+export const misionSchema = z.object({
+  id: idSchema,
+  companyId: idSchema,
+  name: z.string().min(1).max(200),
+  /** El encargo, tal como se lo daría una persona. */
+  objective: z.string().min(1).max(8000),
+  programacion: programacionSchema,
+  enabled: z.boolean().default(true),
+  budgetUsd: z.number().positive().default(1),
+  maxTicks: z.number().int().positive().nullable().default(null),
+  /**
+   * A quién se le avisa por correo cuando la misión termina.
+   *
+   * El aviso lleva qué produjo y el enlace para mirarlo, y es lo que convierte a
+   * la misión en algo que se revisa antes de publicar en vez de algo que pasa
+   * sin que nadie se entere.
+   */
+  avisarA: z.array(z.string().email()).default([]),
+  /** Instante calculado del próximo disparo. `null` = pausada o sin calcular. */
+  proximaAt: timestampSchema.nullable().default(null),
+  ultimaAt: timestampSchema.nullable().default(null),
+  ultimaRunId: idSchema.nullable().default(null),
+  createdAt: timestampSchema,
+  updatedAt: timestampSchema,
+});
+export type Mision = z.infer<typeof misionSchema>;
 
 // ---------------------------------------------------------------------------
 // Herramientas y MCP

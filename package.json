@@ -21,6 +21,8 @@
     "test:watch": "vitest",
     "db:migrate": "npm run db:migrate --workspace @orq/server",
     "db:seed": "npm run db:seed --workspace @orq/server",
+    "db:estudio": "tsx --env-file-if-exists=.env scripts/seed-estudio-codytion.ts",
+    "musica:cama": "tsx --env-file-if-exists=.env scripts/generar-cama.ts",
     "check:llm": "tsx --env-file-if-exists=.env scripts/check-llm.ts",
     "check:models": "tsx --env-file-if-exists=.env scripts/check-models.ts"
   },

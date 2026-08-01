@@ -1,5 +1,5 @@
 import { mkdirSync } from "node:fs";
-import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import type { SkillStorage } from "@orq/tools";
 
@@ -152,8 +152,20 @@ export class ExportStore {
       .slice(0, 6); // más profundidad que esto no organiza nada, esconde
   }
 
+  /**
+   * Dónde *iría* el directorio de una empresa, sin crearlo.
+   *
+   * Existe porque `dirFor` crea la carpeta al pasar, y eso convierte cualquier
+   * consulta en una escritura: pedir el árbol de una empresa que ya no está
+   * alcanzaba para dejar su carpeta de nuevo en disco. Un barrido de residuos
+   * que use `dirFor` **produce los residuos que viene a buscar**.
+   */
+  private pathFor(companyId: string): string {
+    return join(this.rootDir, ExportStore.safeSegment(companyId));
+  }
+
   private dirFor(companyId: string): string {
-    const dir = join(this.rootDir, ExportStore.safeSegment(companyId));
+    const dir = this.pathFor(companyId);
     mkdirSync(dir, { recursive: true });
     return dir;
   }
@@ -205,7 +217,27 @@ export class ExportStore {
       removeMany: (criterio) => this.removeMany(companyId, criterio),
 
       writeText: (path, content) => this.writeText(companyId, path, content),
+
+      resolve: (path) => this.rutaDe(companyId, path),
     };
+  }
+
+  /**
+   * La ruta real de un archivo de la empresa, o `null`.
+   *
+   * Es lo único que le damos a una habilidad para *abrir* un archivo, y por eso
+   * pasa por el mismo saneo que escribir: la ruta viene de un guion que redactó
+   * un modelo, y `../../.env` es una ruta que un modelo puede escribir.
+   */
+  async rutaDe(companyId: string, relativa: string): Promise<string | null> {
+    const ubicacion = this.resolveDentro(companyId, relativa);
+    if (!ubicacion) return null;
+    try {
+      const info = await stat(ubicacion.destino);
+      return info.isFile() ? ubicacion.destino : null;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -305,14 +337,21 @@ export class ExportStore {
   async flatList(
     companyId: string,
   ): Promise<
-    Array<{ path: string; sizeBytes: number; esMultimedia: boolean; generadoPorAgente: boolean }>
+    Array<{
+      path: string;
+      sizeBytes: number;
+      modifiedAt: number;
+      esMultimedia: boolean;
+      generadoPorAgente: boolean;
+    }>
   > {
     const aplanar = (nodo: TreeFolder): TreeFile[] =>
       nodo.children.flatMap((hijo) => (hijo.kind === "folder" ? aplanar(hijo) : [hijo]));
     return aplanar(await this.tree(companyId)).map(
-      ({ path, sizeBytes, esMultimedia, generadoPorAgente }) => ({
+      ({ path, sizeBytes, modifiedAt, esMultimedia, generadoPorAgente }) => ({
         path,
         sizeBytes,
+        modifiedAt,
         esMultimedia,
         generadoPorAgente,
       }),
@@ -422,6 +461,48 @@ export class ExportStore {
    * está y cuánto pesa, y cargar cien megas en memoria para después descartarlos
    * es la diferencia entre una pestaña que abre y uno que tumba el servidor.
    */
+  /**
+   * Mueve un archivo a `publicado/`.
+   *
+   * Publicar es la única acción del circuito que **no** puede hacer un agente:
+   * la misión produce, avisa y espera. Que el archivo cambie de carpeta es la
+   * forma de que "aprobado" sea un hecho verificable en el disco y no un estado
+   * guardado en algún lado que hay que creer.
+   */
+  async publicar(
+    companyId: string,
+    ruta: string,
+  ): Promise<{ ok: true; path: string } | { ok: false; motivo: string }> {
+    const origen = this.resolveDentro(companyId, ruta);
+    if (!origen) return { ok: false, motivo: "Ruta inválida." };
+
+    const nombre = ExportStore.safePath(ruta).at(-1);
+    if (!nombre) return { ok: false, motivo: "Ruta inválida." };
+    if (ExportStore.safePath(ruta)[0] === "publicado") {
+      return { ok: false, motivo: "Ya está publicado." };
+    }
+
+    const relativa = `publicado/${nombre}`;
+    const destino = this.resolveDentro(companyId, relativa);
+    if (!destino) return { ok: false, motivo: "No se pudo resolver la carpeta publicado." };
+
+    try {
+      await mkdir(dirname(destino.destino), { recursive: true });
+      await rename(origen.destino, destino.destino);
+    } catch (error) {
+      const detalle = error instanceof Error ? error.message : String(error);
+      return { ok: false, motivo: `No se pudo mover: ${detalle}` };
+    }
+
+    // La procedencia se muda con el archivo: sigue siendo material de la empresa.
+    const paths = await this.leerManifiesto(companyId);
+    if (paths.delete(ExportStore.safePath(ruta).join("/"))) paths.add(relativa);
+    else paths.add(relativa);
+    await this.guardarManifiesto(companyId, paths);
+
+    return { ok: true, path: relativa };
+  }
+
   async pesoDe(companyId: string, ruta: string): Promise<number | null> {
     const ubicacion = this.resolveDentro(companyId, ruta);
     if (!ubicacion) return null;
@@ -431,6 +512,174 @@ export class ExportStore {
       return null;
     }
   }
+
+  // --- Limpieza ------------------------------------------------------------
+
+  /**
+   * Cuántos archivos y cuántos bytes hay bajo una ruta, recursivamente.
+   *
+   * Cuenta también los ocultos —el manifiesto ocupa lugar igual— y tolera que
+   * la ruta no exista: medir algo que no está es cero, no un error. Un archivo
+   * que desaparece en medio del recorrido se saltea en lugar de tumbar la
+   * medición: es un directorio vivo, no una foto.
+   */
+  private async pesar(absoluta: string): Promise<{ archivos: number; bytes: number }> {
+    let entradas;
+    try {
+      entradas = await readdir(absoluta, { withFileTypes: true });
+    } catch {
+      return { archivos: 0, bytes: 0 };
+    }
+
+    let archivos = 0;
+    let bytes = 0;
+    for (const entrada of entradas) {
+      const ruta = join(absoluta, entrada.name);
+      if (entrada.isDirectory()) {
+        const sub = await this.pesar(ruta);
+        archivos += sub.archivos;
+        bytes += sub.bytes;
+        continue;
+      }
+      try {
+        bytes += (await stat(ruta)).size;
+        archivos += 1;
+      } catch {
+        // Desapareció mientras lo recorríamos.
+      }
+    }
+    return { archivos, bytes };
+  }
+
+  /** Qué ocupa en disco el directorio de una empresa. No lo crea. */
+  async medirEmpresa(companyId: string): Promise<{ archivos: number; bytes: number }> {
+    return this.pesar(this.pathFor(companyId));
+  }
+
+  /**
+   * Borra una carpeta de primer nivel del directorio de salida.
+   *
+   * Recibe el **nombre de la carpeta**, no un id, porque las residuales son
+   * justamente las que ya no corresponden a ninguna empresa: su nombre es lo
+   * único que queda de ellas. Acepta un solo segmento y verifica la ruta ya
+   * resuelta, por la misma razón que el resto del store: acá se borra recursivo
+   * y un `..` costaría el directorio de otra empresa.
+   */
+  async removeCarpeta(
+    nombre: string,
+  ): Promise<{ ok: true; archivos: number; bytes: number } | { ok: false; motivo: string }> {
+    if (nombre === "" || /[/\\]/.test(nombre) || nombre === "." || nombre === "..") {
+      return { ok: false, motivo: "Nombre de carpeta inválido." };
+    }
+
+    const raiz = resolve(this.rootDir);
+    const destino = resolve(raiz, nombre);
+    if (destino === raiz || !destino.startsWith(raiz + sep)) {
+      return { ok: false, motivo: "Nombre de carpeta inválido." };
+    }
+
+    try {
+      const info = await stat(destino);
+      if (!info.isDirectory()) return { ok: false, motivo: "No es una carpeta." };
+    } catch {
+      return { ok: false, motivo: "La carpeta no existe." };
+    }
+
+    const medida = await this.pesar(destino);
+    await rm(destino, { recursive: true, force: true });
+    return { ok: true, ...medida };
+  }
+
+  /**
+   * Borra el directorio de salida entero de una empresa.
+   *
+   * Lo llama el borrado de empresa: la base ya se lleva sus filas, pero el Word,
+   * el PDF y el video quedaban en disco sin nadie a quien pertenecer. Es la
+   * misma regla que en SQLite —un entregable sobrevive a su corrida, no a su
+   * empresa— aplicada a los bytes.
+   */
+  async removeCompany(
+    companyId: string,
+  ): Promise<{ ok: true; archivos: number; bytes: number } | { ok: false; motivo: string }> {
+    return this.removeCarpeta(ExportStore.safeSegment(companyId));
+  }
+
+  /**
+   * Carpetas de salida cuya empresa ya no existe.
+   *
+   * La comparación es contra el **segmento saneado** de cada id vivo, que es el
+   * nombre real de la carpeta: comparar contra el id crudo marcaría como
+   * residual el directorio de una empresa que está perfectamente viva.
+   *
+   * Ordenadas por peso: lo primero que uno quiere ver es qué ocupa lugar.
+   */
+  async carpetasResiduales(idsVivos: Iterable<string>): Promise<CarpetaResidual[]> {
+    const vivos = new Set([...idsVivos].map((id) => ExportStore.safeSegment(id)));
+
+    let entradas;
+    try {
+      entradas = await readdir(this.rootDir, { withFileTypes: true });
+    } catch {
+      return [];
+    }
+
+    const residuales: CarpetaResidual[] = [];
+    for (const entrada of entradas) {
+      if (!entrada.isDirectory() || vivos.has(entrada.name)) continue;
+      const absoluta = join(this.rootDir, entrada.name);
+      const medida = await this.pesar(absoluta);
+      const info = await stat(absoluta).catch(() => null);
+      residuales.push({
+        carpeta: entrada.name,
+        archivos: medida.archivos,
+        bytes: medida.bytes,
+        modifiedAt: info?.mtimeMs ?? 0,
+      });
+    }
+    return residuales.sort((a, b) => b.bytes - a.bytes);
+  }
+
+  /**
+   * Borra lo que generó la empresa y conserva lo que trajo una persona.
+   *
+   * El criterio es **el manifiesto y nada más**, no "todo lo que no sea
+   * multimedia": el logo de la marca es un `.png` que subiste vos, y un
+   * `removeMany({ kind: "all" })` se lo lleva. Vaciar la salida no puede
+   * costarte el logo, que además vive en una ruta fija y no se vuelve a generar.
+   */
+  async vaciarGenerado(
+    companyId: string,
+  ): Promise<{ borrados: string[]; conservados: string[]; bytes: number }> {
+    const generados = await this.leerManifiesto(companyId);
+    const archivos = await this.flatList(companyId);
+
+    const borrados: string[] = [];
+    const conservados: string[] = [];
+    let bytes = 0;
+    for (const archivo of archivos) {
+      if (!generados.has(archivo.path)) {
+        conservados.push(archivo.path);
+        continue;
+      }
+      const resultado = await this.remove(companyId, archivo.path);
+      if (resultado.ok) {
+        borrados.push(archivo.path);
+        bytes += archivo.sizeBytes;
+      } else {
+        conservados.push(archivo.path);
+      }
+    }
+    return { borrados, conservados, bytes };
+  }
+}
+
+/** Una carpeta de salida que ya no tiene empresa detrás. */
+export interface CarpetaResidual {
+  /** Nombre de la carpeta en `data/exports/`. Es el id de empresa saneado. */
+  carpeta: string;
+  archivos: number;
+  bytes: number;
+  modifiedAt: number;
 }
 
 /** Tipo de contenido según la extensión, para que el navegador sepa qué abrir. */
@@ -451,12 +700,15 @@ export function contentTypeOf(filename: string): string {
     wav: "audio/wav",
     md: "text/markdown; charset=utf-8",
     txt: "text/plain; charset=utf-8",
+    // Sin esto el navegador recibe `octet-stream` y descarga la presentación en
+    // vez de dibujarla, que es justo lo contrario de mirar antes de mandar.
+    html: "text/html; charset=utf-8",
   };
   return tipos[ext] ?? "application/octet-stream";
 }
 
 /** Qué se puede mostrar sin descargar, y cómo. */
-export type PreviewKind = "pdf" | "image" | "video" | "audio" | "text" | "none";
+export type PreviewKind = "pdf" | "image" | "video" | "audio" | "text" | "page" | "none";
 
 export interface Preview {
   kind: PreviewKind;
@@ -486,6 +738,10 @@ const extensionDe = (nombre: string): string => {
 export function previewLiviano(nombre: string): Preview | null {
   const ext = extensionDe(nombre);
   if (ext === "pdf") return { kind: "pdf" };
+  // Una presentación se mira, no se lee su código fuente. Se dibuja en un
+  // iframe **aislado**: el archivo sale del mismo origen que la aplicación, y
+  // un `.html` que escribió un agente no puede correr con sus credenciales.
+  if (ext === "html" || ext === "htm") return { kind: "page" };
   if (EXTENSIONES_IMAGEN.has(ext)) return { kind: "image" };
   if (EXTENSIONES_VIDEO.has(ext)) return { kind: "video" };
   if (EXTENSIONES_AUDIO.has(ext)) return { kind: "audio" };

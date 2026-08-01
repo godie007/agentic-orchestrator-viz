@@ -10,6 +10,12 @@
  * con una voz distinta la primera vez que habla y la conserva todo el video: una
  * conversación en la que los dos interlocutores suenan igual no es un diálogo,
  * es un monólogo con guiones.
+ *
+ * Lo que **se dice** y lo que **se escribe** son dos textos distintos. Un motor
+ * de voz lee una marca comercial con las reglas del castellano y la pronuncia
+ * mal —"Codytion" sale "codi-ti-ón"—, y corregirlo escribiendo mal el nombre en
+ * el guion lo rompería en pantalla, que es donde tiene que estar bien escrito.
+ * Por eso el léxico se aplica **sólo al texto que va al sintetizador**.
  */
 
 import { execFile } from "node:child_process";
@@ -96,16 +102,50 @@ for item in cfg["items"]:
 print(json.dumps(salida))
 `;
 
-function repartir(motor: Motor, personajes: readonly string[]): Map<string, string> {
+function repartir(
+  motor: Motor,
+  personajes: readonly string[],
+  unaSolaVoz = false,
+): Map<string, string> {
   const disponibles = VOCES[motor];
   const voces = new Map<string, string>();
   voces.set("", disponibles[0]!);
   personajes.forEach((personaje, i) => {
     // El narrador ya se quedó con la primera: los personajes arrancan en la
-    // segunda para que nunca suenen igual que la voz en off.
-    voces.set(personaje, disponibles[(i + 1) % disponibles.length]!);
+    // segunda para que nunca suenen igual que la voz en off. Salvo que se pida
+    // una sola voz, que es lo que corresponde cuando el video no es una
+    // conversación sino una empresa hablando: ahí varias voces suenan a
+    // reparto de actores, no a marca.
+    voces.set(personaje, unaSolaVoz ? disponibles[0]! : disponibles[(i + 1) % disponibles.length]!);
   });
   return voces;
+}
+
+/**
+ * Cómo se pronuncia lo que no se lee como se escribe.
+ *
+ * Se aplica sobre el texto que va al sintetizador, nunca sobre el que se ve.
+ * Las claves se comparan sin distinguir mayúsculas y sólo como palabra entera:
+ * sin eso, una regla para "IA" reescribe "familia" por dentro.
+ */
+export type Lexico = Record<string, string>;
+
+const escaparRegex = (texto: string): string => texto.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+export function pronunciar(texto: string, lexico: Lexico | undefined): string {
+  if (!lexico) return texto;
+  let salida = texto;
+  for (const [escrito, dicho] of Object.entries(lexico)) {
+    if (!escrito.trim()) continue;
+    // `\b` no sirve con acentos ni con siglas pegadas a un signo: se delimita a
+    // mano con lo que no es letra ni dígito.
+    const patron = new RegExp(
+      `(^|[^\\p{L}\\p{N}])(${escaparRegex(escrito)})(?=[^\\p{L}\\p{N}]|$)`,
+      "giu",
+    );
+    salida = salida.replace(patron, (_, antes: string) => `${antes}${dicho}`);
+  }
+  return salida;
 }
 
 /** Duración real del audio generado, en segundos. */
@@ -130,26 +170,32 @@ export interface OpcionesNarrador {
   ffprobe?: string;
   /** Fuerza un motor. Sin esto se elige el mejor disponible. */
   motor?: Motor;
+  /** Todos los personajes con la misma voz: la empresa habla, no un elenco. */
+  unaSolaVoz?: boolean;
+  /** Cómo se pronuncia lo que no se lee como se escribe. */
+  lexico?: Lexico;
 }
 
 export function crearNarrador(opciones: OpcionesNarrador): Narrador {
   const ffprobe = opciones.ffprobe ?? "ffprobe";
   const velocidad = opciones.velocidad ?? 1;
   const kokoroHome = opciones.motor === "say" ? null : buscarKokoro(opciones.kokoroHome);
+  const solaVoz = opciones.unaSolaVoz ?? false;
+  const decir = (texto: string): string => pronunciar(texto, opciones.lexico);
 
   if (kokoroHome) {
     return {
       motor: "kokoro",
-      voces: repartir("kokoro", opciones.personajes),
+      voces: repartir("kokoro", opciones.personajes, solaVoz),
       sintetizar: async (lineas) => {
-        const voces = repartir("kokoro", opciones.personajes);
+        const voces = repartir("kokoro", opciones.personajes, solaVoz);
         const entrada = {
           model: join(kokoroHome, "kokoro-v1.0.onnx"),
           voces: join(kokoroHome, "voices-v1.0.bin"),
           velocidad,
           lang: "es-419",
           items: lineas.map((linea) => ({
-            texto: linea.texto,
+            texto: decir(linea.texto),
             voz: voces.get(linea.personaje) ?? VOCES.kokoro[0]!,
             destino: linea.destino,
           })),
@@ -168,9 +214,9 @@ export function crearNarrador(opciones: OpcionesNarrador): Narrador {
 
   return {
     motor: "say",
-    voces: repartir("say", opciones.personajes),
+    voces: repartir("say", opciones.personajes, solaVoz),
     sintetizar: async (lineas) => {
-      const voces = repartir("say", opciones.personajes);
+      const voces = repartir("say", opciones.personajes, solaVoz);
       const duraciones: number[] = [];
       for (const linea of lineas) {
         await ejecutar("say", [
@@ -180,7 +226,7 @@ export function crearNarrador(opciones: OpcionesNarrador): Narrador {
           String(Math.round(180 * velocidad)),
           "-o",
           linea.destino,
-          linea.texto,
+          decir(linea.texto),
         ]);
         duraciones.push(await duracionDe(ffprobe, linea.destino));
       }

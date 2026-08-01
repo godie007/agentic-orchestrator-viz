@@ -21,14 +21,25 @@ export type Block =
   | { kind: "quote"; spans: Span[] }
   | { kind: "code"; text: string }
   | { kind: "table"; header: string[]; rows: string[][] }
+  | { kind: "image"; alt: string; src: string }
   | { kind: "rule" };
+
+/** `![texto](origen)`, la sintaxis de imagen de markdown. */
+const IMAGEN = /!\[([^\]]*)\]\(([^)]*)\)/;
 
 /** Separa negritas (`**x**` y `__x__`) del texto plano. */
 export function parseSpans(line: string): Span[] {
   const spans: Span[] = [];
   // Se limpian marcas que no aportan al documento: enlaces quedan como texto,
   // y el backtick simple no cambia el formato en Word ni en PDF.
-  const limpio = line.replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1 ($2)").replace(/`/g, "");
+  //
+  // Las imágenes se descartan **antes** que los enlaces: comparten sintaxis
+  // salvo por el `!`, así que la regla de enlaces las dejaba como
+  // "!Un equipo (fotos/equipo.png)" — y en un video eso lo lee la voz en off.
+  const limpio = line
+    .replace(new RegExp(IMAGEN.source, "g"), "")
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1 ($2)")
+    .replace(/`/g, "");
 
   let resto = limpio;
   const negrita = /(\*\*|__)(.+?)\1/;
@@ -92,6 +103,16 @@ export function parseMarkdown(source: string): Block[] {
     if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(trimmed)) {
       cerrarParrafo();
       blocks.push({ kind: "rule" });
+      continue;
+    }
+
+    // Una imagen sola en su renglón es un bloque: en el video se muestra, y en
+    // un documento su descripción queda como epígrafe. Dentro de un párrafo, en
+    // cambio, se descarta: ahí el bloque es el texto.
+    const imagen = new RegExp(`^${IMAGEN.source}$`).exec(trimmed);
+    if (imagen) {
+      cerrarParrafo();
+      blocks.push({ kind: "image", alt: imagen[1]!.trim(), src: imagen[2]!.trim() });
       continue;
     }
 

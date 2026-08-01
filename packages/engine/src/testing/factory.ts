@@ -20,6 +20,7 @@ export function makeCompany(overrides: Partial<Company> = {}): Company {
     id: ids.company(),
     name: "Empresa de prueba",
     mission: "Probar el motor",
+    voz: { unaSolaVoz: false, pronunciacion: {} },
     context: "",
     currency: "USD",
     budgetUsd: 10,

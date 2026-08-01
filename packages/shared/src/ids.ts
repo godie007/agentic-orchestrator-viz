@@ -21,6 +21,7 @@ export const ids = {
   tool: () => newId("tol"),
   mcpServer: () => newId("mcp"),
   policy: () => newId("pol"),
+  mision: () => newId("mis"),
   run: () => newId("run"),
   message: () => newId("msg"),
   thread: () => newId("thr"),

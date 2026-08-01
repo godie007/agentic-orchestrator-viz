@@ -134,6 +134,19 @@ export function tokens(value: number): string {
   return String(value);
 }
 
+/**
+ * Peso de un archivo en forma legible.
+ *
+ * El piso es 1 KB: un `.md` de 200 bytes mostrado como "0 KB" se lee como un
+ * archivo vacío, y no lo está.
+ */
+export function peso(bytes: number): string {
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  if (bytes === 0) return "0 KB";
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
 export function relativeTime(at: number): string {
   const seconds = Math.round((Date.now() - at) / 1000);
   if (seconds < 60) return `hace ${seconds}s`;

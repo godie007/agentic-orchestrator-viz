@@ -12,8 +12,8 @@
  * HTML: agregar un navegador headless a `packages/tools` para maquetar seis
  * placas de texto es cambiar 150 MB de dependencia por un `<div>`.
  *
- * La paleta es la de la aplicación (`apps/web/src/styles.css`), convertida a
- * hexadecimal: el video de una empresa tiene que parecerse al producto.
+ * La paleta sale del logo de la empresa. Un video que no se parece a la marca
+ * obliga a quien lo mira a hacer el trabajo de reconocerla.
  */
 
 import { execFile } from "node:child_process";
@@ -21,7 +21,10 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { parseGuion, type Escena, type Guion } from "./guion.js";
+import { parseGuion, type Escena, type Guion, type ImagenGuion } from "./guion.js";
+import { iconoAss } from "./iconos.js";
+import { visualAss, type Tinte } from "./visuales.js";
+import { elegirMusica } from "./musica.js";
 import { crearNarrador, type Motor } from "./narracion.js";
 import type { DocumentMeta } from "./render.js";
 
@@ -31,15 +34,65 @@ const ejecutar = promisify(execFile);
 const ass = (hex: string): string =>
   `&H00${hex.slice(5, 7)}${hex.slice(3, 5)}${hex.slice(1, 3)}`.toUpperCase();
 
+/**
+ * La paleta sale del **logo**, no del CSS del sitio.
+ *
+ * El sitio usa un azul plano y un ámbar de botón; el logo es un lazo de
+ * turquesa, azul cielo y violeta, y eso es lo que hace reconocible a la marca.
+ * Los tres colores están muestreados del archivo: violeta `#5058e8` (40% del
+ * logo), turquesa `#40f8c0` (26%) y azul `#40a0f8` (15%).
+ *
+ * El ámbar quedó afuera a propósito: no está en el logo, y con él la pieza se
+ * parecía a cualquier presentación oscura con un botón amarillo.
+ */
+const FONDO = "#0a0e1a";
+
 const COLOR = {
-  fondo: "0x0c0d0f",
-  fondoAlto: "0x151d26",
-  tinta: ass("#edeef0"),
-  tintaTenue: ass("#a2a5a8"),
-  tintaDebil: ass("#6f7275"),
-  acento: ass("#12b2f4"),
-  linea: ass("#303337"),
+  fondo: `0x${FONDO.slice(1)}`,
+  /** El violeta del logo, apenas insinuado: da profundidad sin pintar nada. */
+  fondoAlto: "0x1a1f45",
+  tinta: ass("#f8fafc"),
+  tintaTenue: ass("#94a3b8"),
+  tintaDebil: ass("#64748b"),
+  /** Estructura: cejas, reglas, viñetas. */
+  acento: ass("#40a0f8"),
+  /** Lo que hay que mirar primero. El turquesa del logo. */
+  realce: ass("#3ee8b4"),
+  /** El violeta del logo. Sirve de masa, nunca de texto. */
+  violeta: ass("#5058e8"),
+  /** El gris azulado de las tarjetas de un diagrama. */
+  panel: ass("#232f4d"),
+  // Los tonos de las personas. Cálidos y desaturados: sobre un fondo azul
+  // oscuro, una piel muy saturada se lee como plástico.
+  piel: ass("#e3b18a"),
+  pielAlt: ass("#b8815a"),
+  pelo: ass("#3a2b21"),
+  ropa: ass("#2f8fb5"),
+  ropaAlt: ass("#4a5590"),
+  linea: ass("#1e293b"),
 } as const;
+
+/**
+ * Los colores simbólicos de un visual, resueltos a estilos de ASS.
+ *
+ * ASS no acepta un color arbitrario en una etiqueta de dibujo sin ensuciar cada
+ * evento con `\c`; declarar un estilo por tinte deja los eventos limpios y hace
+ * que el archivo se lea.
+ */
+const ESTILO_DE_TINTE: Record<Tinte, string> = {
+  acento: "TinteAcento",
+  realce: "TinteRealce",
+  violeta: "TinteVioleta",
+  tinta: "TinteTinta",
+  tenue: "TinteTenue",
+  panel: "TintePanel",
+  linea: "TinteLinea",
+  piel: "TintePiel",
+  pielAlt: "TintePielAlt",
+  pelo: "TintePelo",
+  ropa: "TinteRopa",
+  ropaAlt: "TinteRopaAlt",
+};
 
 /**
  * Familias con estilo propio, no `Bold=1`.
@@ -57,6 +110,35 @@ const MARGEN = 180;
 const ANCHO_UTIL = LIENZO.ancho - MARGEN * 2;
 /** Última fila utilizable: debajo va la barra de progreso. */
 const PISO = 940;
+
+/**
+ * El recuadro donde va la imagen de una escena, y el ancho que le queda al texto.
+ *
+ * La imagen no se pone de fondo con el texto encima: una foto detrás de un
+ * párrafo lo vuelve ilegible en el peor momento, que es cuando alguien está
+ * leyendo. Van al lado, en dos columnas, y cada una respira. La única imagen
+ * que sí ocupa todo el cuadro es la de la portada, donde hay tres palabras y un
+ * velo oscuro que las sostiene.
+ */
+const PANEL = { x: 1096, y: 214, ancho: 644, alto: 620 } as const;
+const ANCHO_CON_IMAGEN = PANEL.x - MARGEN - 72;
+
+/** Cuánto se agranda la fuente de la imagen antes de moverla, para que no pixele. */
+const SOBREMUESTREO = { panel: 1.5, completa: 1.25 } as const;
+
+/** El fundido de entrada y salida de cada imagen, en segundos. */
+const FUNDIDO_IMAGEN = 0.55;
+
+/**
+ * La cama, medida en sonoridad y no en volumen.
+ *
+ * Un `volume=0.22` fijo no significa nada: una pista comprada y masterizada
+ * llega a −14 LUFS y una sintetizada acá al lado a −24, así que el mismo número
+ * deja una inaudible y la otra encima de la voz. Se normaliza a una sonoridad
+ * objetivo y recién ahí se la acuesta bajo la narración: así **cualquier** pista
+ * que dejes en la biblioteca suena igual de presente.
+ */
+const MUSICA = { lufs: -26, entrada: 2.5, salida: 3.5 } as const;
 
 /** Pausas que separan lo que se escucha. Sin ellas el diálogo se atropella. */
 const PAUSA = { entreEscenas: 0.5, entreDialogos: 0.34, entreLineas: 0.24, cola: 1.4 } as const;
@@ -113,17 +195,25 @@ interface LineaMedida {
 interface EscenaMedida {
   escena: Escena;
   lineas: LineaMedida[];
+  /** Rutas ya resueltas de las imágenes de la escena. Vacío = sólo tipografía. */
+  imagenes: string[];
+  /** Visuales dibujados de la escena. Se pintan en el panel, como una imagen. */
+  visuales: string[];
   inicio: number;
   fin: number;
 }
 
 /** Reparte los tiempos: cada línea arranca cuando termina la anterior. */
-function ubicar(guion: Guion, duraciones: number[]): { escenas: EscenaMedida[]; total: number } {
+function ubicar(
+  guion: Guion,
+  duraciones: number[],
+  rutasPorEscena: string[][],
+): { escenas: EscenaMedida[]; total: number } {
   const escenas: EscenaMedida[] = [];
   let cursor = 0;
   let indice = 0;
 
-  for (const escena of guion.escenas) {
+  for (const [orden, escena] of guion.escenas.entries()) {
     const inicio = cursor;
     const lineas: LineaMedida[] = [];
     for (let i = 0; i < escena.lineas.length; i++) {
@@ -146,7 +236,18 @@ function ubicar(guion: Guion, duraciones: number[]): { escenas: EscenaMedida[]; 
     // La portada necesita más, porque suele no tener narración y con dos
     // segundos el nombre de la empresa pasaba antes de poder leerlo.
     if (lineas.length === 0) cursor += escena.esPortada ? 3.8 : 2.4;
-    escenas.push({ escena, lineas, inicio, fin: cursor });
+    const imagenes = rutasPorEscena[orden] ?? [];
+    // Los visuales no se resuelven contra el disco, pero ocupan el mismo panel
+    // y por eso cuentan igual para el tiempo mínimo de la escena.
+    const visuales = escena.imagenes
+      .filter((imagen) => imagen.visual)
+      .map((imagen) => imagen.visual!);
+    // Una imagen que dura menos de lo que tarda en aparecer y desaparecer es un
+    // parpadeo: si hay más imágenes que tiempo, la escena se estira para que
+    // cada una llegue a verse. Vale la pena: el guion pidió mostrarlas.
+    const minimo = (imagenes.length + visuales.length) * (FUNDIDO_IMAGEN * 2 + 0.9);
+    if (cursor - inicio < minimo) cursor = inicio + minimo;
+    escenas.push({ escena, lineas, imagenes, visuales, inicio, fin: cursor });
     cursor += PAUSA.entreEscenas;
   }
 
@@ -161,19 +262,84 @@ interface Evento {
   x: number;
   y: number;
   entrada?: number;
+  /**
+   * Qué se dibuja sobre qué. Con imágenes de fondo el orden dejó de ser
+   * decorativo: el velo tiene que quedar **debajo** del texto que vuelve
+   * legible, y la barra de progreso arriba de todo o la portada se la come.
+   */
+  capa?: number;
+  /** Transparencia extra, en hexadecimal de ASS: `&H00&` opaco, `&HFF&` invisible. */
+  alfa?: string;
+  /**
+   * No se desliza al entrar.
+   *
+   * Lo que hace de fondo —el velo de la portada, el riel del progreso, las
+   * masas de un diagrama— tiene que estar quieto: si el fondo también se mueve,
+   * la placa entera tiembla en vez de armarse.
+   */
+  quieto?: boolean;
 }
 
+/**
+ * Cuánto sube cada elemento al entrar, en píxeles.
+ *
+ * Un fundido solo se lee como "apareció algo"; un fundido con desplazamiento se
+ * lee como "esto entró", que es lo que hace que una placa quieta parezca una
+ * pieza filmada. Son doce píxeles: más que eso ya es un elemento que se mueve y
+ * distrae de lo que dice.
+ */
+const DESLIZ = 12;
+
 const dialogoAss = (evento: Evento): string => {
-  const fundido = `\\fad(${evento.entrada ?? 420},380)`;
+  const entrada = evento.entrada ?? 420;
+  const fundido = `\\fad(${entrada},380)`;
+  const alfa = evento.alfa ? `\\alpha${evento.alfa}` : "";
+  // `\move` desplaza durante la misma ventana del fundido, así que el elemento
+  // termina de subir justo cuando termina de aparecer.
+  const posicion = evento.quieto
+    ? `\\pos(${evento.x},${evento.y})`
+    : `\\move(${evento.x},${evento.y + DESLIZ},${evento.x},${evento.y},0,${entrada})`;
   return (
-    `Dialogue: 0,${reloj(evento.desde)},${reloj(evento.hasta)},${evento.estilo},,0,0,0,,` +
-    `{\\pos(${evento.x},${evento.y})${fundido}}${evento.texto}`
+    `Dialogue: ${evento.capa ?? 1},${reloj(evento.desde)},${reloj(evento.hasta)},` +
+    `${evento.estilo},,0,0,0,,` +
+    `{${posicion}${alfa}${fundido}}${evento.texto}`
   );
 };
 
 /** Rectángulo vectorial: ASS dibuja formas y ahorra un filtro por adorno. */
 const barra = (ancho: number, alto: number): string =>
   `{\\p1}m 0 0 l ${ancho} 0 l ${ancho} ${alto} l 0 ${alto}{\\p0}`;
+
+/**
+ * Reparte una línea hablada en frases, con el instante en que se dice cada una.
+ *
+ * Sirve para subtitular la narración cuando la escena no tiene nada más que
+ * mostrar. El reparto es proporcional al largo: no sabemos dónde cae cada frase
+ * dentro del audio, pero una frase que ocupa un tercio del texto ocupa
+ * aproximadamente un tercio del tiempo, y eso alcanza para que lo escrito
+ * acompañe a la voz en vez de adelantarse o quedarse atrás.
+ */
+function frasesDe(linea: LineaMedida): Array<{ texto: string; desde: number; hasta: number }> {
+  const partes = linea.texto
+    .split(/(?<=[.!?])\s+/)
+    .map((frase) => frase.trim())
+    .filter(Boolean);
+  if (partes.length === 0) return [];
+
+  const total = partes.reduce((suma, frase) => suma + frase.length, 0) || 1;
+  const frases: Array<{ texto: string; desde: number; hasta: number }> = [];
+  let recorrido = 0;
+  for (const texto of partes) {
+    const desde = linea.inicio + (recorrido / total) * linea.duracion;
+    recorrido += texto.length;
+    frases.push({
+      texto,
+      desde,
+      hasta: linea.inicio + (recorrido / total) * linea.duracion,
+    });
+  }
+  return frases;
+}
 
 function componerAss(
   escenas: EscenaMedida[],
@@ -183,10 +349,72 @@ function componerAss(
 ): string {
   const eventos: Evento[] = [];
 
-  for (const { escena, lineas, inicio, fin } of escenas) {
+  for (const { escena, lineas, imagenes, visuales, inicio, fin } of escenas) {
     const hasta = fin + 0.35;
+    const conImagen = imagenes.length > 0 || visuales.length > 0;
+
+    // El visual va en el mismo hueco que una foto, pero se dibuja con formas de
+    // ASS en vez de superponerse como video: así entra entero, sin recorte, y
+    // sale en los colores de la marca sin depender de ningún archivo.
+    for (const nombre of visuales) {
+      const lado = Math.min(PANEL.ancho, PANEL.alto);
+      const piezas = visualAss(nombre, PANEL.x + (PANEL.ancho - lado) / 2, PANEL.y + (PANEL.alto - lado) / 2, lado);
+      for (const pieza of piezas ?? []) {
+        if (pieza.tipo === "forma") {
+          eventos.push({
+            desde: inicio,
+            hasta,
+            estilo: ESTILO_DE_TINTE[pieza.color],
+            texto: `{\\p1}${pieza.trazo}{\\p0}`,
+            x: pieza.x,
+            y: pieza.y,
+            // La opacidad del dibujo se expresa como transparencia de ASS, que
+            // va al revés: 0 es opaco.
+            ...(pieza.opacidad < 1
+              ? { alfa: `&H${Math.round((1 - pieza.opacidad) * 255).toString(16).padStart(2, "0").toUpperCase()}&` }
+              : {}),
+            entrada: 500,
+            capa: 0,
+            quieto: true,
+          });
+        } else {
+          eventos.push({
+            desde: inicio,
+            hasta,
+            estilo: pieza.peso ? "VisualFuerte" : "Visual",
+            texto: `{\\fs${pieza.cuerpo}${pieza.centrado ? "\\an8" : ""}}${escaparAss(pieza.texto)}`,
+            x: pieza.x,
+            y: pieza.y,
+            entrada: 600,
+          });
+        }
+      }
+    }
+    // La imagen le come la mitad derecha del cuadro, así que el texto se
+    // reencuadra en una columna. No es un ajuste de estilo: con el ancho de
+    // siempre, cada renglón pasaba por debajo de la foto.
+    const ancho = conImagen && !escena.esPortada ? ANCHO_CON_IMAGEN : ANCHO_UTIL;
 
     if (escena.esPortada) {
+      // La portada con imagen la usa entera, y el velo es lo que hace que el
+      // título se lea sobre cualquier foto: sin él, un cielo claro se llevaba
+      // puesto el nombre de la empresa.
+      if (conImagen) {
+        eventos.push({
+          desde: inicio,
+          hasta,
+          estilo: "Velo",
+          texto: barra(LIENZO.ancho, LIENZO.alto),
+          x: 0,
+          y: 0,
+          // Suficiente para que el blanco se lea sobre una foto clara, no tanto
+          // como para apagar la foto: a más velo, la imagen deja de aportar.
+          alfa: "&H66&",
+          entrada: 200,
+          capa: 0,
+          quieto: true,
+        });
+      }
       eventos.push({
         desde: inicio,
         hasta,
@@ -243,8 +471,41 @@ function componerAss(
     });
 
     let techo = 246;
+
+    // El ícono de la escena va sobre el título, no al lado: al lado obliga a
+    // sangrar el texto y una escena con ícono no se alinearía con las demás.
+    const marca = escena.icono ? iconoAss(escena.icono, 54) : null;
+    if (marca) {
+      eventos.push({
+        desde: inicio,
+        hasta,
+        // En ámbar: es la única marca de la placa que compite con el título, y
+        // el azul de las viñetas ahí abajo la volvía una viñeta más grande.
+        estilo: "Realce",
+        texto: `{\\p1}${marca.trazo}{\\p0}`,
+        x: MARGEN,
+        y: techo,
+        entrada: 400,
+      });
+      techo += marca.tamaño + 30;
+    }
+
+    // Una imagen al costado se apoya en una línea de acento: es lo que la ata al
+    // resto de la placa en vez de dejarla flotando como un recorte pegado.
+    if (conImagen && !escena.esPortada) {
+      eventos.push({
+        desde: inicio,
+        hasta,
+        estilo: "Regla",
+        texto: barra(PANEL.ancho, 3),
+        x: PANEL.x,
+        y: PANEL.y + PANEL.alto + 22,
+        entrada: 700,
+      });
+    }
+
     if (escena.titulo) {
-      const titulo = envolver(escena.titulo, 62);
+      const titulo = envolver(escena.titulo, 62, ancho);
       eventos.push({
         desde: inicio,
         hasta,
@@ -264,9 +525,41 @@ function componerAss(
     const piezas: Array<{ alto: number; desde: number; dibujar: (y: number) => void }> = [];
 
     const dialogos = lineas.filter((linea) => linea.personaje !== "");
+
+    // Una escena que se narra pero no muestra nada quedaba como un título sobre
+    // un cuadro vacío durante veinte segundos. Si no hay viñetas, destacado ni
+    // diálogo, se subtitula la narración: una frase a la vez, en su momento.
+    if (dialogos.length === 0 && escena.balas.length === 0 && !escena.destacado) {
+      const frases = lineas.flatMap(frasesDe);
+      if (frases.length > 0) {
+        const envueltas = frases.map((frase) => ({
+          ...frase,
+          cuerpo: envolver(frase.texto, 46, ancho - 60),
+        }));
+        // Todas las frases arrancan a la misma altura: se reemplazan en el
+        // lugar, como un subtítulo, en vez de apilarse hacia abajo.
+        const altoMayor = Math.max(...envueltas.map((frase) => frase.cuerpo.length)) * 62;
+        const y = Math.max(techo, (techo + PISO) / 2 - altoMayor / 2);
+        envueltas.forEach((frase, i) => {
+          eventos.push({
+            desde: frase.desde,
+            // La última se queda hasta el final de la escena para no dejar el
+            // cuadro vacío mientras corre la pausa que la separa de la próxima.
+            hasta: i === envueltas.length - 1 ? hasta : frase.hasta,
+            estilo: "Leyenda",
+            texto: frase.cuerpo.map(escaparAss).join("\\N"),
+            x: MARGEN,
+            y,
+            entrada: 260,
+          });
+        });
+        continue;
+      }
+    }
+
     if (dialogos.length > 0) {
       for (const linea of dialogos) {
-        const cuerpo = envolver(linea.texto, 42, ANCHO_UTIL - 40);
+        const cuerpo = envolver(linea.texto, 42, ancho - 40);
         piezas.push({
           alto: 42 + cuerpo.length * 56 + 34,
           desde: linea.inicio,
@@ -295,7 +588,7 @@ function componerAss(
       }
     } else {
       if (escena.destacado) {
-        const cuerpo = envolver(escena.destacado, 54, ANCHO_UTIL - 120);
+        const cuerpo = envolver(escena.destacado, 54, ancho - 120);
         piezas.push({
           alto: cuerpo.length * 72 + 40,
           desde: inicio,
@@ -303,7 +596,7 @@ function componerAss(
             eventos.push({
               desde: inicio,
               hasta,
-              estilo: "Regla",
+              estilo: "Realce",
               texto: barra(4, cuerpo.length * 72),
               x: MARGEN,
               y: y + 12,
@@ -326,18 +619,23 @@ function componerAss(
       const util = Math.max(0.1, fin - inicio) * 0.62;
       escena.balas.forEach((bala, i) => {
         const aparece = inicio + (escena.balas.length > 1 ? (i / escena.balas.length) * util : 0);
-        const cuerpo = envolver(bala, 42, ANCHO_UTIL - 48);
+        // Con ícono la viñeta ocupa más y el texto arranca más a la derecha; sin
+        // él sigue siendo el cuadradito de siempre. Un nombre de ícono que no
+        // existe cae en ese mismo camino en vez de dejar la fila descolgada.
+        const dibujo = bala.icono ? iconoAss(bala.icono, 38) : null;
+        const sangria = dibujo ? 68 : 48;
+        const cuerpo = envolver(bala.texto, 42, ancho - sangria);
         piezas.push({
-          alto: cuerpo.length * 56 + 26,
+          alto: Math.max(cuerpo.length * 56, dibujo ? dibujo.tamaño + 12 : 0) + 26,
           desde: aparece,
           dibujar: (y) => {
             eventos.push({
               desde: aparece,
               hasta,
               estilo: "Vineta",
-              texto: barra(10, 10),
-              x: MARGEN + 4,
-              y: y + 18,
+              texto: dibujo ? `{\\p1}${dibujo.trazo}{\\p0}` : barra(10, 10),
+              x: MARGEN + (dibujo ? 0 : 4),
+              y: y + (dibujo ? 6 : 18),
               entrada: 300,
             });
             eventos.push({
@@ -345,7 +643,7 @@ function componerAss(
               hasta,
               estilo: "Bala",
               texto: cuerpo.map(escaparAss).join("\\N"),
-              x: MARGEN + 48,
+              x: MARGEN + sangria,
               y,
               entrada: 300,
             });
@@ -388,9 +686,9 @@ function componerAss(
 
   // Progreso: una línea que cruza el pie durante todo el video.
   const eventosFijos = [
-    `Dialogue: 0,${reloj(0)},${reloj(total)},Riel,,0,0,0,,` +
+    `Dialogue: 2,${reloj(0)},${reloj(total)},Riel,,0,0,0,,` +
       `{\\pos(${MARGEN},1002)\\alpha&HD0&}${barra(ANCHO_UTIL, 2)}`,
-    `Dialogue: 0,${reloj(0)},${reloj(total)},Progreso,,0,0,0,,` +
+    `Dialogue: 2,${reloj(0)},${reloj(total)},Progreso,,0,0,0,,` +
       `{\\pos(${MARGEN},1002)\\fscx0\\t(0,${Math.round(total * 1000)},\\fscx100)}` +
       barra(ANCHO_UTIL, 2),
   ];
@@ -422,11 +720,29 @@ function componerAss(
     estilo("Titulo", FUENTE.titulo, 62, COLOR.tinta),
     estilo("Ceja", FUENTE.titulo, 30, COLOR.acento, 5),
     estilo("Bala", FUENTE.cuerpo, 42, COLOR.tintaTenue),
+    estilo("Leyenda", FUENTE.cuerpo, 46, COLOR.tinta),
     estilo("Destacado", FUENTE.titulo, 54, COLOR.tinta),
     estilo("Personaje", FUENTE.titulo, 26, COLOR.acento, 4),
     estilo("Dialogo", FUENTE.cuerpo, 42, COLOR.tinta),
     estilo("Regla", FUENTE.cuerpo, 40, COLOR.acento),
     estilo("Vineta", FUENTE.cuerpo, 40, COLOR.acento),
+    estilo("Realce", FUENTE.cuerpo, 40, COLOR.realce),
+    estilo("Velo", FUENTE.cuerpo, 40, ass(FONDO)),
+    // Un estilo por tinte de los visuales, más los dos de sus rótulos.
+    estilo("TinteAcento", FUENTE.cuerpo, 40, COLOR.acento),
+    estilo("TinteRealce", FUENTE.cuerpo, 40, COLOR.realce),
+    estilo("TinteVioleta", FUENTE.cuerpo, 40, COLOR.violeta),
+    estilo("TinteTinta", FUENTE.cuerpo, 40, COLOR.tinta),
+    estilo("TinteTenue", FUENTE.cuerpo, 40, COLOR.tintaTenue),
+    estilo("TintePanel", FUENTE.cuerpo, 40, COLOR.panel),
+    estilo("TinteLinea", FUENTE.cuerpo, 40, COLOR.linea),
+    estilo("TintePiel", FUENTE.cuerpo, 40, COLOR.piel),
+    estilo("TintePielAlt", FUENTE.cuerpo, 40, COLOR.pielAlt),
+    estilo("TintePelo", FUENTE.cuerpo, 40, COLOR.pelo),
+    estilo("TinteRopa", FUENTE.cuerpo, 40, COLOR.ropa),
+    estilo("TinteRopaAlt", FUENTE.cuerpo, 40, COLOR.ropaAlt),
+    estilo("Visual", FUENTE.cuerpo, 26, COLOR.tinta),
+    estilo("VisualFuerte", FUENTE.titulo, 26, COLOR.tinta),
     estilo("Riel", FUENTE.cuerpo, 40, COLOR.linea),
     estilo("Progreso", FUENTE.cuerpo, 40, COLOR.acento),
     "",
@@ -444,6 +760,30 @@ export interface OpcionesVideo {
   kokoroHome?: string;
   motor?: Motor;
   velocidad?: number;
+  /** Todos los personajes con la misma voz. */
+  unaSolaVoz?: boolean;
+  /** Lo escrito → cómo se dice. Se aplica sólo al audio, nunca a la pantalla. */
+  lexico?: Record<string, string>;
+  /**
+   * El logo de la empresa, ya resuelto a una ruta.
+   *
+   * Va **chico y en un lugar fijo**, no de fondo: un logo estirado a pantalla
+   * completa deja de ser un logo. Grande en la portada, discreto en la esquina
+   * del resto, que es como firma una marca un video.
+   */
+  logo?: string;
+  /** Carpeta con las pistas de música. Sin esto el video sale sin cama. */
+  musicaHome?: string;
+  /** Qué música quiere el guion: un clima, el nombre de una pista, o "ninguna". */
+  musica?: string;
+  /**
+   * Convierte una imagen del guion en una ruta que ffmpeg pueda abrir.
+   *
+   * Devolver `null` la saltea. Quién puede leer el disco —y quién produce la que
+   * todavía no existe— lo decide el servidor: esta habilidad filma, no busca
+   * archivos ni habla con un proveedor.
+   */
+  resolverImagen?: (imagen: ImagenGuion) => Promise<string | null>;
   /** Corta el render si la corrida se detiene. */
   signal?: AbortSignal;
 }
@@ -454,6 +794,173 @@ export interface ResultadoVideo {
   escenas: number;
   personajes: string[];
   motor: Motor;
+  /** Cuántas imágenes llegaron a verse. */
+  imagenes: number;
+  /** La pista que quedó de fondo, o `null` si se filmó en silencio. */
+  musica: string | null;
+  /** Lo que no salió como pedía el guion, para contárselo al agente. */
+  avisos: string[];
+}
+
+/** Dónde y de qué tamaño se dibuja el logo. */
+const MARCA = {
+  portada: { x: MARGEN, y: 250, alto: 190 },
+  esquina: { x: 1740, y: 128, alto: 62 },
+} as const;
+
+/** Una imagen ya ubicada en el tiempo y en el cuadro. */
+interface ImagenPuesta {
+  ruta: string;
+  desde: number;
+  hasta: number;
+  /** La de la portada ocupa el cuadro entero; las demás van en el panel. */
+  completa: boolean;
+  /**
+   * El logo no se recorta ni se mueve: se escala entero y se queda quieto.
+   * Tratarlo como una foto —recorte para llenar, acercamiento lento— lo
+   * deforma, y un logo deformado es peor que ningún logo.
+   *
+   * `x` es una **expresión** de ffmpeg y no un número: así el logo se ancla al
+   * borde derecho sin que nadie tenga que medir el ancho del archivo.
+   */
+  marca?: { alto: number; x: string; y: number };
+}
+
+/**
+ * Reparte las imágenes de cada escena en el tiempo de esa escena.
+ *
+ * Dos imágenes en una escena de diez segundos son cinco segundos cada una: el
+ * tiempo lo manda el audio, y las imágenes se acomodan adentro. Al revés
+ * —estirar la escena para que entren— el video se despega de lo que se escucha.
+ */
+function ubicarImagenes(escenas: EscenaMedida[], logo?: string): ImagenPuesta[] {
+  const puestas: ImagenPuesta[] = [];
+
+  // El logo se pone una vez por escena y no una sola vez para todo el video:
+  // cada escena tiene su ventana de `enable`, y un solo overlay que abarcara
+  // todo taparía las imágenes que entran después.
+  if (logo) {
+    for (const medida of escenas) {
+      const sitio = medida.escena.esPortada ? MARCA.portada : MARCA.esquina;
+      puestas.push({
+        ruta: logo,
+        desde: medida.inicio,
+        hasta: medida.fin + 0.35,
+        completa: false,
+        marca: {
+          alto: sitio.alto,
+          // En la portada arranca en el margen; en las escenas se ancla al
+          // borde derecho, que es donde no compite con el texto.
+          x: medida.escena.esPortada ? String(sitio.x) : `W-w-${LIENZO.ancho - sitio.x}`,
+          y: sitio.y,
+        },
+      });
+    }
+  }
+
+  for (const medida of escenas) {
+    if (medida.imagenes.length === 0) continue;
+    const desde = medida.inicio;
+    const hasta = medida.fin + 0.35;
+    const tramo = (hasta - desde) / medida.imagenes.length;
+    medida.imagenes.forEach((ruta, i) => {
+      puestas.push({
+        ruta,
+        desde: desde + i * tramo,
+        hasta: desde + (i + 1) * tramo,
+        completa: medida.escena.esPortada,
+      });
+    });
+  }
+  return puestas;
+}
+
+/**
+ * El filtro que convierte un archivo de imagen en una placa que entra y sale.
+ *
+ * Tres cosas pasan acá: se recorta a la medida del hueco sin deformar —una foto
+ * apaisada estirada a un panel vertical se nota en el primer segundo—, se le da
+ * un movimiento de acercamiento apenas perceptible para que no parezca una
+ * diapositiva pegada, y se funde por alfa en los bordes. El sobremuestreo no es
+ * un lujo: `zoompan` amplía sobre lo que recibe, así que si recibe el tamaño
+ * final, el acercamiento es puro reescalado y la imagen se ablanda.
+ */
+function filtroImagen(indice: number, k: number, puesta: ImagenPuesta): string[] {
+  const duracionMarca = puesta.hasta - puesta.desde;
+  if (puesta.marca) {
+    const salidaMarca = Math.max(0.1, duracionMarca - FUNDIDO_IMAGEN);
+    return [
+      // `-2` mantiene el ancho par sin tocar la proporción: es lo único que hay
+      // que cuidar para que un logo no salga estirado.
+      `[${indice}:v]scale=-2:${puesta.marca.alto},format=rgba,` +
+        `fade=t=in:st=0:d=${FUNDIDO_IMAGEN}:alpha=1,` +
+        `fade=t=out:st=${salidaMarca.toFixed(2)}:d=${FUNDIDO_IMAGEN}:alpha=1,` +
+        `setpts=PTS+${puesta.desde.toFixed(2)}/TB[im${k}]`,
+    ];
+  }
+
+  const destino = puesta.completa
+    ? { w: LIENZO.ancho, h: LIENZO.alto, factor: SOBREMUESTREO.completa }
+    : { w: PANEL.ancho, h: PANEL.alto, factor: SOBREMUESTREO.panel };
+  const grande = { w: Math.round(destino.w * destino.factor), h: Math.round(destino.h * destino.factor) };
+  const duracion = puesta.hasta - puesta.desde;
+  const salida = Math.max(0.1, duracion - FUNDIDO_IMAGEN);
+
+  return [
+    `[${indice}:v]scale=${grande.w}:${grande.h}:force_original_aspect_ratio=increase,` +
+      `crop=${grande.w}:${grande.h},setsar=1,` +
+      `zoompan=z='min(1+0.00028*on,1.09)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':` +
+      `d=1:s=${destino.w}x${destino.h}:fps=${LIENZO.fps},` +
+      `format=rgba,fade=t=in:st=0:d=${FUNDIDO_IMAGEN}:alpha=1,` +
+      `fade=t=out:st=${salida.toFixed(2)}:d=${FUNDIDO_IMAGEN}:alpha=1,` +
+      // La imagen se corre a su instante: sin esto el fundido de entrada ocurre
+      // al segundo cero del video y la escena la recibe ya entrada.
+      `setpts=PTS+${puesta.desde.toFixed(2)}/TB[im${k}]`,
+  ];
+}
+
+/**
+ * Resuelve, escena por escena, qué imágenes se van a poder mostrar.
+ *
+ * Ninguna falla acá corta el video: una imagen que no aparece deja una escena
+ * más pobre, y una excepción deja a la empresa sin entregable. Lo que no salió
+ * se junta en `avisos` y vuelve en el resultado de la herramienta, que es lo
+ * único que el agente puede leer para corregir el guion.
+ */
+async function resolverImagenes(
+  guion: Guion,
+  opciones: OpcionesVideo,
+  avisos: string[],
+): Promise<string[][]> {
+  const rutasPorEscena: string[][] = [];
+  const pedidas = guion.escenas.reduce(
+    (total, escena) => total + escena.imagenes.filter((imagen) => !imagen.visual).length,
+    0,
+  );
+
+  if (pedidas > 0 && !opciones.resolverImagen) {
+    avisos.push("El guion pide imágenes, pero esta corrida no tiene cómo resolverlas.");
+  }
+
+  for (const escena of guion.escenas) {
+    const rutas: string[] = [];
+    for (const imagen of escena.imagenes) {
+      // Un visual no se resuelve: se dibuja. No pasa por acá.
+      if (imagen.visual) continue;
+      if (!opciones.resolverImagen) continue;
+      try {
+        const ruta = await opciones.resolverImagen(imagen);
+        if (ruta) rutas.push(ruta);
+        else avisos.push(`No se pudo mostrar la imagen "${imagen.alt || imagen.src}".`);
+      } catch (error) {
+        const detalle = error instanceof Error ? error.message : String(error);
+        avisos.push(`No se pudo mostrar "${imagen.alt || imagen.src}": ${detalle}`);
+      }
+    }
+    rutasPorEscena.push(rutas);
+  }
+
+  return rutasPorEscena;
 }
 
 /**
@@ -485,6 +992,8 @@ export async function renderVideo(
       ...(opciones.kokoroHome !== undefined ? { kokoroHome: opciones.kokoroHome } : {}),
       ...(opciones.motor !== undefined ? { motor: opciones.motor } : {}),
       ...(opciones.ffprobe !== undefined ? { ffprobe: opciones.ffprobe } : {}),
+      ...(opciones.unaSolaVoz !== undefined ? { unaSolaVoz: opciones.unaSolaVoz } : {}),
+      ...(opciones.lexico !== undefined ? { lexico: opciones.lexico } : {}),
     });
 
     const extension = narrador.motor === "kokoro" ? "wav" : "aiff";
@@ -497,7 +1006,16 @@ export async function renderVideo(
       }));
 
     const duraciones = pedidos.length > 0 ? await narrador.sintetizar(pedidos) : [];
-    const { escenas, total } = ubicar(guion, duraciones);
+
+    const avisos: string[] = [];
+    const rutasPorEscena = await resolverImagenes(guion, opciones, avisos);
+    const { escenas, total } = ubicar(guion, duraciones, rutasPorEscena);
+
+    // El pedido explícito manda; sin pedido se busca una cama neutra, y si no
+    // hay biblioteca el video sale en silencio sin decir nada: no configurar
+    // música no es un problema que el agente pueda ni deba resolver.
+    const eleccion = await elegirMusica(opciones.musicaHome, opciones.musica ?? "auto");
+    if (eleccion.aviso && opciones.musica !== undefined) avisos.push(eleccion.aviso);
 
     await writeFile(join(dir, "guion.ass"), componerAss(escenas, total, guion, meta), "utf8");
 
@@ -510,6 +1028,34 @@ export async function renderVideo(
     const args = ["-y", "-v", "error", "-f", "lavfi", "-i", fondo];
     for (const pedido of pedidos) args.push("-i", pedido.destino);
 
+    // Los índices de entrada se llevan a mano porque el orden importa: el fondo
+    // es 0, después la narración, después la música y al final las imágenes.
+    let indice = pedidos.length;
+
+    let indiceMusica = -1;
+    if (eleccion.pista) {
+      // `-stream_loop -1` es lo que permite que una pista de dos minutos cubra un
+      // video de tres sin cortarse; el `atrim` de más abajo la termina.
+      args.push("-stream_loop", "-1", "-i", eleccion.pista.ruta);
+      indiceMusica = ++indice;
+    }
+
+    const puestas = ubicarImagenes(escenas, opciones.logo);
+    const indicesImagen = puestas.map((puesta) => {
+      const duracion = puesta.hasta - puesta.desde + 0.2;
+      args.push(
+        "-loop",
+        "1",
+        "-framerate",
+        String(LIENZO.fps),
+        "-t",
+        duracion.toFixed(2),
+        "-i",
+        puesta.ruta,
+      );
+      return ++indice;
+    });
+
     // Cada voz se coloca en su instante exacto y se suman las pistas: no hay
     // concatenación, así que un error de milisegundos no arrastra al resto.
     const ubicadas = escenas.flatMap((medida) => medida.lineas);
@@ -517,18 +1063,61 @@ export async function renderVideo(
       (linea, i) =>
         `[${i + 1}:a]aresample=44100,adelay=delays=${Math.round(linea.inicio * 1000)}:all=1[v${i}]`,
     );
-    const mezcla =
+    // Se fija el formato de la mezcla de voz: la música y el compresor de cadena
+    // lateral exigen que las dos entradas coincidan, y Kokoro entrega mono.
+    const formato = "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo";
+    const voz =
       pedidos.length > 0
         ? `${pistas.join(";")};${pedidos.map((_, i) => `[v${i}]`).join("")}` +
           `amix=inputs=${pedidos.length}:duration=longest:normalize=0,` +
-          `apad,atrim=0:${total.toFixed(2)},alimiter=level_in=1:level_out=0.92[aud]`
-        : `anullsrc=r=44100:cl=stereo,atrim=0:${total.toFixed(2)}[aud]`;
+          `apad,atrim=0:${total.toFixed(2)},${formato}[voz]`
+        : `anullsrc=r=44100:cl=stereo,atrim=0:${total.toFixed(2)},${formato}[voz]`;
+
+    const limitador = "alimiter=level_in=1:level_out=0.92";
+    const mezcla =
+      indiceMusica >= 0
+        ? [
+            voz,
+            "[voz]asplit=2[vozmix][vozlado]",
+            // `loudnorm` devuelve 192 kHz sí o sí, así que el `aresample` va
+            // **después**: antes, la cama entraba a la mezcla al triple de
+            // velocidad de muestreo y sonaba como una cinta acelerada.
+            `[${indiceMusica}:a]aresample=44100,${formato},atrim=0:${total.toFixed(2)},` +
+              `loudnorm=I=${MUSICA.lufs}:TP=-3:LRA=11,aresample=44100,${formato},` +
+              `afade=t=in:st=0:d=${MUSICA.entrada},` +
+              `afade=t=out:st=${Math.max(0, total - MUSICA.salida).toFixed(2)}:d=${MUSICA.salida}[cama]`,
+            // La música se aparta sola cuando alguien habla. Sin esto hay que
+            // elegir entre una cama inaudible y una voz tapada, y las dos
+            // opciones suenan a video hecho a las apuradas.
+            "[cama][vozlado]sidechaincompress=threshold=0.02:ratio=10:attack=20:release=400[camaduck]",
+            `[vozmix][camaduck]amix=inputs=2:duration=first:normalize=0,${limitador}[aud]`,
+          ].join(";")
+        : `${voz};[voz]${limitador}[aud]`;
+
+    // Las imágenes se superponen al fondo una tras otra, cada una sólo durante
+    // su ventana. La tipografía va al final: siempre por encima de todo.
+    const capasVideo = [`[0:v]setsar=1[bg]`];
+    let fondoActual = "bg";
+    puestas.forEach((puesta, k) => {
+      capasVideo.push(...filtroImagen(indicesImagen[k]!, k, puesta));
+      const destino = puesta.marca
+        ? { x: puesta.marca.x, y: puesta.marca.y }
+        : puesta.completa
+          ? { x: 0, y: 0 }
+          : { x: PANEL.x, y: PANEL.y };
+      capasVideo.push(
+        `[${fondoActual}][im${k}]overlay=x=${destino.x}:y=${destino.y}:` +
+          `enable='between(t,${puesta.desde.toFixed(2)},${puesta.hasta.toFixed(2)})'[bg${k}]`,
+      );
+      fondoActual = `bg${k}`;
+    });
+    capasVideo.push(`[${fondoActual}]ass=guion.ass,format=yuv420p[vid]`);
 
     args.push(
       "-filter_complex",
       // Sin viñeta: oscurece los bordes, y acá el texto va alineado a la
       // izquierda, así que apagaba justo lo que hay que leer.
-      `[0:v]format=yuv420p,ass=guion.ass[vid];${mezcla}`,
+      `${capasVideo.join(";")};${mezcla}`,
       "-map",
       "[vid]",
       "-map",
@@ -566,6 +1155,9 @@ export async function renderVideo(
       escenas: guion.escenas.length,
       personajes: guion.personajes,
       motor: narrador.motor,
+      imagenes: puestas.length,
+      musica: eleccion.pista?.nombre ?? null,
+      avisos,
     };
   } finally {
     await rm(dir, { recursive: true, force: true });
