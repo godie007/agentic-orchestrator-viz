@@ -186,6 +186,18 @@ export class ExportStore {
     return { dir, destino };
   }
 
+  /**
+   * El directorio de una empresa, para prestárselo a un agente que sabe leer.
+   *
+   * Usa `dirFor` —crea la carpeta— y no `pathFor` a propósito: esto se llama al
+   * arrancar una corrida, que es justo cuando la empresa va a necesitarla. Todo
+   * lo que sólo *consulta* tiene que seguir usando `pathFor`, o un barrido de
+   * residuos produce los residuos que viene a buscar.
+   */
+  dirDeEmpresa(companyId: string): string {
+    return this.dirFor(companyId);
+  }
+
   /** Almacenamiento que se le inyecta a las habilidades de una empresa. */
   forCompany(companyId: string): SkillStorage {
     return {

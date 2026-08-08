@@ -64,6 +64,15 @@ export interface Persistence {
   /** Ámbito empresa, no corrida: por eso sobrevive a la corrida que la creó. */
   saveLearning(learning: Learning): void;
   saveRequest(request: AgentRequest): void;
+  /**
+   * Un rol incorporado durante la corrida. El departamento va aparte porque
+   * puede ser nuevo: un especialista suele traer un área que no existía.
+   *
+   * Ámbito empresa, como los aprendizajes: el especialista que se convocó para
+   * resolver algo queda disponible para la próxima corrida en vez de
+   * desaparecer con la que lo creó.
+   */
+  saveRole(role: Role, department?: Department): void;
 }
 
 /** Persistencia nula, para tests y para correr sin guardar nada. */
@@ -74,6 +83,7 @@ export const noPersistence: Persistence = {
   saveApproval: () => {},
   saveLearning: () => {},
   saveRequest: () => {},
+  saveRole: () => {},
 };
 
 /**
@@ -96,6 +106,8 @@ export interface ActivityEntry {
 
 export class RunState {
   readonly messages: Message[] = [];
+  /** Especialistas convocados en esta corrida. Ver `incorporarRol`. */
+  private convocados = 0;
   /**
    * Qué ejecutó cada agente y con qué resultado.
    *
@@ -182,6 +194,7 @@ export class RunState {
       get roles() {
         return state.roles;
       },
+      tools: state.tools,
       getRole: (roleId) => state.getRole(roleId),
       directReports: (roleId) => state.directReports(roleId),
       sendMessage: (input) => state.sendMessage(input, actorId),
@@ -201,6 +214,8 @@ export class RunState {
       recordLesson: (input) => state.recordLesson(input, actorId),
       listLessons: () => state.learnings,
       createRequest: (input) => state.createRequest(input, actorId),
+      incorporarRol: (input) => state.incorporarRol(input),
+      especialistasConvocados: () => state.especialistasConvocados,
       listRequests: () => state.requests,
       listActivity: () => state.activity,
     };
@@ -518,6 +533,76 @@ export class RunState {
    * corrida siguiente, el agente que lo pidió seguiría bloqueado y volvería a
    * proponerlo, sin verlo en su lista de colegas.
    */
+  /**
+   * Convoca un especialista **en el acto**, sin esperar a que alguien apruebe.
+   *
+   * Es lo que separa a una empresa que puede abordar un problema que no previó
+   * de una que sólo ejecuta el organigrama con el que arrancó. La diferencia con
+   * `request_new_role` no es de permisos sino de tiempo: proponer y esperar a
+   * una persona sirve para incorporar a alguien de forma permanente; esto sirve
+   * para cuando el trabajo ya empezó y falta una capacidad concreta.
+   *
+   * Tres frenos, y ninguno es decorativo:
+   *
+   * 1. **El convocado nace `executor`.** No puede convocar a su vez. Sin esto un
+   *    equipo puede multiplicarse solo: cada especialista descubre que le falta
+   *    otro, y una corrida termina con treinta agentes hablando entre ellos.
+   * 2. **Hay un tope por corrida.** Si hacen falta más que eso, el problema no
+   *    es la falta de gente: es que nadie entendió el encargo.
+   * 3. **Sólo hereda herramientas que la empresa ya tiene.** Convocar no crea
+   *    capacidades nuevas, reparte las existentes.
+   */
+  incorporarRol(input: {
+    name: string;
+    title: string;
+    departmentName: string;
+    systemPrompt: string;
+    reportsToId: string | null;
+    toolIds: string[];
+    maxTurns?: number;
+  }): Role {
+    let department = this.config.departments.find(
+      (dep) => dep.name.toLowerCase() === input.departmentName.toLowerCase(),
+    );
+    const departamentoNuevo = !department;
+    if (!department) {
+      department = {
+        id: ids.department(),
+        companyId: this.config.company.id,
+        name: input.departmentName,
+        purpose: "",
+        position: { x: 120 + this.config.departments.length * 260, y: 440 },
+        parentId: null,
+      };
+    }
+
+    const role: Role = {
+      id: ids.role(),
+      companyId: this.config.company.id,
+      departmentId: department.id,
+      name: input.name,
+      title: input.title,
+      systemPrompt: input.systemPrompt,
+      model: this.config.company.defaultModel,
+      toolIds: input.toolIds,
+      authority: "executor",
+      reportsTo: input.reportsToId,
+      maxTurns: input.maxTurns ?? 10,
+      spendApprovalThresholdUsd: null,
+      position: { x: department.position.x, y: department.position.y + 90 },
+    };
+
+    this.addRole(role, department);
+    this.convocados += 1;
+    this.persistence.saveRole(role, departamentoNuevo ? department : undefined);
+    return role;
+  }
+
+  /** Cuántos especialistas se convocaron en esta corrida. Ver `incorporarRol`. */
+  get especialistasConvocados(): number {
+    return this.convocados;
+  }
+
   addRole(role: Role, department?: Department): void {
     if (this.config.roles.some((existing) => existing.id === role.id)) return;
     if (department && !this.config.departments.some((d) => d.id === department.id)) {

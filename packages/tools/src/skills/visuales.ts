@@ -344,7 +344,11 @@ const CATALOGO: Record<string, Visual> = {
       texto(15, 55, "audio · foto · texto", 3.2, "tenue", { centrado: true }),
       { forma: "linea", x1: 30, y1: 50, x2: 38, y2: 50, color: "acento" },
       rect(38, 34, 26, 32, "violeta", { radio: 3, opacidad: 0.9 }),
-      texto(51, 46, "Codytion", 5.6, "tinta", { centrado: true, peso: "fuerte" }),
+      // La caja del medio dice "El sistema" y no el nombre de una empresa: el
+      // catálogo de visuales lo comparten todas, así que un nombre propio acá
+      // se cuela en el video de otra marca. Pasó: un video de INSPIA salió con
+      // "Codytion" dibujado en el medio del diagrama.
+      texto(51, 46, "El sistema", 5.6, "tinta", { centrado: true, peso: "fuerte" }),
       texto(51, 54, "entiende y", 4.4, "tinta", { centrado: true }),
       texto(51, 60, "clasifica", 4.4, "tinta", { centrado: true }),
       // Las cuatro salidas en abanico: se ve de un vistazo que de un solo

@@ -1218,6 +1218,138 @@ const requestContext: RegisteredTool = {
   },
 };
 
+/**
+ * Cuántos especialistas puede convocar una corrida.
+ *
+ * El tope no está por costo sino por diagnóstico: si un encargo necesita más de
+ * cuatro capacidades que la empresa no tenía, el problema no es la falta de
+ * gente — es que nadie entendió el encargo, y sumar agentes lo empeora porque
+ * cada uno agrega mensajes que los demás tienen que leer.
+ */
+const TOPE_DE_CONVOCATORIA = 4;
+
+/**
+ * Convocar a un especialista en el acto, sin esperar aprobación.
+ *
+ * Es la diferencia entre una empresa que puede abordar un problema que no
+ * previó y una que sólo ejecuta el organigrama con el que arrancó. `request_new_role`
+ * sigue existiendo y no sobra: proponer y esperar a una persona es lo correcto
+ * para incorporar a alguien de forma permanente. Esto es para cuando el trabajo
+ * ya empezó, falta una capacidad concreta y esperar significa perder la corrida.
+ *
+ * Los frenos están en el ejecutor y no en el prompt, como el resto de las
+ * guardias del proyecto: sólo convoca quien decide por la empresa, el convocado
+ * nace `executor` —así no puede convocar a su vez y el equipo no se multiplica
+ * solo— y sólo puede recibir herramientas que la empresa ya tiene, porque
+ * convocar reparte capacidades, no las inventa.
+ */
+const convocarEspecialista: RegisteredTool = {
+  name: "convocar_especialista",
+  origin: "coordination",
+  readOnly: false,
+  requiresApproval: false,
+  description:
+    "Incorpora un especialista al equipo **ahora**, en esta misma corrida, y empieza a " +
+    "trabajar en el ciclo siguiente. Usalo cuando el encargo necesita una capacidad que " +
+    "nadie del equipo cubre y esperar una aprobación haría perder la corrida —por " +
+    "ejemplo, un problema que requiere manejar una herramienta externa que nadie tiene " +
+    "asignada—. Dale las herramientas que va a necesitar por nombre: sólo se pueden " +
+    "repartir las que la empresa ya tiene (mirá tu propia lista y la del proyecto). " +
+    "El especialista queda incorporado a la empresa, así que sirve para las corridas " +
+    "siguientes. Si lo que falta es que alguien **existente** haga algo, esto no es lo " +
+    "que buscás: usá send_message.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      name: stringProp("Nombre propio, ej: 'Marta Sosa'"),
+      title: stringProp("Cargo, ej: 'Ingeniera de automatización'"),
+      department: stringProp("Área. Si no existe, se crea."),
+      system_prompt: stringProp(
+        "Sus instrucciones: qué hace, con qué criterio y qué entrega. Escribilas como si le hablaras a esa persona, y sé específico: es lo único que va a saber de su trabajo.",
+      ),
+      tools: {
+        type: "array",
+        items: { type: "string" },
+        description:
+          "Nombres exactos de las herramientas que necesita. Las de coordinación las tiene siempre; no las pidas.",
+      },
+      reason: stringProp("Qué capacidad falta y qué se desbloquea al tenerla"),
+    },
+    required: ["name", "title", "department", "system_prompt", "reason"],
+    additionalProperties: false,
+  },
+
+  async execute(args, ctx) {
+    const parsed = readRequired(args, ["name", "title", "department", "system_prompt", "reason"]);
+    if (!parsed.ok) return fail(`convocar_especialista: ${parsed.error}`);
+
+    if (ctx.actor.authority !== "executive") {
+      return fail(
+        `Convocar gente la decide quien responde por la empresa, y vos sos ${ctx.actor.authority}. ` +
+          `Proponelo con request_new_role y quien decide lo aprueba, o pedile a tu superior ` +
+          `que lo convoque si no puede esperar.`,
+      );
+    }
+
+    if (ctx.workspace.especialistasConvocados() >= TOPE_DE_CONVOCATORIA) {
+      return fail(
+        `Ya convocaste ${TOPE_DE_CONVOCATORIA} especialistas en esta corrida y ese es el tope. ` +
+          `Si todavía falta una capacidad, el problema no es de gente: revisá si el encargo ` +
+          `está bien entendido o repartí distinto el trabajo entre los que ya están.`,
+      );
+    }
+
+    const nombre = parsed.values.name!.trim();
+    const yaExiste = ctx.workspace.roles.some(
+      (role) => role.name.toLowerCase() === nombre.toLowerCase(),
+    );
+    if (yaExiste) {
+      return fail(
+        `Ya hay alguien llamado "${nombre}" en el equipo. Si necesitás algo de esa persona, ` +
+          `escribile con send_message.`,
+      );
+    }
+
+    // Sólo se reparten herramientas que la empresa tiene. Las que no existen se
+    // nombran en la respuesta en vez de descartarse en silencio: un especialista
+    // que nace sin la herramienta que se le prometió gasta su primer turno
+    // buscándola, y desde afuera parece que no entendió la tarea.
+    const pedidas = Array.isArray(args.tools)
+      ? args.tools.map((t) => String(t).trim()).filter(Boolean)
+      : [];
+    const catalogo = new Map(ctx.workspace.tools.map((tool) => [tool.name, tool]));
+    const otorgadas = pedidas.filter((nombreTool) => catalogo.has(nombreTool));
+    const inexistentes = pedidas.filter((nombreTool) => !catalogo.has(nombreTool));
+
+    const rol = ctx.workspace.incorporarRol({
+      name: nombre,
+      title: parsed.values.title!.trim(),
+      departmentName: parsed.values.department!.trim(),
+      systemPrompt: parsed.values.system_prompt!,
+      reportsToId: ctx.actor.id,
+      toolIds: otorgadas.map((nombreTool) => catalogo.get(nombreTool)!.id),
+    });
+
+    const conQue =
+      otorgadas.length > 0
+        ? ` Tiene ${otorgadas.join(", ")} además de las de coordinación.`
+        : ` Sólo tiene las de coordinación: si necesita alguna capacidad, asignásela vos.`;
+    const faltantes =
+      inexistentes.length > 0
+        ? ` Ojo: ${inexistentes.join(", ")} no existe${inexistentes.length > 1 ? "n" : ""} en ` +
+          `este proyecto, así que no se le dio. Revisá el nombre exacto o conectá el servidor ` +
+          `que la provee.`
+        : "";
+
+    return ok(
+      `${rol.name} (${rol.title}) se incorporó al equipo y arranca en el ciclo siguiente.` +
+        `${conQue}${faltantes} Escribile con send_message para darle el encargo: todavía no ` +
+        `sabe qué tiene que hacer.`,
+      `👤 ${rol.name} — ${rol.title}`,
+    );
+  },
+};
+
 const requestToolAccess: RegisteredTool = {
   name: "request_tool_access",
   origin: "coordination",
@@ -1287,6 +1419,7 @@ export const coordinationTools: RegisteredTool[] = [
   checkActivity,
   recordLesson,
   requestNewRole,
+  convocarEspecialista,
   requestContext,
   requestToolAccess,
 ];

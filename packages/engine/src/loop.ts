@@ -19,6 +19,7 @@ import {
 } from "@orq/tools";
 import type { EventBus } from "./events.js";
 import type { RunState } from "./state.js";
+import { createClaudeMcpBridge } from "./claude-mcp.js";
 import { buildSystemPrompt, buildTurnPrompt } from "./prompt.js";
 
 /**
@@ -53,6 +54,19 @@ export interface TurnDeps {
    * anterior: no alcanza con que no invente, tiene que poder verificar.
    */
   fechaHoy?: string;
+  /**
+   * Directorio de salida de la empresa, si quien llama quiere prestárselo.
+   *
+   * Sirve para que un agente **vea** lo que la empresa produjo —una lámina, la
+   * previsualización de una imagen, un documento que subió una persona— en vez
+   * de trabajar a ciegas sobre archivos que sólo puede describir de memoria. Hoy
+   * lo aprovecha `claude-code`, que corre un CLI con sus propias herramientas de
+   * lectura; se entrega en **sólo lectura**, y producir sigue yendo por las
+   * herramientas del org.
+   *
+   * El motor no sabe dónde vive: lo inyecta el servidor, igual que la fecha.
+   */
+  dirDeTrabajo?: string;
   signal?: AbortSignal;
 }
 
@@ -225,6 +239,32 @@ export async function runAgentTurn(
   const TOLERANCIA_IDENTICA = 3;
   const TOLERANCIA_MOTIVO = 5;
 
+  const ctx: ToolContext = {
+    runId,
+    tick: state.tick,
+    actor: role,
+    workspace,
+    currentThreadId: hilo.threadId,
+    currentMessageId: hilo.messageId,
+    replyToRoleId: hilo.replyToRoleId,
+    ...(deps.signal ? { signal: deps.signal } : {}),
+  };
+
+  // Puente MCP hacia las herramientas del org, solo para Claude Code: el CLI
+  // corre su propio loop y no puede devolver `tool_calls`, así que le expone
+  // las herramientas de coordinación como un servidor MCP que vive acá mismo.
+  const orgBridge =
+    provider.id === "claude-code"
+      ? createClaudeMcpBridge({
+          bus,
+          state,
+          role,
+          byName,
+          ctx,
+          ...(deps.dirDeTrabajo ? { dirDeTrabajo: deps.dirDeTrabajo } : {}),
+        })
+      : null;
+
   // `try/finally`: si el turno falla —proveedor saturado, red caída— el evento
   // de cierre igual se emite. Sin esto el nodo del organigrama se queda
   // "pensando" para siempre, porque la UI espera un `agent.turn_end` que nunca
@@ -249,7 +289,11 @@ export async function runAgentTurn(
     });
 
     const startedAt = Date.now();
-    const timeoutMs = deps.llmTimeoutMs ?? 120_000;
+    // El proveedor manda sobre el corte por tiempo cuando lo declara: el default
+    // está pensado para una API que contesta en segundos, y `claude-code` delega
+    // el turno entero a un CLI que corre su propio agent loop. Con 120 s ese
+    // turno moría por tiempo **siempre**, justo mientras el agente trabajaba.
+    const timeoutMs = provider.timeoutMs ?? deps.llmTimeoutMs ?? 120_000;
 
     const result = await withRetry(
       () =>
@@ -265,6 +309,9 @@ export async function runAgentTurn(
             ...(role.model.temperature != null ? { temperature: role.model.temperature } : {}),
             maxOutputTokens: role.model.maxOutputTokens,
             ...(nativeWebSearch ? { webSearch: { enabled: true, maxResults: 5 } } : {}),
+            // Claude Code expone las tools del org por el puente MCP en vez de
+            // `tool_calls`: el CLI resuelve sus propias llamadas en su loop.
+            ...(orgBridge ? { orgTools: orgBridge } : {}),
             // El corte por tiempo se suma al del usuario: cualquiera de los dos
             // aborta la llamada.
             signal: conTimeout(deps.signal, timeoutMs),
@@ -315,17 +362,6 @@ export async function runAgentTurn(
 
     const calls = result.message.toolCalls ?? [];
     if (calls.length === 0) break; // el agente terminó su turno
-
-    const ctx: ToolContext = {
-      runId,
-      tick: state.tick,
-      actor: role,
-      workspace,
-      currentThreadId: hilo.threadId,
-      currentMessageId: hilo.messageId,
-      replyToRoleId: hilo.replyToRoleId,
-      ...(deps.signal ? { signal: deps.signal } : {}),
-    };
 
     // Las de solo lectura pueden ir en paralelo; las que mutan van en serie,
     // porque el orden en que se envían mensajes y se cambian tareas importa.
@@ -804,7 +840,7 @@ function huellaDeMotivo(name: string, detalle: string): string {
   return `${name}::${motivo}`;
 }
 
-async function executeOne(
+export async function executeOne(
   call: ToolCall,
   byName: Map<string, RegisteredTool>,
   ctx: ToolContext,

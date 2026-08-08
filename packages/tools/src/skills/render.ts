@@ -349,11 +349,26 @@ type Doc = InstanceType<typeof PDFDocument>;
  * vez de reemplazarlos por un signo: son decorativos y el texto que los
  * acompaña ya dice lo mismo.
  */
-const sinEmoji = (texto: string): string =>
+/**
+ * Saca los emojis y colapsa los espacios que quedan, **sin recortar los bordes**.
+ *
+ * No recortar es la parte importante. Un párrafo con negritas se escribe como
+ * varios tramos encadenados —"El grupo terminó ", "55,8% más rápido", " y
+ * listo."— y el espacio que los separa vive justo en el borde de cada tramo.
+ * Recortando por tramo, el PDF salía con las palabras pegadas a la negrita:
+ * "terminó55,8% más rápido y listo". Se veía en cada documento con un dato
+ * destacado, que son casi todos.
+ */
+export const sinEmoji = (texto: string): string =>
   texto
     .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE0F}\u{200D}]/gu, "")
-    .replace(/ {2,}/g, " ")
-    .trim();
+    .replace(/ {2,}/g, " ");
+
+/**
+ * Lo mismo, para un texto que **sí** está completo: un título, una celda, un
+ * epígrafe. Ahí el espacio sobrante en el borde no separa nada y sólo desalinea.
+ */
+export const sinEmojiRecortado = (texto: string): string => sinEmoji(texto).trim();
 
 const anchoUtil = (doc: Doc): number => doc.page.width - PDF.margen * 2;
 const pieDePagina = (doc: Doc): number => doc.page.height - PDF.margen;
@@ -400,7 +415,8 @@ function escribirSpans(doc: Doc, spans: Span[], opciones: { indent?: number } = 
  * Texto visible de una celda: sin marcas de negrita —se leían los asteriscos—
  * y sin emoji, que las fuentes estándar no saben dibujar.
  */
-const textoDeCelda = (celda: string): string => sinEmoji(spansToText(parseSpans(celda ?? "")));
+const textoDeCelda = (celda: string): string =>
+  sinEmojiRecortado(spansToText(parseSpans(celda ?? "")));
 
 function dibujarTabla(doc: Doc, header: string[], rows: string[][]): void {
   const columnas = header.length;
@@ -563,7 +579,9 @@ export async function renderPdf(markdown: string, meta: DocumentMeta | string): 
             .font("Helvetica-Bold")
             .fontSize(tamaño)
             .fillColor(block.level === 1 ? PDF.acento : PDF.tinta);
-          doc.text(sinEmoji(spansToText(block.spans)), PDF.margen, doc.y, { width: anchoUtil(doc) });
+          doc.text(sinEmojiRecortado(spansToText(block.spans)), PDF.margen, doc.y, {
+            width: anchoUtil(doc),
+          });
           doc.moveDown(0.35);
           break;
         }
@@ -590,7 +608,7 @@ export async function renderPdf(markdown: string, meta: DocumentMeta | string): 
           asegurarEspacio(doc, 32);
           const inicio = doc.y;
           doc.font("Helvetica-Oblique").fontSize(PDF.cuerpo).fillColor(PDF.gris);
-          doc.text(sinEmoji(spansToText(block.spans)), PDF.margen + 18, doc.y, {
+          doc.text(sinEmojiRecortado(spansToText(block.spans)), PDF.margen + 18, doc.y, {
             width: anchoUtil(doc) - 18,
           });
           doc
@@ -618,7 +636,9 @@ export async function renderPdf(markdown: string, meta: DocumentMeta | string): 
         case "image":
           asegurarEspacio(doc, 24);
           doc.font("Helvetica-Oblique").fontSize(PDF.cuerpo - 1).fillColor(PDF.gris);
-          doc.text(sinEmoji(block.alt || "Imagen"), PDF.margen, doc.y, { width: anchoUtil(doc) });
+          doc.text(sinEmojiRecortado(block.alt || "Imagen"), PDF.margen, doc.y, {
+            width: anchoUtil(doc),
+          });
           doc.moveDown(0.5);
           break;
 

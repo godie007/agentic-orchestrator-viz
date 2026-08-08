@@ -225,9 +225,24 @@ export class Runtime {
     return disco.ok ? disco : { ok: true, archivos: 0, bytes: 0 };
   }
 
+  /**
+   * La salud de los servidores que **siguen configurados**.
+   *
+   * `McpBridge.disconnect` cierra la conexión y da de baja las herramientas,
+   * pero no publica un último estado, así que el mapa de salud se quedaba con la
+   * entrada del servidor borrado. En el Hub eso se veía como un servidor
+   * fantasma: en `ready`, con su botón de reconectar, y sin forma de sacarlo
+   * porque ya no tenía configuración detrás. La lista autoritativa es la de la
+   * base, no la memoria del runtime.
+   */
   mcpHealth(companyId: string): McpServerHealth[] {
     const runtime = this.companies.get(companyId);
-    return runtime ? [...runtime.health.values()] : [];
+    if (!runtime) return [];
+    const vigentes = new Set(this.store.listMcpServers(companyId).map((server) => server.id));
+    for (const serverId of runtime.health.keys()) {
+      if (!vigentes.has(serverId)) runtime.health.delete(serverId);
+    }
+    return [...runtime.health.values()];
   }
 
   async reconnectMcp(companyId: string, serverId: string): Promise<boolean> {
@@ -349,6 +364,12 @@ export class Runtime {
       saveApproval: (approval) => this.store.saveApproval(approval),
       saveLearning: (learning) => this.store.saveLearning(learning),
       saveRequest: (request) => this.store.saveRequest(request),
+      // Un especialista convocado en medio de una corrida es un rol de la
+      // empresa como cualquier otro: queda disponible para las siguientes.
+      saveRole: (role, department) => {
+        if (department) this.store.saveDepartment(department);
+        this.store.saveRole(role);
+      },
     });
 
     const ledger = new RunLedger(run.budgetUsd, (record) => {
@@ -374,6 +395,9 @@ export class Runtime {
       tools: runtime.tools,
       ledger,
       concurrency: this.env.agentConcurrency,
+      // Lo que la empresa produjo, para que un agente pueda **verlo**. Se presta
+      // en sólo lectura; producir sigue yendo por las herramientas del org.
+      dirDeTrabajo: this.exports.dirDeEmpresa(company.id),
       fechaHoy: () =>
         new Date().toLocaleDateString("es-AR", {
           day: "numeric",

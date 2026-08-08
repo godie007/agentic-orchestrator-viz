@@ -48,6 +48,19 @@ export interface ImagenGuion {
    * ninguna foto puede decir, y además no depende de ningún proveedor.
    */
   visual?: string;
+  /**
+   * El archivo es un **clip de video**, no una imagen fija.
+   *
+   * `![lo que se ve](video:capturas/demo.mp4)`. Existe porque hay cosas que una
+   * captura no puede mostrar: que la aplicación responde, que la pantalla se
+   * mueve, que alguien la está usando. Una foto de una interfaz demuestra que
+   * existe; un clip demuestra que funciona.
+   *
+   * Se marca en el guion y no se adivina por la extensión a propósito: el
+   * resolutor de rutas lo aplica el servidor, y el guion no debería tener que
+   * saber qué extensiones son video este mes.
+   */
+  clip?: boolean;
 }
 
 export interface Escena {
@@ -154,6 +167,14 @@ const comoImagen = (block: Extract<Block, { kind: "image" }>): ImagenGuion => {
   const src = block.src.trim();
   const visual = nombreDeVisual(src);
   if (visual) return { alt: block.alt, src, generar: false, visual };
+
+  // `video:` marca un clip. El prefijo se saca acá para que de la ruta en
+  // adelante todo el mundo vea un archivo común y corriente.
+  const clip = /^video:/i.test(src);
+  if (clip) {
+    return { alt: block.alt, src: src.replace(/^video:\s*/i, ""), generar: false, clip: true };
+  }
+
   const generar = /^generar$/i.test(src) || src === "";
   return { alt: block.alt, src: generar ? "generar" : src, generar };
 };
@@ -268,6 +289,91 @@ export function parseGuion(markdown: string): Guion {
 
   cerrar();
   return { titulo, escenas, personajes };
+}
+
+/** Pausas que separan lo que se escucha. Sin ellas el diálogo se atropella. */
+export const PAUSA = {
+  entreEscenas: 0.5,
+  entreDialogos: 0.34,
+  entreLineas: 0.24,
+  cola: 1.4,
+} as const;
+
+/** Una línea hablada, ya ubicada en el tiempo. */
+export interface LineaUbicada {
+  /** Vacío para la voz en off. */
+  personaje: string;
+  texto: string;
+  /** Su lugar en la lista de líneas del guion entero: identifica su audio. */
+  indice: number;
+  inicio: number;
+  duracion: number;
+}
+
+export interface EscenaUbicada {
+  escena: Escena;
+  lineas: LineaUbicada[];
+  inicio: number;
+  fin: number;
+}
+
+/**
+ * El reloj del guion: dónde empieza y termina cada escena.
+ *
+ * **La única fuente de verdad del tiempo son las duraciones medidas del audio**;
+ * todo lo que se ve se calcula a partir de ellas. Al revés —estirar el audio
+ * para que entre en una animación— el video se despega de lo que se escucha.
+ *
+ * Lo comparten los dos motores de render, el de ASS y el de láminas HTML. Que
+ * una escena empiece en el mismo instante en los dos no es una casualidad que
+ * haya que mantener a mano.
+ *
+ * `minimos` deja que quien llama exija un piso por escena —el render de ASS lo
+ * usa para que una escena con tres imágenes no las muestre como un parpadeo—.
+ * Se aplica durante el recorrido y no después, porque estirar una escena corre
+ * a todas las que siguen.
+ */
+export function ubicarEscenas(
+  guion: Guion,
+  duraciones: readonly number[],
+  minimos: readonly number[] = [],
+): { escenas: EscenaUbicada[]; total: number } {
+  const escenas: EscenaUbicada[] = [];
+  let cursor = 0;
+  let indice = 0;
+
+  for (const [orden, escena] of guion.escenas.entries()) {
+    const inicio = cursor;
+    const lineas: LineaUbicada[] = [];
+    for (let i = 0; i < escena.lineas.length; i++) {
+      const linea = escena.lineas[i]!;
+      const duracion = duraciones[indice] ?? 0;
+      lineas.push({
+        personaje: linea.kind === "dialogo" ? linea.personaje : "",
+        texto: linea.texto,
+        indice,
+        inicio: cursor,
+        duracion,
+      });
+      cursor += duracion;
+      if (i < escena.lineas.length - 1) {
+        cursor += linea.kind === "dialogo" ? PAUSA.entreDialogos : PAUSA.entreLineas;
+      }
+      indice++;
+    }
+    // Una escena sin nada hablado igual tiene que verse: se le da aire propio.
+    // La portada necesita más, porque suele no tener narración y con dos
+    // segundos el nombre de la empresa pasaba antes de poder leerlo.
+    if (lineas.length === 0) cursor += escena.esPortada ? 3.8 : 2.4;
+
+    const minimo = minimos[orden] ?? 0;
+    if (cursor - inicio < minimo) cursor = inicio + minimo;
+
+    escenas.push({ escena, lineas, inicio, fin: cursor });
+    cursor += PAUSA.entreEscenas;
+  }
+
+  return { escenas, total: cursor - PAUSA.entreEscenas + PAUSA.cola };
 }
 
 /** Todas las imágenes del guion, en orden: hay que resolverlas antes de filmar. */

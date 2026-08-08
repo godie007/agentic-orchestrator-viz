@@ -28,6 +28,36 @@ interface Connection {
   /** Timer de reintento pendiente, para poder cancelarlo al desconectar. */
   retryTimer: NodeJS.Timeout | null;
   closed: boolean;
+  /** Turnero del servidor: sus llamadas van de a una. Ver `crearFila`. */
+  fila: Fila;
+}
+
+/** Encola trabajo: devuelve el resultado de cada tarea, corriéndolas de a una. */
+export type Fila = <T>(tarea: () => Promise<T>) => Promise<T>;
+
+/**
+ * Un servidor MCP atiende **de a una llamada por vez**.
+ *
+ * El motor corre varios agentes en paralelo dentro de un ciclo y todos ven el
+ * mismo servidor. Con un servidor sin estado eso no molesta; con uno que maneja
+ * **un recurso compartido** rompe todo: dos agentes navegando el mismo navegador
+ * al mismo tiempo se pisan la pestaña, y el que llegó segundo lee la página del
+ * primero creyendo que es la suya. Es la peor clase de falla — no da error, da
+ * un dato equivocado con aspecto de correcto.
+ *
+ * La fila es **por servidor** y no global: dos servidores distintos siguen
+ * corriendo en paralelo. Lo que se serializa es el acceso a un mismo proceso,
+ * que es exactamente el recurso que no se puede compartir.
+ */
+export function crearFila(): Fila {
+  let ultima: Promise<unknown> = Promise.resolve();
+  return <T,>(tarea: () => Promise<T>): Promise<T> => {
+    // Se encadena tanto en éxito como en error: si una llamada falla y la fila
+    // se cortara, todos los que esperan turno se quedarían sin él.
+    const propia = ultima.then(tarea, tarea);
+    ultima = propia.catch(() => undefined);
+    return propia;
+  };
 }
 
 const MAX_RECONNECT_DELAY_MS = 60_000;
@@ -94,7 +124,14 @@ export class McpBridge {
       connectedAt: null,
       reconnectAttempts: 0,
     };
-    const conn: Connection = { server, client: null, health, retryTimer: null, closed: false };
+    const conn: Connection = {
+      server,
+      client: null,
+      health,
+      retryTimer: null,
+      closed: false,
+      fila: crearFila(),
+    };
     this.connections.set(server.id, conn);
     this.publish(conn);
 
@@ -231,6 +268,20 @@ export class McpBridge {
         `El servidor MCP "${conn.server.name}" no está conectado (estado: ${conn.health.status}). ` +
           `Reintentá más tarde o resolvé el problema desde el MCP Hub.`,
       );
+    }
+
+    return conn.fila(() => this.llamar(conn, toolName, qualifiedName, args, signal));
+  }
+
+  private async llamar(
+    conn: Connection,
+    toolName: string,
+    qualifiedName: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ) {
+    if (!conn.client) {
+      return fail(`El servidor MCP "${conn.server.name}" se desconectó mientras esperaba turno.`);
     }
 
     conn.health.invocations += 1;

@@ -61,7 +61,48 @@ export interface ChatRequest {
    * llamadas de un turno en el mismo lugar.
    */
   routing?: RoutingPreference;
+  /**
+   * Puente a las herramientas de coordinación del org, para los proveedores
+   * que corren su propio loop (Claude Code CLI) en vez de devolver `tool_calls`.
+   *
+   * Si está presente, el adaptador abre una sesión MCP antes de delegar y arma
+   * el `--mcp-config` + la allowlist de herramientas con prefijo `mcp__…`. El
+   * engine es quien implementa el servidor MCP (reside en su proceso y ejecuta
+   * sus propias `RegisteredTool`); este tipo es solo el contrato que consume el
+   * proveedor.
+   */
+  orgTools?: OrgToolsBridge;
   signal?: AbortSignal;
+}
+
+/** Sesión MCP abierta por el puente hacia las herramientas del org. */
+export interface OrgToolsSession {
+  /** Ruta del socket Unix donde el engine escucha el servidor MCP. */
+  socketPath: string;
+  /** Nombre del servidor en el `--mcp-config` (define el prefijo `mcp__<n>__`). */
+  serverName: string;
+  /** Nombres MCP completos de las herramientas expuestas (`mcp__orq__tool`). */
+  allowedTools: string[];
+  /**
+   * Directorio de salida de la empresa, para que el agente **vea** lo que produjo.
+   *
+   * Es la diferencia entre un diseñador que puede mirar la lámina que programó y
+   * uno que trabaja a ciegas: con esto, las herramientas nativas del CLI leen la
+   * previsualización, el PDF que subió una persona y sus propios archivos.
+   *
+   * Se entrega **de sólo lectura** (ver `claude-code.ts`): escribir sigue yendo
+   * por `write_output_file`, que es lo único que sanea la ruta segmento por
+   * segmento, anota la procedencia en el manifiesto y aplica la jerarquía de
+   * borrado. Un `cwd` con permiso de escritura saltearía las tres cosas.
+   */
+  cwd?: string;
+  /** Cierra la sesión: detiene el listen del socket y libera recursos. */
+  close(): Promise<void>;
+}
+
+/** Fábrica de sesiones: `open()` arranca un socket nuevo por delegación. */
+export interface OrgToolsBridge {
+  open(): Promise<OrgToolsSession>;
 }
 
 /** Cómo elegir entre los upstreams que sirven un mismo modelo. */
@@ -121,6 +162,19 @@ export interface LlmProvider {
   readonly id: ProviderId;
   /** Nombre legible para la UI. */
   readonly label: string;
+  /**
+   * Cuánto puede tardar una llamada de este proveedor, en milisegundos.
+   *
+   * El corte por defecto del motor está pensado para una API que contesta en
+   * segundos. `claude-code` no es eso: delega el turno entero al CLI, que corre
+   * su propio agent loop con sus herramientas, y dos minutos se le quedan cortos
+   * **siempre**. Sin esto, cada turno moría por tiempo justo cuando el agente
+   * estaba trabajando.
+   *
+   * Es una propiedad del proveedor y no de la corrida a propósito: quien
+   * configura una empresa no tiene por qué saber cuánto tarda cada backend.
+   */
+  readonly timeoutMs?: number;
   /** Catálogo de modelos con precios. Se cachea; `refresh` fuerza recarga. */
   listModels(refresh?: boolean): Promise<ModelInfo[]>;
   /** Verifica credenciales y conectividad sin gastar tokens de generación. */

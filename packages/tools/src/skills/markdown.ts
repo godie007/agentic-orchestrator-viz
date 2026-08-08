@@ -37,6 +37,9 @@ export function parseSpans(line: string): Span[] {
   // salvo por el `!`, así que la regla de enlaces las dejaba como
   // "!Un equipo (fotos/equipo.png)" — y en un video eso lo lee la voz en off.
   const limpio = line
+    // Un comentario en medio de un renglón se saca acá; el que ocupa su propio
+    // bloque lo descarta `parseMarkdown`. Los dos son notas de quien escribe.
+    .replace(/<!--[\s\S]*?-->/g, "")
     .replace(new RegExp(IMAGEN.source, "g"), "")
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1 ($2)")
     .replace(/`/g, "");
@@ -84,6 +87,24 @@ export function parseMarkdown(source: string): Block[] {
 
     if (trimmed === "") {
       cerrarParrafo();
+      continue;
+    }
+
+    // Un comentario no es para quien lee ni para quien escucha: es una nota de
+    // quien escribió el documento. Va **después** del bloque de código, para que
+    // un `<!-- -->` mostrado como ejemplo dentro de ``` siga siendo texto.
+    //
+    // Lo pagamos caro en un video: los agentes anotan cada escena con
+    // `<!-- nota de escena: diagrama de … -->` y, como un comentario suelto es
+    // un párrafo y un párrafo es voz en off, **el narrador las leía en voz
+    // alta** —signos incluidos— y estiraba la pieza cuarenta segundos.
+    if (trimmed.startsWith("<!--")) {
+      cerrarParrafo();
+      // Puede abrir y cerrar en el mismo renglón o abarcar varios. Lo que
+      // quede a la derecha del cierre se descarta con él: un comentario que
+      // comparte renglón con texto de verdad es una rareza, y tratarlo aparte
+      // costaría más de lo que arregla.
+      while (i < lines.length && !lines[i]!.includes("-->")) i++;
       continue;
     }
 

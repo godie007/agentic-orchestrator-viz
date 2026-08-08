@@ -124,6 +124,7 @@ describe("memoria de la empresa", () => {
       saveArtifact: () => {},
       saveApproval: () => {},
       saveRequest: () => {},
+    saveRole: () => {},
       saveLearning: (value) => saved.push(value),
     };
     const { role, run, config } = scenario();
@@ -204,6 +205,7 @@ describe("la lección sobrevive a la corrida", () => {
       saveArtifact: () => {},
       saveApproval: () => {},
       saveRequest: () => {},
+    saveRole: () => {},
       saveLearning: (value) => persisted.push(value),
     });
 

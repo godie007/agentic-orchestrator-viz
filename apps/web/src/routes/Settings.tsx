@@ -1,8 +1,20 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { providerIdSchema } from "@orq/shared";
 import type { ModelTier, Role } from "@orq/shared";
 import { api, type CompanyBundle } from "../api.js";
 import { Button, Empty, Field, Panel, Status, inputClass, money, peso } from "../lib/ui.js";
+
+/** Etiquetas legibles para el selector de proveedor (el id crudo como fallback). */
+const providerLabel: Record<(typeof providerIdSchema.options)[number], string> = {
+  openrouter: "OpenRouter",
+  anthropic: "Anthropic (API)",
+  openai: "OpenAI",
+  ollama: "Ollama (local)",
+  nvidia: "NVIDIA (free)",
+  "claude-sesion": "Claude (sesión)",
+  "claude-code": "Claude Code (suscripción)",
+};
 
 /**
  * Pantallas de apoyo: proveedores y modelos, diseñador de la empresa y costos.
@@ -852,9 +864,12 @@ function RoleEditor({
               }
               className={inputClass}
             >
-              {["openrouter", "anthropic", "openai", "ollama"].map((id) => (
+              {/* Sale del esquema, no de una lista a mano: la que había acá se
+                  quedó sin `nvidia` y sin `claude-sesion`, y un proveedor que no
+                  se puede elegir es un proveedor que no existe. */}
+              {providerIdSchema.options.map((id) => (
                 <option key={id} value={id}>
-                  {id}
+                  {providerLabel[id]}
                 </option>
               ))}
             </select>

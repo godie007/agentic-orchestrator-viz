@@ -23,6 +23,15 @@ export const providerIdSchema = z.enum([
   "openai",
   "ollama",
   "nvidia",
+  // Mismo Anthropic, pero autenticado con la sesión de `ant auth login` en vez
+  // de una API key del `.env`. Es un id aparte —y no una opción del anterior—
+  // porque un rol elige proveedor por id: así conviven los dos y le podés dar
+  // la sesión a un agente sin tocar a los demás.
+  "claude-sesion",
+  // Claude Code CLI oficial: el modelo corre del lado de Anthropic bajo la
+  // suscripción de claude.ai (no factura uso/año). Es un id aparte porque el
+  // agente no se autentica por variables: el CLI usa el login de la máquina.
+  "claude-code",
 ]);
 export type ProviderId = z.infer<typeof providerIdSchema>;
 

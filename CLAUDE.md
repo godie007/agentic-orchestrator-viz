@@ -127,6 +127,141 @@ voz alta los nombres de los demás. Lo que no entra en el alto útil **pasa de
 página** en vez de desbordarse por abajo del cuadro. Y **la viñeta de ffmpeg
 apaga los bordes**, que es justo donde vive el texto alineado a la izquierda.
 
+**Una empresa puede convocar gente que no tenía.** `convocar_especialista`
+incorpora un rol **en el acto**, sin esperar aprobación, y arranca en el ciclo
+siguiente: `RunState.incorporarRol` lo agrega al roster vivo y lo guarda como rol
+de la empresa, así que sobrevive a la corrida que lo creó. Es la diferencia entre
+una empresa que puede abordar un problema que no previó y una que sólo ejecuta el
+organigrama con el que arrancó.
+
+`request_new_role` sigue existiendo y no sobra: la diferencia no es de permisos
+sino de **tiempo**. Proponer y esperar a una persona es lo correcto para
+incorporar a alguien de forma permanente; convocar es para cuando el trabajo ya
+empezó, falta una capacidad concreta y esperar significa perder la corrida.
+
+**Los tres frenos son del ejecutor, no del prompt.** Sólo convoca quien tiene
+autoridad `executive`. **El convocado nace `executor`**, así que no puede
+convocar a su vez — sin eso un equipo se multiplica solo: cada especialista
+descubre que le falta otro y la corrida termina con treinta agentes hablándose
+entre ellos. Y hay un tope por corrida: si un encargo necesita más de cuatro
+capacidades que la empresa no tenía, el problema no es de gente, es que nadie
+entendió el encargo, y sumar agentes lo empeora porque cada uno agrega mensajes
+que los demás tienen que leer.
+
+**Convocar reparte capacidades, no las inventa**: sólo se otorgan herramientas
+que ya están en el catálogo del proyecto. Una que no existe **se nombra en la
+respuesta** en vez de descartarse en silencio — un especialista que nace sin la
+herramienta que se le prometió gasta su primer turno buscándola, y desde afuera
+parece que no entendió la tarea.
+
+**Un servidor MCP se da de alta pegando su configuración, desde el Hub.** La
+capacidad estaba entera desde el principio —descubrimiento, salud, reconexión,
+probador— y sin embargo MCP no se usaba: no había forma de *agregar* un servidor
+sin un `curl`, porque `api.ts` no tenía los métodos y el Hub no tenía formulario.
+`parsearConfigMcp` (`packages/shared/src/mcp-config.ts`) acepta el bloque
+`{"mcpServers": {…}}` que publica cada servidor en su README —el mismo que ya
+tenés pegado en Claude o en Cursor— y también el mapa a secas, porque los README
+se reparten entre las dos formas.
+
+**Al importar, un secreto literal se descarta con un aviso.** El formato del
+ecosistema mete el valor adentro del JSON (`"env": {"GITHUB_TOKEN": "ghp_…"}`) y
+acá se guarda **la referencia**: el nombre de la variable, nunca el valor. Un
+valor que parece un nombre (`GITHUB_TOKEN`, `${GITHUB_TOKEN}`) entra; uno que
+parece un secreto no entra y se explica por qué. Ante la duda gana no guardar: un
+falso negativo cuesta escribir el nombre a mano, un falso positivo escribe una
+credencial en la base y rompe la garantía de que una empresa exportada a JSON no
+lleva credenciales adentro. Descartarlo en silencio sería peor que no importar —
+el servidor arrancaría sin credencial y el error aparecería lejos de su causa.
+
+**La lista autoritativa de servidores es la base, no la memoria del runtime.**
+`McpBridge.disconnect` cierra la conexión y da de baja las herramientas pero no
+publica un último estado, así que el mapa de salud se quedaba con la entrada del
+servidor borrado: en el Hub se veía un **servidor fantasma** en `ready`, con su
+botón de reconectar y sin forma de sacarlo porque ya no tenía configuración
+detrás. `Runtime.mcpHealth` filtra por lo que sigue configurado, y la UI hace lo
+mismo con lo que llega por SSE, que conserva el último estado de algo que ya no
+existe.
+
+**Un agente que produce algo visual tiene que poder verlo.** El motor le presta
+al proveedor el directorio de salida de la empresa (`TurnDeps.dirDeTrabajo`, que
+inyecta el servidor igual que la fecha) y `claude-code` lo usa como directorio de
+trabajo del CLI: así el diseñador abre con sus propias herramientas la
+previsualización de la lámina que programó, en vez de decidir a ciegas sobre un
+archivo que sólo puede describir de memoria. "No reportó errores" no es lo mismo
+que "se ve bien".
+
+**Se presta en sólo lectura, y eso no es una precaución de más.** Con el
+directorio de la empresa montado, al CLI se le otorga únicamente `Read`, `Glob`,
+`Grep` y las web (`ALLOWED_TOOLS_LECTURA`): sin `Write`, sin `Edit` y sin `Bash`.
+Producir sigue yendo por `write_output_file`, que es lo único que sanea la ruta
+segmento por segmento, anota la procedencia en `.orq-generado.json` y aplica la
+jerarquía de borrado. Un `Write` del CLI saltearía las tres garantías de una sola
+vez y encima sin dejar rastro en la traza. La regla se arma en `construirArgs`,
+que está exportada justo para poder fijarla con un test: una regla de seguridad
+que sólo vive adentro de un `spawn` no se puede verificar.
+
+**`inspeccionar_medio` es `check_activity` aplicado al disco.** Mide el archivo
+—duración, resolución, si tiene pista de audio, cuánto pesa— para que un rol
+verifique lo que produjo en vez de repetir lo que dijo la herramienta que lo
+produjo. Lo pagamos: la realizadora informó "76 segundos" porque eso decía el
+mensaje de su propia exportación, y cuando el render leía de más el video salía de
+131 sin que nadie de la empresa pudiera notarlo hasta que una persona lo abría. Un
+dato que sólo se puede repetir no es una verificación. Avisa fuerte cuando un
+video salió **sin pista de audio**, que es la falla que más cuesta ver: se ve
+perfecto y se manda mudo.
+
+**Hay un segundo motor de video, y no reemplaza al primero.** `export_video`
+dibuja todo con ffmpeg y no necesita nada instalado: sigue siendo lo correcto
+para un guion que es texto y viñetas. `export_video_estudio` (`skills/estudio.ts`)
+compone **cada escena como una lámina HTML** y la revela con el navegador. Existe
+por dos razones que el motor de ASS no puede cubrir: un diagrama que se dibuja
+solo, una retícula de tarjetas o una cifra grande no se maquetan en ASS; y sobre
+todo **HTML es el lenguaje que un agente sabe programar**, así que las láminas se
+le pueden encargar a un rol con capacidad de escribir código, que las prueba con
+`revisar_lamina` y las corrige. Esto revisa la nota de arriba sobre el navegador
+headless: cambiar 150 MB por un `<div>` seguía siendo mal negocio para seis
+placas de texto, no para esto.
+
+**No se instala ningún navegador**: `skills/chrome.ts` maneja el Chrome que ya
+está en la máquina por CDP, con el `WebSocket` nativo de Node — cero dependencias
+nuevas, la misma regla que ffmpeg y Kokoro. Si no hay navegador, las dos
+habilidades **no se registran**, como cualquier otra que no se puede cumplir.
+
+**El cuadro se calcula, no se graba.** Se pausan todas las animaciones y se les
+fija el tiempo cuadro por cuadro (`Animation.currentTime`): el resultado es
+idéntico en cualquier máquina, y no depende de que la captura vaya al día. De ahí
+salen tres reglas del kit que no son estéticas: **nada de bucles infinitos** —no
+se pueden filmar sin capturar el video entero—, nada de `<animate>` de SVG —SMIL
+no aparece en `getAnimations()`, así que no se puede adelantar— y nada de pedidos
+a la red. Y se captura **sólo la entrada**: una lámina entra en dos segundos y
+después se queda quieta, así que filmar los quince restantes serían 450 PNG
+idénticos. Lo que evita que la pantalla se vea muerta es que las láminas son
+**transparentes** y el fondo lo sigue generando ffmpeg, moviéndose por detrás.
+
+**Las dos salidas comparten lo que no puede divergir**: el reloj (`ubicarEscenas`
+en `guion.ts`), la voz, el catálogo de íconos y la mezcla con la cama musical
+(`sonido.ts`). Es la misma lección de los íconos del deck: un segundo set
+dibujado aparte se desincroniza a la primera corrección. Lo único distinto entre
+los motores es cómo se dibuja el cuadro.
+
+**Una lámina se ata a su escena por el número del nombre** (`01-portada.html`),
+no por un campo del guion: el guion ya dice el orden, y pedirle además que nombre
+archivos es pedirle que mantenga dos listas sincronizadas. La escena sin lámina
+propia se maqueta con la plantilla del sistema (`tema.ts`), que usa exactamente
+las mismas clases que le pedimos al agente — así un guion sin una sola línea de
+HTML igual sale filmado, y una lámina programada se ve como una mejora de eso y
+no como otra cosa.
+
+**Las instrucciones de los agentes están en inglés; el producto habla
+castellano.** En el seed del estudio (`scripts/seed-estudio-codytion.ts`) y en la
+guía del kit (`estudio/GUIA.md`), lo que es especificación técnica larga va en
+inglés porque un modelo la sigue con más precisión en el idioma en el que se
+entrenó mayoritariamente. Lo que **sale** —guion, texto en pantalla, voz— es
+castellano rioplatense, y cada instrucción lo dice explícitamente arriba de todo:
+sin esa línea, una instrucción en inglés arrastra la respuesta al inglés y el
+video termina hablando en otro idioma. Los nombres de clase del kit siguen en
+castellano: son la API, no instrucciones.
+
 **Los íconos se dibujan, no se instalan** (`skills/iconos.ts`). `:objetivo:` al
 empezar una viñeta o un `##` mete un trazo vectorial de ASS —el mismo `{\p1}` de
 la regla y la barra de progreso—, así que escalan sin perder nitidez, toman el
@@ -448,6 +583,26 @@ un `.png` que subió una persona, vive en una ruta fija y no se vuelve a generar
 solo: un `kind: "all"` se lo lleva. Y `VACUUM` va suelto y al final — SQLite no
 lo admite dentro de una transacción—, porque sin compactar el archivo pesa lo
 mismo después de purgar y parece que la limpieza no hizo nada.
+
+**`claude-sesion` es el mismo adaptador de Anthropic con otra credencial.**
+`ClaudeSesionProvider` existe como `providerId` aparte —y no como una opción de
+`anthropic`— porque un rol elige proveedor **por id**: separados, le podés dar la
+sesión de `ant auth login` a un agente y la API key al resto. Tres cosas que no
+se ven leyendo el archivo: el token va como `Authorization: Bearer` **y** exige
+el beta `oauth-2025-04-20` (sin él, `/v1/messages` rechaza un token válido); el
+SDK instalado todavía no lee el perfil de `~/.config/anthropic/`, así que hay que
+exportar `ANTHROPIC_AUTH_TOKEN` a mano —el cliente se construye vacío para que el
+día que el SDK lo soporte ande solo—; y una **`ANTHROPIC_API_KEY` vacía gana
+igual** su lugar en la cadena y autentica en blanco, por eso `buildRegistry` la
+borra del entorno al prender la sesión. No es la suscripción de claude.ai: sigue
+facturando como API.
+
+**Sin precios no hay tope de gasto.** La API de Anthropic no los publica, así que
+`computeCost` deja `costUsd` en 0, `spentUsd` no crece y **`budgetUsd` nunca se
+dispara**: con `anthropic` y `claude-sesion` el único freno del orquestador es
+`maxTicks`. Es la misma causa por la que los tiers no resuelven y hay que fijar
+`modelSlug`. Medido en una corrida real: 4 llamadas, 33k tokens de entrada,
+`spentUsd: 0.0000`. Para control de gasto fino, el mismo modelo por OpenRouter.
 
 **Una empresa creada por la API tiene que sembrar sus herramientas**
 (`Runtime.sembrarHerramientas`, en `POST /api/companies`). Es el mismo problema

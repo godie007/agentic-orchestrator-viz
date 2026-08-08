@@ -82,10 +82,14 @@ soportado para un servidor **es la API key**, no la suscripción de nadie.
 > Si esto alguna vez importa para una decisión de producto, hay que leer los ToS,
 > no este archivo.
 
-**Lo que sí funciona hoy:** correr el orquestador contra tu propio perfil de
-`ant auth login`, sin API key en `.env`. Eso es un adaptador nuevo en
-`packages/llm/src/adapters/` que construya el cliente **sin argumentos** y deje
-que la cadena resuelva sola. Ver [[Cómo agregar un proveedor LLM]].
+**Lo que sí funciona hoy — y ya está implementado.** El proveedor
+`claude-sesion` (`ClaudeSesionProvider`) corre contra tu propia sesión de `ant`,
+sin clave estática en `.env`, y convive con los otros: se lo asignás a un rol y
+los demás siguen como estaban. Detalle en [[Capa LLM y tiers]].
+
+Es la demostración práctica de que la frontera `LlmProvider` era la decisión
+correcta: **una credencial completamente distinta entró como un adaptador y un
+`providerId`, sin tocar el motor**.
 
 ### Usar el Agent SDK con API key — rechazada
 
@@ -146,7 +150,7 @@ concretas:
 - **Si la empresa se estandariza en un solo proveedor**, el Tool Runner pasa a
   ser la opción sensata: mismo control por turno, mucho menos código propio.
 - **Si en algún momento hace falta un proveedor "suscripción Claude"**, es un
-  archivo nuevo en `packages/llm/src/adapters/` y nada más — la interfaz ya está.
+  adaptador y nada más — la interfaz ya está, y `claude-sesion` es la prueba.
 
 Lo que **no** se revisa por costo de mantenimiento: el loop propio ya está
 escrito y sus cortes están medidos contra corridas reales.

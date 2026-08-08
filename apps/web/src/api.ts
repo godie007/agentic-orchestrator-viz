@@ -270,6 +270,19 @@ export const api = {
     request<{ ok: boolean }>(`/companies/${companyId}/mcp/${serverId}/reconnect`, {
       method: "POST",
     }),
+  /** Alta de un servidor MCP. El id lo pone el servidor. */
+  crearMcpServer: (companyId: string, server: Omit<McpServer, "id" | "companyId">) =>
+    request<McpServer>(`/companies/${companyId}/mcp-servers`, {
+      method: "POST",
+      body: JSON.stringify(server),
+    }),
+  actualizarMcpServer: (companyId: string, id: string, cambios: Partial<McpServer>) =>
+    request<McpServer>(`/companies/${companyId}/mcp-servers/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(cambios),
+    }),
+  borrarMcpServer: (companyId: string, id: string) =>
+    request<{ ok: boolean }>(`/companies/${companyId}/mcp-servers/${id}`, { method: "DELETE" }),
   probeTool: (companyId: string, toolName: string, args: Record<string, unknown>) =>
     request<{ ok: boolean; content: string }>(`/companies/${companyId}/mcp/probe`, {
       method: "POST",

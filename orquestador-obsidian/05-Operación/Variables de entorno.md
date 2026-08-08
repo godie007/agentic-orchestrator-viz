@@ -22,6 +22,24 @@ Configurá al menos uno.
 | `OPENAI_API_KEY` | — | directo |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | local, costo cero. Vacío desactiva el proveedor |
 | `NVIDIA_API_KEY` | — | build.nvidia.com, sin costo con límite de tasa |
+| `ORQ_CLAUDE_SESION` | — | prende **Claude (sesión)** como proveedor aparte. Es un interruptor (`1` / `true` / `si`), no una credencial |
+| `ANTHROPIC_AUTH_TOKEN` | — | token OAuth de `ant auth print-credentials --access-token`. **De corta vida**: cuando venza, volvé a exportarlo |
+| `ORQ_CLAUDE_CODE` | `1` | prende **Claude Code (suscripción)**: delega al CLI oficial, que corre con tu plan Pro/Max y **no factura uso**. Exige `claude` instalado y logueado |
+| `CLAUDE_CODE_MODEL` | `sonnet` | alias del CLI (`haiku` / `sonnet` / `opus`) |
+| `CLAUDE_CODE_WORKDIR` | `./data/claude-code` | carpeta donde el agente deja sus archivos (se crea sola) |
+| `ORQ_SOCKET` | (interno) | ruta del socket Unix que usa el puente MCP del org para el turno `claude-code`. La fija el engine por turno; no se configura |
+
+> [!danger] La variable `ANTHROPIC_MODEL` desvía a facturación por uso
+> Exportarla en el shell (`export ANTHROPIC_MODEL="claude-haiku-4-5-…"`) fuerza
+> al CLI a un modelo de **billing por créditos** en vez de tu suscripción, y le
+> fija el modelo ignorando el de `settings.json`. Para usar el plan Pro/Max con
+> `claude-code`, esa variable debe estar **ausente** del entorno.
+
+> [!danger] Una `ANTHROPIC_API_KEY` vacía pisa la sesión
+> Gana su lugar en la cadena de credenciales del SDK aunque no tenga valor, y
+> autentica con una clave en blanco → 401 sin explicación. `.env.example` la trae
+> vacía. Al prender `ORQ_CLAUDE_SESION`, el orquestador la saca del entorno.
+> Ver [[Capa LLM y tiers]].
 
 ## Servidor
 

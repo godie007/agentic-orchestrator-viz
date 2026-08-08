@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { parseMarkdown, parseSpans, spansToText } from "./markdown.js";
-import { cuerpoSinTituloRepetido, renderDocx, renderPdf } from "./render.js";
-import { createSkillTools, type SkillStorage, sinVersionEnNombre } from "./index.js";
+import {
+  cuerpoSinTituloRepetido,
+  renderDocx,
+  renderPdf,
+  sinEmoji,
+  sinEmojiRecortado,
+} from "./render.js";
+import { buscarChrome, createSkillTools, type SkillStorage, sinVersionEnNombre } from "./index.js";
 import type { AgentWorkspace, ToolContext } from "../types.js";
 
 /**
@@ -97,6 +103,53 @@ describe("markdown a bloques", () => {
     const blocks = parseMarkdown(["```", "# esto no es un título", "- ni una lista", "```"].join("\n"));
     expect(blocks).toHaveLength(1);
     expect(blocks[0]).toMatchObject({ kind: "code" });
+  });
+
+  it("sacar emojis no puede comerse el espacio que separa una negrita", () => {
+    // Un párrafo con negrita se escribe como tramos encadenados y el espacio
+    // que los separa vive en el borde de cada tramo. Recortando por tramo, el
+    // PDF salía "terminó55,8% más rápido" en todos los documentos con un dato
+    // destacado, que son casi todos.
+    expect(sinEmoji("El grupo terminó ")).toBe("El grupo terminó ");
+    expect(sinEmoji(" y listo.")).toBe(" y listo.");
+  });
+
+  it("pero un texto completo sí se recorta: ahí el borde no separa nada", () => {
+    expect(sinEmojiRecortado("  Título con espacios  ")).toBe("Título con espacios");
+  });
+
+  it("los emojis se van igual, y el hueco que dejan no queda doble", () => {
+    // Las fuentes estándar del PDF usan WinAnsi: un emoji sale como mojibake.
+    expect(sinEmoji("Listo ✅ para revisar")).toBe("Listo para revisar");
+    expect(sinEmojiRecortado("✅ Sí")).toBe("Sí");
+  });
+
+  it("descarta un comentario suelto: no es para quien lee ni para quien escucha", () => {
+    // Costó cuarenta segundos de video: los agentes anotan cada escena con
+    // `<!-- nota de escena: … -->`, y como un comentario suelto es un párrafo y
+    // un párrafo es voz en off, el narrador las leía en voz alta.
+    const blocks = parseMarkdown("Esto se dice.\n\n<!-- nota: diagrama acá -->\n\nEsto también.");
+    expect(blocks).toHaveLength(2);
+    expect(blocks.every((b) => JSON.stringify(b).includes("nota:") === false)).toBe(true);
+  });
+
+  it("descarta un comentario que abarca varios renglones", () => {
+    const blocks = parseMarkdown("Uno.\n\n<!-- abre\nsigue\ncierra -->\n\nDos.");
+    expect(blocks).toHaveLength(2);
+    expect(JSON.stringify(blocks)).not.toContain("sigue");
+  });
+
+  it("saca un comentario que comparte renglón con texto", () => {
+    const blocks = parseMarkdown("Hola <!-- nota interna --> mundo.");
+    expect(spansToText((blocks[0] as { spans: { text: string; bold: boolean }[] }).spans)).toBe(
+      "Hola  mundo.",
+    );
+  });
+
+  it("un comentario mostrado como ejemplo dentro de ``` sigue siendo texto", () => {
+    const blocks = parseMarkdown(["```", "<!-- así se anota -->", "```"].join("\n"));
+    expect(blocks[0]).toMatchObject({ kind: "code" });
+    expect(JSON.stringify(blocks)).toContain("así se anota");
   });
 });
 
@@ -287,20 +340,35 @@ describe("herramienta de exportación", () => {
   const skills = createSkillTools(storage);
 
   it("registra exportar, listar y borrar, todas con origen propio", () => {
-    expect(skills.map((skill) => skill.name).sort()).toEqual([
-      "delete_files",
-      "export_docx",
-      "export_pdf",
-      "export_slides",
-      "export_video",
-      "list_output",
-      "write_output_file",
-    ]);
+    // Las que no dependen de nada instalado están siempre.
+    expect(skills.map((skill) => skill.name).sort()).toEqual(
+      expect.arrayContaining([
+        "delete_files",
+        "export_docx",
+        "export_pdf",
+        "export_slides",
+        "export_video",
+        "list_output",
+        "write_output_file",
+      ]),
+    );
     expect(skills.every((skill) => skill.origin === "skill")).toBe(true);
     // Las que escriben o borran no pueden correr en paralelo como las de lectura.
     expect(skills.find((s) => s.name === "export_docx")?.readOnly).toBe(false);
     expect(skills.find((s) => s.name === "delete_files")?.readOnly).toBe(false);
     expect(skills.find((s) => s.name === "list_output")?.readOnly).toBe(true);
+  });
+
+  it("el motor de estudio se registra sólo si hay navegador", () => {
+    // La regla de siempre: una habilidad que no se puede cumplir no se ofrece,
+    // porque el agente gasta turnos intentándola. Y el test no puede exigir un
+    // Chrome instalado, o falla en la máquina de quien no lo tiene.
+    const deEstudio = skills
+      .map((skill) => skill.name)
+      .filter((nombre) => nombre === "export_video_estudio" || nombre === "revisar_lamina");
+    expect(deEstudio.sort()).toEqual(
+      buscarChrome() ? ["export_video_estudio", "revisar_lamina"] : [],
+    );
   });
 
   it("exporta a un archivo por entregable, sin la versión en el nombre", async () => {

@@ -592,3 +592,52 @@ describe("reparto de voces", () => {
     }
   });
 });
+
+/**
+ * Un clip demuestra lo que una captura no puede: que la aplicación responde.
+ * `video:` lo marca en el guion en vez de adivinarse por la extensión — el guion
+ * no debería tener que saber qué extensiones son video este mes.
+ */
+describe("clips de video", () => {
+  it("reconoce video: y deja la ruta limpia", () => {
+    const guion = parseGuion(
+      ["# Demo", "", "## La plataforma", "", "Mirala funcionando.", "", "![el tablero](video:capturas/demo.mp4)"].join("\n"),
+    );
+
+    const imagen = guion.escenas[1]?.imagenes[0];
+    expect(imagen?.clip).toBe(true);
+    expect(imagen?.src).toBe("capturas/demo.mp4");
+    expect(imagen?.generar).toBe(false);
+    expect(imagen?.alt).toBe("el tablero");
+  });
+
+  it("una imagen común sigue sin ser clip", () => {
+    const guion = parseGuion(
+      ["# Demo", "", "## Escena", "", "Texto.", "", "![una foto](fotos/taller.jpg)"].join("\n"),
+    );
+    const imagen = guion.escenas[1]?.imagenes[0];
+    expect(imagen?.clip).toBeUndefined();
+    expect(imagen?.src).toBe("fotos/taller.jpg");
+  });
+
+  it("no confunde `video:` con un visual dibujado ni con generar", () => {
+    const guion = parseGuion(
+      [
+        "# Demo", "", "## Escena", "", "Texto.", "",
+        "![un flujo](visual:flujo)", "", "![algo que no existe](generar)",
+      ].join("\n"),
+    );
+    const [visual, generada] = guion.escenas[1]?.imagenes ?? [];
+    expect(visual?.clip).toBeUndefined();
+    expect(visual?.visual).toBe("flujo");
+    expect(generada?.clip).toBeUndefined();
+    expect(generada?.generar).toBe(true);
+  });
+
+  it("tolera espacios después del prefijo", () => {
+    const guion = parseGuion(
+      ["# Demo", "", "## Escena", "", "Texto.", "", "![x](video: capturas/demo.mp4)"].join("\n"),
+    );
+    expect(guion.escenas[1]?.imagenes[0]?.src).toBe("capturas/demo.mp4");
+  });
+});

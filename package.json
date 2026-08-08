@@ -24,7 +24,9 @@
     "db:estudio": "tsx --env-file-if-exists=.env scripts/seed-estudio-codytion.ts",
     "musica:cama": "tsx --env-file-if-exists=.env scripts/generar-cama.ts",
     "check:llm": "tsx --env-file-if-exists=.env scripts/check-llm.ts",
-    "check:models": "tsx --env-file-if-exists=.env scripts/check-models.ts"
+    "check:models": "tsx --env-file-if-exists=.env scripts/check-models.ts",
+    "db:inspia": "tsx --env-file-if-exists=.env scripts/seed-inspia-lanzamiento.ts",
+    "db:observatorio": "tsx --env-file-if-exists=.env scripts/seed-observatorio-ia.ts"
   },
   "auditNotes": {
     "GHSA-frvp-7c67-39w9": "npm audit reporta @hono/node-server <2.0.5 (path traversal en serve-static, solo Windows), arrastrado por @modelcontextprotocol/sdk. No es alcanzable: el SDK solo referencia hono desde dist/esm/server/ y dist/esm/examples/server/, y este proyecto importa exclusivamente el lado cliente (client/index, client/stdio, client/streamableHttp) — verificado con grep sobre el paquete instalado. No se aplica un override porque la corrección está en la línea 2.x y el SDK depende de ^1.x: forzar ese salto de major puede romper el SDK, un riesgo real frente a una vulnerabilidad inalcanzable. Revisar al subir @modelcontextprotocol/sdk (última revisión: 1.29.0)."

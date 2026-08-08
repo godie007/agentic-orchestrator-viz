@@ -718,3 +718,95 @@ describe("send_message: uno por persona hasta que conteste", () => {
     expect(enviados).toEqual(["rol_3"]);
   });
 });
+
+/**
+ * Convocar a un especialista es la capacidad más peligrosa del set: crea gente.
+ * Los frenos están en el ejecutor y no en el prompt, así que se prueban acá.
+ */
+describe("convocar_especialista", () => {
+  const convocar = tool("convocar_especialista");
+
+  const workspaceCon = (overrides: Partial<AgentWorkspace> = {}): AgentWorkspace =>
+    ({
+      roles: [],
+      departments: [],
+      tools: [
+        { id: "tol_1", name: "export_pdf" },
+        { id: "tol_2", name: "mcp__n8n__create_workflow" },
+      ],
+      especialistasConvocados: () => 0,
+      incorporarRol: (input: { name: string; title: string; toolIds: string[] }) => ({
+        id: "rol_nuevo",
+        name: input.name,
+        title: input.title,
+        toolIds: input.toolIds,
+      }),
+      ...overrides,
+    }) as unknown as AgentWorkspace;
+
+  const con = (workspace: AgentWorkspace, actor: Partial<ToolContext["actor"]> = {}): ToolContext =>
+    ({ ...ctx, workspace, actor: { ...ctx.actor, ...actor } }) as ToolContext;
+
+  const args = {
+    name: "Marta Sosa",
+    title: "Ingeniera de automatización",
+    department: "Automatización",
+    system_prompt: "Construye y valida workflows.",
+    reason: "Nadie sabe manejar n8n.",
+    tools: ["mcp__n8n__create_workflow"],
+  };
+
+  it("un ejecutor no puede convocar: si no, el equipo se multiplica solo", async () => {
+    // El convocado nace `executor` justamente para que no pueda convocar a su
+    // vez. Sin esta guardia, cada especialista descubre que le falta otro.
+    const resultado = await convocar.execute(args, con(workspaceCon(), { authority: "executor" }));
+    expect(resultado.ok).toBe(false);
+    expect(resultado.content).toContain("request_new_role");
+  });
+
+  it("un manager tampoco: lo propone y quien decide lo aprueba", async () => {
+    const resultado = await convocar.execute(args, con(workspaceCon(), { authority: "manager" }));
+    expect(resultado.ok).toBe(false);
+  });
+
+  it("quien decide por la empresa sí, y el especialista queda con sus herramientas", async () => {
+    const resultado = await convocar.execute(args, con(workspaceCon()));
+    expect(resultado.ok).toBe(true);
+    expect(resultado.content).toContain("Marta Sosa");
+    expect(resultado.content).toContain("mcp__n8n__create_workflow");
+  });
+
+  it("hay un tope por corrida, y el mensaje dice qué revisar en vez de repetirlo", async () => {
+    const lleno = workspaceCon({ especialistasConvocados: () => 4 });
+    const resultado = await convocar.execute(args, con(lleno));
+    expect(resultado.ok).toBe(false);
+    expect(resultado.content).toContain("tope");
+  });
+
+  it("no se puede duplicar a alguien que ya está en el equipo", async () => {
+    const conMarta = workspaceCon({
+      roles: [{ name: "marta sosa" }] as unknown as AgentWorkspace["roles"],
+    });
+    const resultado = await convocar.execute(args, con(conMarta));
+    expect(resultado.ok).toBe(false);
+    expect(resultado.content).toContain("send_message");
+  });
+
+  it("una herramienta que no existe se nombra, no se descarta en silencio", async () => {
+    // Un especialista que nace sin la herramienta que se le prometió gasta su
+    // primer turno buscándola, y desde afuera parece que no entendió la tarea.
+    const resultado = await convocar.execute(
+      { ...args, tools: ["mcp__n8n__create_workflow", "inventada_por_el_modelo"] },
+      con(workspaceCon()),
+    );
+    expect(resultado.ok).toBe(true);
+    expect(resultado.content).toContain("inventada_por_el_modelo");
+    expect(resultado.content).toContain("no existe");
+  });
+
+  it("sin herramientas lo dice, para que quien convoca se lo asigne", async () => {
+    const resultado = await convocar.execute({ ...args, tools: [] }, con(workspaceCon()));
+    expect(resultado.ok).toBe(true);
+    expect(resultado.content).toContain("coordinación");
+  });
+});

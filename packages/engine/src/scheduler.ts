@@ -29,6 +29,13 @@ export interface OrchestratorDeps {
    * pasan y así quedan deterministas. Ver `TurnDeps.fechaHoy`.
    */
   fechaHoy?: () => string;
+  /**
+   * Directorio de salida de la empresa. Ver `TurnDeps.dirDeTrabajo`.
+   *
+   * Es un valor y no una función: el directorio de una empresa no cambia
+   * durante una corrida, a diferencia de la fecha.
+   */
+  dirDeTrabajo?: string;
   onRunUpdate?: (run: Run) => void;
 }
 
@@ -383,6 +390,7 @@ export class Orchestrator {
             objective: this.run.objective,
             maxTicks: this.run.maxTicks,
             ...(this.deps.fechaHoy ? { fechaHoy: this.deps.fechaHoy() } : {}),
+            ...(this.deps.dirDeTrabajo ? { dirDeTrabajo: this.deps.dirDeTrabajo } : {}),
             ...(this.abort ? { signal: this.abort.signal } : {}),
           });
           // El contador se reinicia en cuanto hace algo: lo que se persigue es

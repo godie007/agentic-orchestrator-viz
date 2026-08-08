@@ -19,6 +19,15 @@ graph TD
 > puede pasarse del tope antes de que se detecte. **Configurá también un límite
 > en el dashboard de tu proveedor.**
 
+> [!danger] Con `anthropic` y `claude-sesion`, la capa 2 no existe
+> La API de Anthropic no publica precios, así que `computeCost` deja `costUsd`
+> en **0**, `spentUsd` no crece y **`budgetUsd` nunca se dispara**. Medido: 4
+> llamadas y 33k tokens de entrada, `spentUsd: 0.0000`.
+>
+> Con esos dos proveedores el único freno del lado del orquestador es
+> **`maxTicks`**. Si te importa el control de gasto, corré el mismo modelo por
+> OpenRouter. Ver [[Capa LLM y tiers]].
+
 ## El ledger
 
 `packages/llm/src/ledger.ts` → `RunLedger`. Por llamada registra:

@@ -21,10 +21,18 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { parseGuion, type Escena, type Guion, type ImagenGuion } from "./guion.js";
+import {
+  PAUSA,
+  parseGuion,
+  ubicarEscenas,
+  type Escena,
+  type Guion,
+  type ImagenGuion,
+} from "./guion.js";
 import { iconoAss } from "./iconos.js";
 import { visualAss, type Tinte } from "./visuales.js";
 import { elegirMusica } from "./musica.js";
+import { construirSonido } from "./sonido.js";
 import { crearNarrador, type Motor } from "./narracion.js";
 import type { DocumentMeta } from "./render.js";
 
@@ -121,27 +129,37 @@ const PISO = 940;
  * velo oscuro que las sostiene.
  */
 const PANEL = { x: 1096, y: 214, ancho: 644, alto: 620 } as const;
-const ANCHO_CON_IMAGEN = PANEL.x - MARGEN - 72;
+
+/**
+ * El hueco de un **clip**, más ancho y en 16:9.
+ *
+ * Una foto se recorta para llenar el panel, así que le da igual la proporción.
+ * Un clip no: se encaja entero, y una grabación de pantalla 16:9 metida en un
+ * panel casi cuadrado usaba 644×362 de los 644×620 disponibles — un tercio del
+ * alto desperdiciado en barras negras, con la aplicación diminuta. Este hueco
+ * tiene la proporción de la grabación, así que la llena, y crece hacia la
+ * izquierda porque a la derecha ya toca el margen.
+ *
+ * El borde derecho coincide con el del panel (1740) para que las dos clases de
+ * escena queden alineadas entre sí.
+ *
+ * Cuánto crece hacia la izquierda es un equilibrio, no un máximo: con el hueco
+ * en x=760 el clip se veía enorme, pero a la columna de texto le quedaban 508px
+ * y un párrafo de voz en off de treinta y pico de palabras **se desbordaba por
+ * abajo del cuadro**. En x=900 el clip sigue teniendo casi el doble de área que
+ * el panel de una foto y al texto le quedan 648px, que es lo que necesita.
+ */
+const PANEL_CLIP = { x: 900, y: 304, ancho: 840, alto: 473 } as const;
+
+const anchoDeTexto = (hueco: { x: number }): number => hueco.x - MARGEN - 72;
+const ANCHO_CON_IMAGEN = anchoDeTexto(PANEL);
+const ANCHO_CON_CLIP = anchoDeTexto(PANEL_CLIP);
 
 /** Cuánto se agranda la fuente de la imagen antes de moverla, para que no pixele. */
 const SOBREMUESTREO = { panel: 1.5, completa: 1.25 } as const;
 
 /** El fundido de entrada y salida de cada imagen, en segundos. */
 const FUNDIDO_IMAGEN = 0.55;
-
-/**
- * La cama, medida en sonoridad y no en volumen.
- *
- * Un `volume=0.22` fijo no significa nada: una pista comprada y masterizada
- * llega a −14 LUFS y una sintetizada acá al lado a −24, así que el mismo número
- * deja una inaudible y la otra encima de la voz. Se normaliza a una sonoridad
- * objetivo y recién ahí se la acuesta bajo la narración: así **cualquier** pista
- * que dejes en la biblioteca suena igual de presente.
- */
-const MUSICA = { lufs: -26, entrada: 2.5, salida: 3.5 } as const;
-
-/** Pausas que separan lo que se escucha. Sin ellas el diálogo se atropella. */
-const PAUSA = { entreEscenas: 0.5, entreDialogos: 0.34, entreLineas: 0.24, cola: 1.4 } as const;
 
 /** Ancho medio de un carácter en Avenir Next, como fracción del cuerpo. */
 const AVANCE = 0.52;
@@ -196,62 +214,56 @@ interface EscenaMedida {
   escena: Escena;
   lineas: LineaMedida[];
   /** Rutas ya resueltas de las imágenes de la escena. Vacío = sólo tipografía. */
-  imagenes: string[];
+  imagenes: MedioResuelto[];
   /** Visuales dibujados de la escena. Se pintan en el panel, como una imagen. */
   visuales: string[];
   inicio: number;
   fin: number;
 }
 
-/** Reparte los tiempos: cada línea arranca cuando termina la anterior. */
+/**
+ * Reparte los tiempos y le suma a cada escena lo que se ve en el panel.
+ *
+ * El reloj es el de `guion.ts`, compartido con el render de láminas: acá sólo se
+ * agrega el piso que necesitan las imágenes. Una imagen que dura menos de lo que
+ * tarda en aparecer y desaparecer es un parpadeo, así que si hay más imágenes
+ * que tiempo la escena se estira para que cada una llegue a verse. Vale la pena:
+ * el guion pidió mostrarlas.
+ */
 function ubicar(
   guion: Guion,
   duraciones: number[],
-  rutasPorEscena: string[][],
+  rutasPorEscena: MedioResuelto[][],
 ): { escenas: EscenaMedida[]; total: number } {
-  const escenas: EscenaMedida[] = [];
-  let cursor = 0;
-  let indice = 0;
+  // Los visuales no se resuelven contra el disco, pero ocupan el mismo panel y
+  // por eso cuentan igual para el tiempo mínimo de la escena.
+  const visualesPorEscena = guion.escenas.map((escena) =>
+    escena.imagenes.filter((imagen) => imagen.visual).map((imagen) => imagen.visual!),
+  );
+  const minimos = guion.escenas.map(
+    (_, orden) =>
+      ((rutasPorEscena[orden]?.length ?? 0) + (visualesPorEscena[orden]?.length ?? 0)) *
+      (FUNDIDO_IMAGEN * 2 + 0.9),
+  );
 
-  for (const [orden, escena] of guion.escenas.entries()) {
-    const inicio = cursor;
-    const lineas: LineaMedida[] = [];
-    for (let i = 0; i < escena.lineas.length; i++) {
-      const linea = escena.lineas[i]!;
-      const duracion = duraciones[indice] ?? 0;
-      lineas.push({
-        personaje: linea.kind === "dialogo" ? linea.personaje : "",
+  const { escenas, total } = ubicarEscenas(guion, duraciones, minimos);
+  return {
+    escenas: escenas.map((ubicada, orden) => ({
+      escena: ubicada.escena,
+      lineas: ubicada.lineas.map((linea) => ({
+        personaje: linea.personaje,
         texto: linea.texto,
-        archivo: `linea-${indice}`,
-        inicio: cursor,
-        duracion,
-      });
-      cursor += duracion;
-      if (i < escena.lineas.length - 1) {
-        cursor += linea.kind === "dialogo" ? PAUSA.entreDialogos : PAUSA.entreLineas;
-      }
-      indice++;
-    }
-    // Una escena sin nada hablado igual tiene que verse: se le da aire propio.
-    // La portada necesita más, porque suele no tener narración y con dos
-    // segundos el nombre de la empresa pasaba antes de poder leerlo.
-    if (lineas.length === 0) cursor += escena.esPortada ? 3.8 : 2.4;
-    const imagenes = rutasPorEscena[orden] ?? [];
-    // Los visuales no se resuelven contra el disco, pero ocupan el mismo panel
-    // y por eso cuentan igual para el tiempo mínimo de la escena.
-    const visuales = escena.imagenes
-      .filter((imagen) => imagen.visual)
-      .map((imagen) => imagen.visual!);
-    // Una imagen que dura menos de lo que tarda en aparecer y desaparecer es un
-    // parpadeo: si hay más imágenes que tiempo, la escena se estira para que
-    // cada una llegue a verse. Vale la pena: el guion pidió mostrarlas.
-    const minimo = (imagenes.length + visuales.length) * (FUNDIDO_IMAGEN * 2 + 0.9);
-    if (cursor - inicio < minimo) cursor = inicio + minimo;
-    escenas.push({ escena, lineas, imagenes, visuales, inicio, fin: cursor });
-    cursor += PAUSA.entreEscenas;
-  }
-
-  return { escenas, total: cursor - PAUSA.entreEscenas + PAUSA.cola };
+        archivo: `linea-${linea.indice}`,
+        inicio: linea.inicio,
+        duracion: linea.duracion,
+      })),
+      imagenes: rutasPorEscena[orden] ?? [],
+      visuales: visualesPorEscena[orden] ?? [],
+      inicio: ubicada.inicio,
+      fin: ubicada.fin,
+    })),
+    total,
+  };
 }
 
 interface Evento {
@@ -352,6 +364,11 @@ function componerAss(
   for (const { escena, lineas, imagenes, visuales, inicio, fin } of escenas) {
     const hasta = fin + 0.35;
     const conImagen = imagenes.length > 0 || visuales.length > 0;
+    // Un clip usa un hueco más grande, así que la columna de texto y la línea
+    // de apoyo se corren con él: si sólo se agrandara el video, el texto le
+    // pasaría por debajo.
+    const conClip = imagenes.some((medio) => medio.clip);
+    const hueco = conClip ? PANEL_CLIP : PANEL;
 
     // El visual va en el mismo hueco que una foto, pero se dibuja con formas de
     // ASS en vez de superponerse como video: así entra entero, sin recorte, y
@@ -393,7 +410,9 @@ function componerAss(
     // La imagen le come la mitad derecha del cuadro, así que el texto se
     // reencuadra en una columna. No es un ajuste de estilo: con el ancho de
     // siempre, cada renglón pasaba por debajo de la foto.
-    const ancho = conImagen && !escena.esPortada ? ANCHO_CON_IMAGEN : ANCHO_UTIL;
+    const ancho = conImagen && !escena.esPortada
+      ? (conClip ? ANCHO_CON_CLIP : ANCHO_CON_IMAGEN)
+      : ANCHO_UTIL;
 
     if (escena.esPortada) {
       // La portada con imagen la usa entera, y el velo es lo que hace que el
@@ -497,9 +516,9 @@ function componerAss(
         desde: inicio,
         hasta,
         estilo: "Regla",
-        texto: barra(PANEL.ancho, 3),
-        x: PANEL.x,
-        y: PANEL.y + PANEL.alto + 22,
+        texto: barra(hueco.ancho, 3),
+        x: hueco.x,
+        y: hueco.y + hueco.alto + 22,
         entrada: 700,
       });
     }
@@ -809,8 +828,19 @@ const MARCA = {
 } as const;
 
 /** Una imagen ya ubicada en el tiempo y en el cuadro. */
+/**
+ * Un medio ya resuelto a una ruta del disco, con lo único que el render
+ * necesita saber para tratarlo distinto: si se mira o si se reproduce.
+ */
+interface MedioResuelto {
+  ruta: string;
+  clip: boolean;
+}
+
 interface ImagenPuesta {
   ruta: string;
+  /** Es un clip de video: se reproduce, no se le hace acercamiento. */
+  clip?: boolean;
   desde: number;
   hasta: number;
   /** La de la portada ocupa el cuadro entero; las demás van en el panel. */
@@ -863,9 +893,10 @@ function ubicarImagenes(escenas: EscenaMedida[], logo?: string): ImagenPuesta[] 
     const desde = medida.inicio;
     const hasta = medida.fin + 0.35;
     const tramo = (hasta - desde) / medida.imagenes.length;
-    medida.imagenes.forEach((ruta, i) => {
+    medida.imagenes.forEach((medio, i) => {
       puestas.push({
-        ruta,
+        ruta: medio.ruta,
+        clip: medio.clip,
         desde: desde + i * tramo,
         hasta: desde + (i + 1) * tramo,
         completa: medida.escena.esPortada,
@@ -901,7 +932,33 @@ function filtroImagen(indice: number, k: number, puesta: ImagenPuesta): string[]
 
   const destino = puesta.completa
     ? { w: LIENZO.ancho, h: LIENZO.alto, factor: SOBREMUESTREO.completa }
-    : { w: PANEL.ancho, h: PANEL.alto, factor: SOBREMUESTREO.panel };
+    : puesta.clip
+      ? { w: PANEL_CLIP.ancho, h: PANEL_CLIP.alto, factor: SOBREMUESTREO.panel }
+      : { w: PANEL.ancho, h: PANEL.alto, factor: SOBREMUESTREO.panel };
+
+  if (puesta.clip) {
+    const duracionClip = puesta.hasta - puesta.desde;
+    const salidaClip = Math.max(0.1, duracionClip - FUNDIDO_IMAGEN);
+    return [
+      // Sin `zoompan` y sin sobremuestreo: el clip ya se mueve solo, y encimarle
+      // un acercamiento lo marea. Y se **encaja entero**, no se recorta: a una
+      // foto le podés cortar los bordes sin perder el tema, pero una captura de
+      // pantalla recortada pierde justo lo que se está mostrando — la primera
+      // versión le comía los costados a la aplicación y quedaba una franja
+      // ilegible. `decrease` + `pad` la mete completa y centrada en el hueco.
+      // El fps se fija al del lienzo porque una grabación a 25 y un video a 30
+      // se desincronizan al superponerse.
+      `[${indice}:v]scale=${destino.w}:${destino.h}:force_original_aspect_ratio=decrease,` +
+        `pad=${destino.w}:${destino.h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1,fps=${LIENZO.fps},` +
+        // `setpts=PTS-STARTPTS` antes de recortar: el clip trae su propia línea
+        // de tiempo y sin reiniciarla el `trim` mide desde el instante
+        // equivocado.
+        `setpts=PTS-STARTPTS,trim=duration=${duracionClip.toFixed(2)},setpts=PTS-STARTPTS,` +
+        `format=rgba,fade=t=in:st=0:d=${FUNDIDO_IMAGEN}:alpha=1,` +
+        `fade=t=out:st=${salidaClip.toFixed(2)}:d=${FUNDIDO_IMAGEN}:alpha=1,` +
+        `setpts=PTS+${puesta.desde.toFixed(2)}/TB[im${k}]`,
+    ];
+  }
   const grande = { w: Math.round(destino.w * destino.factor), h: Math.round(destino.h * destino.factor) };
   const duracion = puesta.hasta - puesta.desde;
   const salida = Math.max(0.1, duracion - FUNDIDO_IMAGEN);
@@ -931,8 +988,8 @@ async function resolverImagenes(
   guion: Guion,
   opciones: OpcionesVideo,
   avisos: string[],
-): Promise<string[][]> {
-  const rutasPorEscena: string[][] = [];
+): Promise<MedioResuelto[][]> {
+  const rutasPorEscena: MedioResuelto[][] = [];
   const pedidas = guion.escenas.reduce(
     (total, escena) => total + escena.imagenes.filter((imagen) => !imagen.visual).length,
     0,
@@ -943,14 +1000,14 @@ async function resolverImagenes(
   }
 
   for (const escena of guion.escenas) {
-    const rutas: string[] = [];
+    const rutas: MedioResuelto[] = [];
     for (const imagen of escena.imagenes) {
       // Un visual no se resuelve: se dibuja. No pasa por acá.
       if (imagen.visual) continue;
       if (!opciones.resolverImagen) continue;
       try {
         const ruta = await opciones.resolverImagen(imagen);
-        if (ruta) rutas.push(ruta);
+        if (ruta) rutas.push({ ruta, clip: imagen.clip === true });
         else avisos.push(`No se pudo mostrar la imagen "${imagen.alt || imagen.src}".`);
       } catch (error) {
         const detalle = error instanceof Error ? error.message : String(error);
@@ -1043,56 +1100,37 @@ export async function renderVideo(
     const puestas = ubicarImagenes(escenas, opciones.logo);
     const indicesImagen = puestas.map((puesta) => {
       const duracion = puesta.hasta - puesta.desde + 0.2;
-      args.push(
-        "-loop",
-        "1",
-        "-framerate",
-        String(LIENZO.fps),
-        "-t",
-        duracion.toFixed(2),
-        "-i",
-        puesta.ruta,
-      );
+      if (puesta.clip) {
+        // Un clip se reproduce; no se congela con `-loop 1`. `-stream_loop -1`
+        // cubre el hueco si el clip es más corto que la escena —igual que con la
+        // cama musical— y `-t` lo termina. Sin el bucle, una escena más larga
+        // que su clip queda con el último cuadro congelado, que se lee como un
+        // video colgado.
+        args.push("-stream_loop", "-1", "-t", duracion.toFixed(2), "-i", puesta.ruta);
+      } else {
+        args.push(
+          "-loop",
+          "1",
+          "-framerate",
+          String(LIENZO.fps),
+          "-t",
+          duracion.toFixed(2),
+          "-i",
+          puesta.ruta,
+        );
+      }
       return ++indice;
     });
 
-    // Cada voz se coloca en su instante exacto y se suman las pistas: no hay
-    // concatenación, así que un error de milisegundos no arrastra al resto.
+    // La mezcla vive en `sonido.ts` porque la comparte el render de láminas: si
+    // estuviera acá, la próxima corrección de la cama arreglaría un video y
+    // dejaría el otro roto.
     const ubicadas = escenas.flatMap((medida) => medida.lineas);
-    const pistas = ubicadas.map(
-      (linea, i) =>
-        `[${i + 1}:a]aresample=44100,adelay=delays=${Math.round(linea.inicio * 1000)}:all=1[v${i}]`,
-    );
-    // Se fija el formato de la mezcla de voz: la música y el compresor de cadena
-    // lateral exigen que las dos entradas coincidan, y Kokoro entrega mono.
-    const formato = "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo";
-    const voz =
-      pedidos.length > 0
-        ? `${pistas.join(";")};${pedidos.map((_, i) => `[v${i}]`).join("")}` +
-          `amix=inputs=${pedidos.length}:duration=longest:normalize=0,` +
-          `apad,atrim=0:${total.toFixed(2)},${formato}[voz]`
-        : `anullsrc=r=44100:cl=stereo,atrim=0:${total.toFixed(2)},${formato}[voz]`;
-
-    const limitador = "alimiter=level_in=1:level_out=0.92";
-    const mezcla =
-      indiceMusica >= 0
-        ? [
-            voz,
-            "[voz]asplit=2[vozmix][vozlado]",
-            // `loudnorm` devuelve 192 kHz sí o sí, así que el `aresample` va
-            // **después**: antes, la cama entraba a la mezcla al triple de
-            // velocidad de muestreo y sonaba como una cinta acelerada.
-            `[${indiceMusica}:a]aresample=44100,${formato},atrim=0:${total.toFixed(2)},` +
-              `loudnorm=I=${MUSICA.lufs}:TP=-3:LRA=11,aresample=44100,${formato},` +
-              `afade=t=in:st=0:d=${MUSICA.entrada},` +
-              `afade=t=out:st=${Math.max(0, total - MUSICA.salida).toFixed(2)}:d=${MUSICA.salida}[cama]`,
-            // La música se aparta sola cuando alguien habla. Sin esto hay que
-            // elegir entre una cama inaudible y una voz tapada, y las dos
-            // opciones suenan a video hecho a las apuradas.
-            "[cama][vozlado]sidechaincompress=threshold=0.02:ratio=10:attack=20:release=400[camaduck]",
-            `[vozmix][camaduck]amix=inputs=2:duration=first:normalize=0,${limitador}[aud]`,
-          ].join(";")
-        : `${voz};[voz]${limitador}[aud]`;
+    const mezcla = construirSonido({
+      inicios: ubicadas.map((linea) => linea.inicio),
+      total,
+      indiceMusica,
+    });
 
     // Las imágenes se superponen al fondo una tras otra, cada una sólo durante
     // su ventana. La tipografía va al final: siempre por encima de todo.
@@ -1104,7 +1142,9 @@ export async function renderVideo(
         ? { x: puesta.marca.x, y: puesta.marca.y }
         : puesta.completa
           ? { x: 0, y: 0 }
-          : { x: PANEL.x, y: PANEL.y };
+          : puesta.clip
+            ? { x: PANEL_CLIP.x, y: PANEL_CLIP.y }
+            : { x: PANEL.x, y: PANEL.y };
       capasVideo.push(
         `[${fondoActual}][im${k}]overlay=x=${destino.x}:y=${destino.y}:` +
           `enable='between(t,${puesta.desde.toFixed(2)},${puesta.hasta.toFixed(2)})'[bg${k}]`,

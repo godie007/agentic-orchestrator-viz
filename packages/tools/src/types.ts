@@ -10,6 +10,7 @@ import type {
   MessageType,
   Role,
   Task,
+  Tool,
   TaskPriority,
   TaskStatus,
   ToolOrigin,
@@ -113,10 +114,37 @@ export interface AgentWorkspace {
   readonly company: Company;
   readonly departments: readonly Department[];
   readonly roles: readonly Role[];
+  /**
+   * Catálogo de herramientas del proyecto. Sirve para resolver un nombre a su
+   * id al repartirlas —`convocar_especialista`—, no para usarlas: lo que este
+   * rol puede ejecutar lo decide `role.toolIds`.
+   */
+  readonly tools: readonly Tool[];
 
   getRole(roleId: string): Role | undefined;
   /** Reportes directos de un rol, para validar a quién puede asignar trabajo. */
   directReports(roleId: string): Role[];
+
+  /**
+   * Incorpora un especialista a la corrida en curso y lo devuelve.
+   *
+   * Quién puede hacerlo y con qué límites lo decide la herramienta que la usa
+   * (`convocar_especialista`); acá sólo está la capacidad. El rol nace
+   * `executor` —no puede convocar a su vez— y queda guardado como rol de la
+   * empresa, así que sobrevive a la corrida que lo creó.
+   */
+  incorporarRol(input: {
+    name: string;
+    title: string;
+    departmentName: string;
+    systemPrompt: string;
+    reportsToId: string | null;
+    toolIds: string[];
+    maxTurns?: number;
+  }): Role;
+
+  /** Cuántos especialistas van convocados en esta corrida, para el tope. */
+  especialistasConvocados(): number;
 
   sendMessage(input: SendMessageInput): Promise<Message>;
   /**

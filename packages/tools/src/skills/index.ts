@@ -1,5 +1,13 @@
 import { createHash } from "node:crypto";
+import { readFile, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { fail, ok, type RegisteredTool, type ToolContext, type ToolResult } from "../types.js";
+import { abrirRevelado, buscarChrome } from "./chrome.js";
+import { renderEstudio } from "./estudio.js";
+import { CARPETA_ESCENAS, GUIA_ESTUDIO, PALETA, RUTA_GUIA, RUTA_TEMA, TEMA_CSS } from "./tema.js";
+import { describirFicha, inspeccionarMedio } from "./medios.js";
 import { renderDocx, renderPdf } from "./render.js";
 import { puedeBorrar } from "./permisos.js";
 import { ICONOS_DISPONIBLES } from "./iconos.js";
@@ -20,6 +28,13 @@ export { renderVideo } from "./video.js";
 export type { OpcionesVideo, ResultadoVideo } from "./video.js";
 export { renderSlides } from "./slides.js";
 export type { OpcionesSlides, ResultadoSlides } from "./slides.js";
+export { renderEstudio, atarLaminas, planificar } from "./estudio.js";
+export type { OpcionesEstudio, ResultadoEstudio, Plano } from "./estudio.js";
+export { laminaDeEscena, TEMA_CSS, GUIA_ESTUDIO, CARPETA_ESCENAS } from "./tema.js";
+export { buscarChrome } from "./chrome.js";
+export { construirSonido } from "./sonido.js";
+export { inspeccionarMedio, describirFicha, leerFicha, cuadrosPorSegundo } from "./medios.js";
+export type { FichaMedio } from "./medios.js";
 export { iconoAss, iconoSvg, separarIcono, ICONOS_DISPONIBLES } from "./iconos.js";
 export { elegirMusica } from "./musica.js";
 export type { Pista, EleccionMusical } from "./musica.js";
@@ -434,6 +449,150 @@ function crearBorrado(storage: SkillStorage): RegisteredTool {
           detalle,
         `${borrados.length} borrados`,
       );
+    },
+  };
+}
+
+/**
+ * Cuánto texto se devuelve de un archivo del directorio de salida.
+ *
+ * Un tope y no "el archivo entero": lo que devuelve una herramienta se reenvía
+ * en cada iteración del turno, así que un archivo grande leído dos veces sale
+ * más caro que el trabajo que habilita. Con esto entra una lámina holgada.
+ */
+const TOPE_LECTURA = 24_000;
+
+/**
+ * Leer un archivo de texto del directorio de salida.
+ *
+ * Existe porque un agente podía **escribir** ahí y no volver a leerlo: quien
+ * programa una lámina necesita releer la que hizo para corregirla, y leer la
+ * guía del kit que el sistema le deja. Sin esto, la única forma de arreglar una
+ * lámina era reescribirla entera de memoria.
+ */
+function crearLectura(storage: SkillStorage): RegisteredTool {
+  return {
+    name: "read_output_file",
+    origin: "skill",
+    readOnly: true,
+    requiresApproval: false,
+    description:
+      "Devuelve el contenido de un archivo de texto del directorio de salida —una lámina " +
+      "HTML, un markdown, un csv, la guía del kit de diseño—. Usalo para releer y corregir " +
+      "lo que ya escribiste, en vez de reescribirlo entero de memoria. Los archivos " +
+      "binarios (imágenes, video, Word, PDF) no se pueden leer así: para esos, list_output " +
+      "te dice que están y la pestaña Salida los muestra.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Ruta del archivo, ej. escenas/02-lo-que-hacemos.html",
+        },
+      },
+      required: ["path"],
+      additionalProperties: false,
+    },
+
+    async execute(args) {
+      const ruta = String(args.path ?? "").trim();
+      if (!ruta) return fail("Falta path: la ruta del archivo que querés leer.");
+
+      const absoluta = await storage.resolve(ruta);
+      if (!absoluta) {
+        const existentes = (await storage.list()).map((archivo) => archivo.path);
+        return fail(
+          existentes.length === 0
+            ? `No hay ningún archivo en el directorio de salida todavía.`
+            : `No existe "${ruta}". Los que hay son: ${existentes.slice(0, 40).join(", ")}.`,
+        );
+      }
+
+      let contenido: string;
+      try {
+        contenido = await readFile(absoluta, "utf8");
+      } catch {
+        return fail(
+          `No se pudo leer "${ruta}" como texto. Si es una imagen, un video, un Word o un ` +
+            `PDF, no se lee así: se mira desde la pestaña Salida.`,
+        );
+      }
+
+      // Un binario leído como utf8 no falla: vuelve con bytes nulos y caracteres
+      // de reemplazo, y le mete esa basura al contexto del agente sin decir por qué.
+      if (contenido.includes("\u0000") || contenido.includes("\uFFFD")) {
+        return fail(`"${ruta}" no es un archivo de texto: se mira desde la pestaña Salida.`);
+      }
+
+      if (contenido.length > TOPE_LECTURA) {
+        return ok(
+          `${contenido.slice(0, TOPE_LECTURA)}\n\n[…] El archivo sigue: son ` +
+            `${contenido.length} caracteres y acá entran ${TOPE_LECTURA}.`,
+          `${ruta} (recortado)`,
+        );
+      }
+      return ok(contenido, ruta);
+    },
+  };
+}
+
+/**
+ * Medir un archivo producido, en vez de confiar en lo que dijo quien lo produjo.
+ *
+ * Es `check_activity` aplicado al disco: la organización sabía que el video
+ * duraba 76 segundos porque lo decía el mensaje de la herramienta, y cuando el
+ * motor leía de más el video salía de 131 y nadie podía notarlo hasta que una
+ * persona lo abría. Un dato que sólo se puede repetir no es una verificación.
+ */
+function crearInspeccion(storage: SkillStorage): RegisteredTool {
+  return {
+    name: "inspeccionar_medio",
+    origin: "skill",
+    readOnly: true,
+    requiresApproval: false,
+    description:
+      "Mide un archivo del directorio de salida y te devuelve los hechos: cuánto dura, " +
+      "a qué resolución, con qué códecs, si tiene pista de audio y cuánto pesa. Usalo " +
+      "para **verificar** lo que produjiste antes de darlo por bueno —que el video entre " +
+      "en la duración pedida, que no haya salido mudo— en vez de repetir lo que dijo la " +
+      "herramienta que lo generó. Un archivo que no es audio ni video igual devuelve su " +
+      "tamaño.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: 'Ruta del archivo, ej. "marketing/video-codytion.mp4"',
+        },
+      },
+      required: ["path"],
+      additionalProperties: false,
+    },
+
+    async execute(args) {
+      const ruta = String(args.path ?? "").trim();
+      if (!ruta) return fail("Falta path: la ruta del archivo que querés medir.");
+
+      const absoluta = await storage.resolve(ruta);
+      if (!absoluta) {
+        const existentes = (await storage.list()).map((archivo) => archivo.path);
+        return fail(
+          existentes.length === 0
+            ? "No hay ningún archivo en el directorio de salida todavía."
+            : `No existe "${ruta}". Los que hay son: ${existentes.slice(0, 40).join(", ")}.`,
+        );
+      }
+
+      try {
+        const ficha = await inspeccionarMedio(absoluta);
+        return ok(`${ruta}: ${describirFicha(ficha)}.`, ruta);
+      } catch (error) {
+        const detalle = error instanceof Error ? error.message : String(error);
+        return fail(
+          `No se pudo medir "${ruta}": ${detalle.split("\n")[0]}. Si falta ffprobe en el ` +
+            `sistema, avisale a quien opera la empresa: no es algo que puedas resolver vos.`,
+        );
+      }
     },
   };
 }
@@ -932,6 +1091,237 @@ function crearSlides(storage: SkillStorage, opciones: OpcionesHabilidades): Regi
   };
 }
 
+/**
+ * Filmar con láminas programadas.
+ *
+ * Es la misma escritura que `export_video` —el guion sigue siendo el entregable
+ * y sigue mandando el reloj— con otro motor de dibujo: cada escena puede tener
+ * su propia lámina HTML, escrita por un rol con capacidad de programar. La
+ * escena que no tiene la suya sale con la plantilla del sistema, así que la
+ * habilidad sirve desde la primera corrida y mejora a medida que se programan
+ * láminas.
+ */
+function crearVideoEstudio(
+  storage: SkillStorage,
+  opciones: OpcionesHabilidades,
+): RegisteredTool {
+  return {
+    name: "export_video_estudio",
+    origin: "skill",
+    readOnly: false,
+    requiresApproval: false,
+    description:
+      "Filma un guion ya escrito como video MP4 de calidad de estudio: cada escena se " +
+      "compone como una lámina HTML —tipografía real, SVG, tarjetas, cifras, entradas " +
+      "escalonadas— y se revela con el navegador. Se usa igual que export_video: primero " +
+      "guardá el guion con write_artifact y después pasá su clave acá.\n" +
+      `**Las láminas van en \`${CARPETA_ESCENAS}/\`, numeradas por escena** ` +
+      "(`01-portada.html`, `02-lo-que-hacemos.html`, …): el número es lo que ata cada una " +
+      "a su escena. Se escriben con write_output_file. La escena sin lámina propia se " +
+      `maqueta con la plantilla del sistema. El kit de diseño y su guía quedan en ` +
+      `\`${RUTA_GUIA}\` cada vez que se filma; leelo antes de programar, y probá cada ` +
+      "lámina con revisar_lamina, que cuesta segundos, en vez de filmar el video entero.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        artifact_key: {
+          type: "string",
+          description: "Clave del guion a filmar, tal como la usaste en write_artifact",
+        },
+        folder: {
+          type: "string",
+          description:
+            'Carpeta del directorio de salida donde dejarlo, por ejemplo "marketing". ' +
+            "Se crea sola si no existe.",
+        },
+        musica: {
+          type: "string",
+          description:
+            'Clima o nombre de la pista de fondo, por ejemplo "corporativo". Sin esto se ' +
+            'elige una neutra; poné "ninguna" para filmar en silencio.',
+        },
+      },
+      required: ["artifact_key"],
+      additionalProperties: false,
+    },
+
+    async execute(args, ctx) {
+      const entregable = await buscarEntregable(args, ctx);
+      if ("error" in entregable) return entregable.error;
+      const { artifact } = entregable;
+
+      const bloqueo = revisarCifras(artifact, ctx);
+      if (bloqueo) return bloqueo;
+
+      const carpeta = String(args.folder ?? "").trim();
+      const laminas = (await storage.list())
+        .map((archivo) => archivo.path)
+        .filter((ruta) => ruta.startsWith(`${CARPETA_ESCENAS}/`))
+        .sort();
+
+      let resultado;
+      try {
+        resultado = await renderEstudio(
+          artifact.content,
+          {
+            title: artifact.title,
+            company: ctx.workspace.company.name,
+            author: ctx.actor.name,
+            authorTitle: ctx.actor.title,
+            version: artifact.version,
+            date: new Date(artifact.createdAt).toLocaleDateString("es-AR", {
+              day: "2-digit",
+              month: "long",
+              year: "numeric",
+            }),
+          },
+          {
+            ...(ctx.signal ? { signal: ctx.signal } : {}),
+            empresa: ctx.workspace.company.name,
+            unaSolaVoz: ctx.workspace.company.voz.unaSolaVoz,
+            lexico: ctx.workspace.company.voz.pronunciacion,
+            ...(opciones.musicaHome !== undefined ? { musicaHome: opciones.musicaHome } : {}),
+            ...(args.musica !== undefined ? { musica: String(args.musica) } : {}),
+            laminas,
+            resolver: (ruta) => storage.resolve(ruta),
+            escribir: async (ruta, contenido) => {
+              await storage.writeText(ruta, contenido);
+            },
+          },
+        );
+      } catch (error) {
+        const detalle = error instanceof Error ? error.message : String(error);
+        return fail(
+          `No se pudo filmar "${artifact.key}" con el motor de estudio: ` +
+            `${detalle.split("\n")[0]}. Si el guion no tiene escenas, revisá que tenga ` +
+            `títulos con "##". Si el problema es el navegador o ffmpeg, avisale a quien ` +
+            `opera la empresa: no es algo que puedas resolver vos. Mientras tanto, ` +
+            `export_video filma el mismo guion sin navegador.`,
+        );
+      }
+
+      const guardado = await storage.save({
+        filename: `${artifact.key}.mp4`,
+        ...(carpeta ? { folder: carpeta } : {}),
+        bytes: resultado.bytes,
+      });
+
+      const propias =
+        resultado.programadas > 0
+          ? ` ${resultado.programadas} de ${resultado.escenas} escenas con lámina programada.`
+          : ` Ninguna escena tenía lámina propia: salieron todas con la plantilla del sistema.`;
+      const cama = resultado.musica ? ` Música de fondo: ${resultado.musica}.` : "";
+      const problemas =
+        resultado.avisos.length > 0 ? ` Atención: ${resultado.avisos.join(" ")}` : "";
+      return ok(
+        `Video de estudio generado en ${guardado.path}: "${artifact.title}", ` +
+          `${resultado.escenas} escenas, ${Math.round(resultado.segundos)} segundos, ` +
+          `${Math.max(1, Math.round(guardado.sizeBytes / 1024))} KB.${propias}${cama} ` +
+          `Se mira desde la pestaña Salida.` +
+          problemas,
+        guardado.path,
+      );
+    },
+  };
+}
+
+/**
+ * Revelar **una** lámina y mirarla.
+ *
+ * Sin esto, la única forma de saber si una lámina quedó bien es filmar el video
+ * entero: un minuto de render y una corrida gastada para descubrir que el
+ * título se desbordaba. Es el bucle de trabajo de quien programa las láminas, y
+ * por eso devuelve los errores de carga y los desbordes en vez de un "listo".
+ */
+function crearRevisarLamina(storage: SkillStorage): RegisteredTool {
+  return {
+    name: "revisar_lamina",
+    origin: "skill",
+    readOnly: false,
+    requiresApproval: false,
+    description:
+      "Revela una sola lámina HTML a imagen y te devuelve qué salió mal: si se desborda " +
+      "del cuadro de 1920×1080, si la hoja de estilo no cargó, si tiró un error. Usala " +
+      "después de escribir cada lámina y antes de filmar el video: cuesta segundos. " +
+      "La imagen queda en el directorio de salida para que una persona también la mire.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: `Ruta de la lámina, por ejemplo "${CARPETA_ESCENAS}/02-lo-que-hacemos.html"`,
+        },
+      },
+      required: ["path"],
+      additionalProperties: false,
+    },
+
+    async execute(args, ctx) {
+      const ruta = String(args.path ?? "").trim();
+      if (!ruta) return fail("Falta path: la ruta de la lámina que querés revisar.");
+
+      // El kit se escribe también acá y no sólo al filmar: si no, el diseñador
+      // tiene que pedirle a alguien que renderice un video entero antes de poder
+      // leer la guía o de que su primera lámina encuentre la hoja de estilo.
+      await storage.writeText(RUTA_TEMA, TEMA_CSS);
+      await storage.writeText(RUTA_GUIA, GUIA_ESTUDIO);
+
+      const absoluta = await storage.resolve(ruta);
+      if (!absoluta) {
+        return fail(
+          `No existe "${ruta}" en el directorio de salida. Escribí la lámina con ` +
+            `write_output_file y después revisala. El kit de diseño y su guía ` +
+            `(${RUTA_GUIA}) ya quedaron escritos: leelos antes de programar.`,
+        );
+      }
+
+      const temporal = await mkdtemp(join(tmpdir(), "orq-lamina-"));
+      try {
+        // Con el fondo de la marca y no transparente: la previsualización tiene
+        // que mostrar lo que se va a filmar, no la lámina sobre el blanco del
+        // visor, donde el texto claro desaparece y parece rota.
+        const revelado = await abrirRevelado({
+          fondo: PALETA.fondo,
+          ...(ctx.signal ? { signal: ctx.signal } : {}),
+        });
+        let captura;
+        try {
+          captura = await revelado.revelar(pathToFileURL(absoluta).href, temporal, "lamina");
+        } finally {
+          await revelado.cerrar();
+        }
+
+        // El último cuadro es la lámina ya acomodada, que es lo que se quiere
+        // mirar: el primero es la entrada a mitad de camino.
+        const ultimo = captura.cuadros.at(-1);
+        if (!ultimo) return fail(`No se pudo revelar "${ruta}": no salió ningún cuadro.`);
+
+        const nombre = (ruta.split("/").pop() ?? "lamina").replace(/\.html?$/i, "");
+        const guardado = await storage.save({
+          filename: `${nombre}.png`,
+          folder: `${CARPETA_ESCENAS}/previsualizacion`,
+          bytes: await readFile(ultimo),
+        });
+
+        const problemas =
+          captura.avisos.length > 0
+            ? ` Hay que corregir: ${captura.avisos.join(" ")}`
+            : " Entra en el cuadro y no tiró ningún error.";
+        return ok(
+          `Lámina "${ruta}" revelada en ${guardado.path}: la entrada dura ` +
+            `${captura.animacion.toFixed(1)} segundos.${problemas}`,
+          guardado.path,
+        );
+      } catch (error) {
+        const detalle = error instanceof Error ? error.message : String(error);
+        return fail(`No se pudo revelar "${ruta}": ${detalle.split("\n")[0]}`);
+      } finally {
+        await rm(temporal, { recursive: true, force: true });
+      }
+    },
+  };
+}
+
 export function createSkillTools(
   storage: SkillStorage,
   opciones: OpcionesHabilidades = {},
@@ -943,12 +1333,22 @@ export function createSkillTools(
       ? crearGeneradorImagenes()
       : opciones.generadorImagenes;
 
+  // El motor de estudio necesita un navegador en la máquina. Si no está, no se
+  // registra: ofrecerle al agente una herramienta que siempre falla le hace
+  // gastar turnos intentándola, y `export_video` filma el mismo guion sin él.
+  const hayNavegador = buscarChrome() !== null;
+
   return [
     ...(Object.keys(FORMATOS) as Formato[]).map((formato) => crearSkill(formato, storage)),
     crearVideo(storage, { ...opciones, generadorImagenes: generador }),
+    ...(hayNavegador
+      ? [crearVideoEstudio(storage, { ...opciones, generadorImagenes: generador }), crearRevisarLamina(storage)]
+      : []),
     crearSlides(storage, { ...opciones, generadorImagenes: generador }),
     ...(generador ? [crearImagen(storage, generador)] : []),
     crearListado(storage),
+    crearLectura(storage),
+    crearInspeccion(storage),
     crearEscritura(storage),
     crearBorrado(storage),
   ];

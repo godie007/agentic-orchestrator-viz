@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { parsearConfigMcp } from "@orq/shared";
 import type { McpServerHealth, Tool } from "@orq/shared";
 import { api, type CompanyBundle } from "../api.js";
 import { useMcpStream } from "../lib/stream.js";
@@ -36,8 +37,12 @@ export function McpHub({ company }: { company: CompanyBundle }) {
     const merged = new Map<string, McpServerHealth>();
     for (const entry of health.data ?? []) merged.set(entry.serverId, entry);
     for (const [id, entry] of streamed) merged.set(id, entry);
-    return [...merged.values()];
-  }, [health.data, streamed]);
+    // Sólo los que siguen configurados: el stream conserva el último estado de
+    // un servidor ya borrado, y eso se veía como un servidor fantasma en
+    // `ready`, con botón de reconectar y sin forma de sacarlo de la lista.
+    const vigentes = new Set(company.mcpServers.map((server) => server.id));
+    return [...merged.values()].filter((entry) => vigentes.has(entry.serverId));
+  }, [health.data, streamed, company.mcpServers]);
 
   const reconnect = useMutation({
     mutationFn: (serverId: string) => api.reconnectMcp(companyId, serverId),
@@ -52,17 +57,38 @@ export function McpHub({ company }: { company: CompanyBundle }) {
     ? servers.find((server) => server.serverId === selectedServer)
     : null;
 
+  const [agregando, setAgregando] = useState(false);
+
+  const olvidar = useMutation({
+    mutationFn: (serverId: string) => api.borrarMcpServer(companyId, serverId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["company", companyId] });
+      void queryClient.invalidateQueries({ queryKey: ["mcp-health", companyId] });
+      void queryClient.invalidateQueries({ queryKey: ["tools", companyId] });
+    },
+  });
+
   return (
     <div className="grid h-full min-h-0 grid-cols-[380px_1fr] gap-2 p-2">
       {/* Ambas filas acotadas con minmax(0,…): con `auto`, la lista de
           servidores crece sin techo, desborda la columna y su cabecera termina
           tapando la tabla de accesos de abajo. */}
       <div className="grid min-h-0 min-w-0 grid-rows-[minmax(0,1fr)_minmax(0,1fr)] gap-2">
-        <Panel title="Servidores MCP">
-          {servers.length === 0 ? (
+        <Panel
+          title="Servidores MCP"
+          actions={
+            <Button variant="primary" onClick={() => setAgregando((v) => !v)}>
+              {agregando ? "cancelar" : "+ servidor"}
+            </Button>
+          }
+        >
+          {agregando && (
+            <AltaDeServidor companyId={companyId} onListo={() => setAgregando(false)} />
+          )}
+          {servers.length === 0 && !agregando ? (
             <Empty>
-              No hay servidores MCP configurados para esta empresa. Definilos en la configuración
-              de la empresa y aparecen acá al conectarse.
+              Todavía no hay ningún servidor MCP conectado. Tocá «+ servidor» y pegá la
+              configuración que publica el servidor —la misma que usás en Claude o en Cursor—.
             </Empty>
           ) : (
             <ul className="divide-y divide-line/60">
@@ -113,8 +139,17 @@ export function McpHub({ company }: { company: CompanyBundle }) {
                         </div>
                       )}
                     </button>
-                    <div className="px-3 pb-2">
+                    <div className="flex gap-1 px-3 pb-2">
                       <Button onClick={() => reconnect.mutate(server.serverId)}>reconectar</Button>
+                      {config && (
+                        <Button
+                          variant="danger"
+                          title="Saca el servidor de esta empresa. Sus herramientas dejan de existir para los agentes."
+                          onClick={() => olvidar.mutate(server.serverId)}
+                        >
+                          quitar
+                        </Button>
+                      )}
                     </div>
                   </li>
                 );
@@ -133,6 +168,114 @@ export function McpHub({ company }: { company: CompanyBundle }) {
           title={active ? `Herramientas de ${active.serverName}` : "Todas las herramientas MCP"}
         />
         <Prober companyId={companyId} tools={mcpTools} />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Alta de servidores pegando la configuración que ya tenés.
+ *
+ * El formato `{"mcpServers": {…}}` es el que publica cada servidor en su README
+ * y el que ya está pegado en Claude y en Cursor. Pedir que se traduzca a mano
+ * campo por campo era, en los hechos, la razón por la que MCP no se usaba: la
+ * capacidad estaba entera del lado del motor y el único camino para llegar a
+ * ella era un `curl`.
+ *
+ * Los secretos **no** se importan: `parsearConfigMcp` guarda el nombre de la
+ * variable y descarta el valor literal, avisando. Es la garantía de que una
+ * empresa exportada a JSON no lleva credenciales adentro.
+ */
+function AltaDeServidor({
+  companyId,
+  onListo,
+}: {
+  companyId: string;
+  onListo: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const [texto, setTexto] = useState("");
+
+  const lectura = useMemo(
+    () => (texto.trim() ? parsearConfigMcp(texto) : { servidores: [], avisos: [] }),
+    [texto],
+  );
+
+  const crear = useMutation({
+    mutationFn: async () => {
+      for (const servidor of lectura.servidores) {
+        await api.crearMcpServer(companyId, {
+          name: servidor.name,
+          description: servidor.description,
+          transport: servidor.transport,
+          enabled: true,
+          autoApproveTools: true,
+        });
+      }
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["company", companyId] });
+      void queryClient.invalidateQueries({ queryKey: ["mcp-health", companyId] });
+      void queryClient.invalidateQueries({ queryKey: ["tools", companyId] });
+      setTexto("");
+      onListo();
+    },
+  });
+
+  return (
+    <div className="space-y-2 border-b border-line bg-canvas p-3">
+      <Field
+        label="Pegá la configuración del servidor"
+        hint="La misma que usás en Claude o en Cursor. Los secretos no se guardan acá: dejá el nombre de la variable de entorno y el valor en el .env."
+      >
+        <textarea
+          value={texto}
+          onChange={(event) => setTexto(event.target.value)}
+          rows={7}
+          spellCheck={false}
+          placeholder={'{\n  "mcpServers": {\n    "browsermcp": {\n      "command": "npx",\n      "args": ["@browsermcp/mcp@latest"]\n    }\n  }\n}'}
+          className={`${inputClass} font-mono text-[11px]`}
+        />
+      </Field>
+
+      {lectura.servidores.length > 0 && (
+        <ul className="space-y-1 rounded border border-line bg-surface p-2">
+          {lectura.servidores.map((servidor) => (
+            <li key={servidor.name} className="text-[11px]">
+              <span className="font-mono text-ink">{servidor.name}</span>
+              <span className="ml-2 text-ink-faint">
+                {servidor.transport.type === "stdio"
+                  ? `${servidor.transport.command} ${servidor.transport.args.join(" ")}`
+                  : servidor.transport.url}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {lectura.avisos.map((aviso) => (
+        <p key={aviso} className="rounded bg-warn/10 px-2 py-1 text-[11px] text-warn">
+          {aviso}
+        </p>
+      ))}
+
+      <div className="flex items-center gap-2">
+        <Button
+          variant="primary"
+          disabled={lectura.servidores.length === 0 || crear.isPending}
+          onClick={() => crear.mutate()}
+        >
+          {crear.isPending
+            ? "conectando…"
+            : `conectar ${lectura.servidores.length || ""} servidor${
+                lectura.servidores.length === 1 ? "" : "es"
+              }`}
+        </Button>
+        {crear.isError && (
+          <span className="text-[11px] text-danger">
+            {crear.error instanceof Error ? crear.error.message : "No se pudo guardar."}
+          </span>
+        )}
       </div>
     </div>
   );

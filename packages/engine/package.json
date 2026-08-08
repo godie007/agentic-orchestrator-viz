@@ -8,6 +8,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.22.0",
     "@orq/llm": "*",
     "@orq/shared": "*",
     "@orq/tools": "*"

@@ -17,12 +17,124 @@ propio**; cada adaptador traduce en su borde.
 | `openai` | `adapters/openai.ts` | directo |
 | `ollama` | `adapters/ollama.ts` | **local, costo cero** |
 | `nvidia` | `adapters/nvidia.ts` | build.nvidia.com, modelos sin costo con límite de tasa |
+| `claude-sesion` | `adapters/anthropic.ts` → `ClaudeSesionProvider` | **el mismo Anthropic, autenticado con la sesión de `ant auth login`**. Ver abajo |
+| `claude-code` | `adapters/claude-code.ts` → `ClaudeCodeProvider` | **delega al CLI oficial de Claude Code**; corre bajo tu suscripción. Ver abajo |
 
 `adapters/openai-shared.ts` concentra lo común del formato OpenAI, que reusan
 varios. Ver [[Cómo agregar un proveedor LLM]].
 
 **Cada rol elige su proveedor y su modelo por separado.** Eso es lo que permite
 correr los roles rutinarios barato y pagar sólo donde la decisión lo justifica.
+
+## Claude con la sesión, como proveedor aparte
+
+`claude-sesion` es el **mismo adaptador** que `anthropic`: sólo cambia de dónde
+sale la credencial. Es un `providerId` distinto —y no una opción del anterior—
+porque un rol elige proveedor **por id**: separados, le podés dar la sesión a un
+agente y la API key al resto.
+
+Se prende con `ORQ_CLAUDE_SESION=1`. Es un interruptor, no una credencial: la
+credencial la aporta `ant`.
+
+```sh
+ant auth login
+export ANTHROPIC_AUTH_TOKEN=$(ant auth print-credentials --access-token)
+```
+
+> [!warning] No es la suscripción de claude.ai
+> `ant auth login` es un login a la **plataforma de desarrollo**: sigue
+> facturando como API contra tu organización. Lo que ahorra es tener una clave
+> estática en `.env`, no los tokens.
+
+### Cuatro cosas que cuestan un rato si no se saben
+
+**El token viaja distinto que la clave.** No es cambiar un valor: va como
+`Authorization: Bearer` en vez de `x-api-key`, **y** exige el beta
+`oauth-2025-04-20`. Sin ese header, `/v1/messages` rechaza un token válido. Lo
+pone el adaptador, no quien configura.
+
+**El SDK todavía no lee el perfil de disco.** La versión instalada (0.68)
+resuelve `ANTHROPIC_API_KEY` y `ANTHROPIC_AUTH_TOKEN` y nada más — no hay
+`ANTHROPIC_PROFILE` ni `ANTHROPIC_CONFIG_DIR` en el paquete. Por eso hace falta
+exportar el token a mano. El adaptador construye el cliente **vacío** cuando no
+le dan credencial, así que el día que el SDK sume la cadena completa, esto
+empieza a andar solo sin tocar una línea.
+
+**El token vence y no se refresca solo** al pasarlo por variable de entorno. Si
+ese rol andaba y dejó de autenticar, es volver a exportarlo — no es el adaptador.
+
+> [!danger] Una `ANTHROPIC_API_KEY` **vacía** rompe esto
+> Gana igual su lugar en la cadena de credenciales del SDK y autentica con una
+> clave en blanco: la sesión nunca se usa y el error es un 401 sin explicación.
+> `.env.example` la trae vacía, así que copiarlo encima basta para caer acá.
+> `buildRegistry` la saca del entorno al prender la sesión — vacía no le servía a
+> nadie, porque con ella el proveedor `anthropic` tampoco se registra.
+
+### Los tiers no resuelven acá
+
+La API de Anthropic no publica precios, así que `blendedPrice` devuelve `null` y
+ningún modelo califica para una banda. **El rol que use este proveedor tiene que
+fijar su `modelSlug` exacto desde la UI.** Vale igual para `anthropic`.
+
+> [!danger] Sin precios, el tope de presupuesto no corta
+> Es la consecuencia grave del mismo hueco. `computeCost` toma
+> `model.inputPricePerMTok ?? null` → sin precio, `costUsd` es **0** → `spentUsd`
+> no crece nunca → `budgetUsd` **jamás se dispara**. Medido: una corrida de 4
+> llamadas y 33k tokens de entrada quedó en `spentUsd: 0.0000`.
+>
+> Con los tres proveedores, **el único freno real es `maxTicks`** cuando no hay
+> precios. Vale para `anthropic`, `claude-sesion` y `claude-code`.
+
+## Claude Code (suscripción)
+
+`claude-code` es la **única vía** de correr un agente tuyo con tu suscripción de
+claude.ai (Pro/Max). En vez de pegar a la API (que factura por uso a la
+organización), **delega cada turno al CLI oficial** (`adapters/claude-code.ts`):
+
+- El modelo corre **del lado de Anthropic con el login de esta máquina**; el
+  ledger registra el gasto como **US$ 0**.
+- Prende con `ORQ_CLAUDE_CODE=1` en `.env`; un `CLAUDE_CODE_WORKDIR` guarda los
+  archivos que el agente trabaje.
+- No publica precios, así que no hay tiers: el rol tiene que **fijar
+  `modelSlug` explícito** (`claude-code/sonnet`, `claude-code/opus`,
+  `claude-code/haiku`).
+
+### Diferencias con `claude-sesion`
+
+| | `claude-sesion` | `claude-code` |
+|---|---|---|
+| Cómo corre | SDK de Anthropic | CLI oficial de Claude Code |
+| Autentica | token OAuth de `ant` | login de la máquina |
+| Factura | API → tu organización | tu suscripción Pro/Max |
+| Modelo | el que fijes | resuelve el CLI |
+| Tools | las del engine | las **del engine** vía puente MCP + las del CLI |
+
+> El **puente MCP** es el camino por el que `claude-code` sí toca las tools de
+> coordinación del org. El CLI corre su propio loop y no devuelve `tool_calls`
+> (el engine no puede interceptarlas con `ToolRegistry`), así que el engine
+> expone las tools del **rol** como un servidor MCP que vive **en su propio
+> proceso**, con acceso directo a `RunState` y al `bus`. Ver
+> `packages/engine/src/claude-mcp.ts`:
+>
+> - Transporte: socket Unix + relay stdio (`packages/llm/src/adapters/
+>   claude-code-relay.mjs`). Claude escribe su protocolo MCP en stdin y el
+>   relay lo canaliza al socket donde escucha el engine; las respuestas vuelven
+>   por el mismo camino.
+> - Cada delegación (`open()`) crea un socket y un servidor MCP **nuevos**, para
+>   que los turnos de `claude-code` en paralelo no compartan estado.
+> - Las llamadas se resuelven con la **misma maquinaria que el loop**
+>   (`executeOne`): respetan aprobaciones, memo de lecturas, activity y emiten
+>   los mismos eventos de coordinación.
+> - El adaptador arma el `--mcp-config` con `--strict-mcp-config` y una
+>   **allowlist de solo las tools expuestas** (`mcp__orq__<tool>`), no
+>   `--dangerously-skip-permissions`.
+
+> [!warning] Límites
+> (1) La credencial es de esta máquina; no sirve para un server multi-usuario.
+> (2) Pro/Max tienen rate-limits por ventana (5 h) y semanales, pensados para
+> uso interactivo: un farm 24/7 se va a throttlear. (3) La allowlist de
+> herramientas usa solo las del rol más las tools básicas del CLI (bash,
+> archivos).
 
 ## `ModelSelection`
 
