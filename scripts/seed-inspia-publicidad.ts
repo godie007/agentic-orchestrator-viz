@@ -65,6 +65,14 @@ const STAGING = "https://inspia-staging.codla.co";
  * con él. El tier no se fija a mano: se declara un **rango** y el motor elige
  * por turno según la dificultad medida (bandeja, tareas, contexto, fallos), así
  * un turno de trámite no paga el modelo del turno difícil.
+ *
+ * **Todo va por la suscripción y nada por OpenRouter**, que cobra por token: en
+ * una producción de doce clips con varias corridas, el gasto real se va en los
+ * reintentos, no en el resultado. La contracara es que acá el costo no se mide
+ * en dólares sino en la ventana de uso de la suscripción, y por eso **ningún
+ * rol llega a `smart`**: Opus la consume mucho más rápido y para este trabajo
+ * —escribir un guion, leer un tablero, encadenar clips— Sonnet alcanza. Los dos
+ * roles de trámite (investigación ya hecha y supervisión) van en `cheap`.
  */
 const model = (tierMinimo: ModelSelection["tier"], tierMaximo: ModelSelection["tier"]): ModelSelection => ({
   providerId: "claude-code",
@@ -252,7 +260,7 @@ at the extracted frames yourself with your file-reading tool. "No errors reporte
 "it looks good". Approve explicitly, or send it back naming the scene and what is wrong.
 
 If a capability is missing mid-run, convocá un especialista instead of stalling.`,
-  model: model("standard", "smart"),
+  model: model("standard", "standard"),
   toolIds: herramientas("read_output_file", "list_output", "inspeccionar_medio"),
   authority: "executive",
   reportsTo: null,
@@ -288,11 +296,11 @@ WHAT YOU DELIVER, as one artifact with key "brief-inspia":
 
 Say explicitly what you could not confirm in the vault. An honest gap is worth more than
 a plausible sentence that the video cannot back with an image.`,
-  model: model("standard", "standard"),
+  model: model("cheap", "cheap"),
   toolIds: herramientas("list_output", "read_output_file"),
   authority: "executor",
   reportsTo: directora.id,
-  maxTurns: 10,
+  maxTurns: 6,
   spendApprovalThresholdUsd: null,
   position: { x: 400, y: 200 },
 };
@@ -335,7 +343,7 @@ brief verified it.
 
 Coordinate the scene list with Diego BEFORE finishing: if he cannot film a screen, the
 scene has to change. A scene that ends up without a clip is filmed as a flat colour card.`,
-  model: model("standard", "smart"),
+  model: model("standard", "standard"),
   toolIds: [],
   authority: "manager",
   reportsTo: directora.id,
@@ -396,7 +404,7 @@ the video done.
 
 You do not judge your own footage: Marina does. But never hand over a clip you have not
 at least measured with inspeccionar_medio.`,
-  model: model("standard", "smart"),
+  model: model("standard", "standard"),
   toolIds: herramientas(
     "grabar_clip",
     "export_video_clips",
@@ -441,7 +449,7 @@ Write your verdict as an artifact with key "qa-inspia-publicidad" and send it to
 and Valentina. Do not approve anything you did not look at. If you could not check
 something, say so — a reviewer who guesses spreads false findings with the same
 authority as real ones.`,
-  model: model("standard", "smart"),
+  model: model("standard", "standard"),
   toolIds: herramientas("extraer_cuadros", "inspeccionar_medio", "read_output_file", "list_output"),
   authority: "manager",
   reportsTo: directora.id,
@@ -482,11 +490,11 @@ starts. Use record_lesson for anything that will still be true next time: an exa
 a URL that works, a trap in the app.
 
 You do not film and you do not write the script. You make sure both are happening.`,
-  model: model("standard", "smart"),
+  model: model("cheap", "cheap"),
   toolIds: herramientas("list_output", "read_output_file", "inspeccionar_medio"),
   authority: "manager",
   reportsTo: directora.id,
-  maxTurns: 10,
+  maxTurns: 6,
   spendApprovalThresholdUsd: null,
   position: { x: 960, y: 340 },
 };
