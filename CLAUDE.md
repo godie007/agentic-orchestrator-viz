@@ -647,6 +647,31 @@ quien recibe el aviso lo abra desde la misma red, no desde cualquier lado. Sin
 `N8N_EMAIL_WEBHOOK_URL` la herramienta falla diciendo exactamente qué falta y de
 quién es el problema.
 
+**El trabajo abierto sobrevive a su corrida; lo terminado no vuelve.** Un
+encargo largo no entra en una corrida, y hasta acá la siguiente arrancaba con
+el tablero vacío: los entregables sobrevivían, las tareas no. Ahora
+`listTasksAbiertasByCompany` las carga en `CompanyConfig.tasks` y `RunState`
+las **adopta** —pasan a la corrida nueva, con `heredadaDeRunId` recordando de
+dónde vienen—, así que sus dueños arrancan con trabajo pendiente y el scheduler
+los convoca desde el primer ciclo. `done` y `cancelled` quedan afuera: lo
+terminado no es trabajo, y su registro vive en la traza.
+
+**Supervisar es mirar el tablero, no preguntarle a los agentes.**
+`estado_del_proceso` (coordinación, `readOnly`) da la foto del encargo: tareas
+de **todos** los roles con lo trabado, entregables, quién no ejecutó nada y los
+últimos fallos. `check_activity` responde "qué ejecutó cada uno" y
+`list_my_tasks` sólo lo propio; faltaba "dónde está trabado el trabajo" — y sin
+eso supervisar era creerle a un agente que informa como hecho lo que no hizo,
+que es el error más repetido del sistema. Corregir sigue siendo `update_task` +
+`assign_task` + `send_message`.
+
+**Una corrida no sobrevive al reinicio, y ahora se nota.** El estado vivo está
+en memoria; con un apagado ordenado quedan en `stopped`, pero una caída dura
+las dejaba en `running` para siempre — la UI mostraba una corrida en curso
+inexistente y `tieneCorridaViva` bloqueaba las misiones de esa empresa.
+`Store.sanearCorridasHuerfanas()` corre al arrancar el servidor y las cierra
+explicando por qué.
+
 **Todo lo que pasa tiene que emitir un evento.** El motor emite a `EventBus`, el
 servidor persiste y reemite por SSE, y la UI deriva su estado de la traza — no
 hace polling. "Ver en vivo" y "retroceder en el timeline" son la misma operación.

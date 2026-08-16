@@ -26,6 +26,7 @@
     "check:llm": "tsx --env-file-if-exists=.env scripts/check-llm.ts",
     "check:models": "tsx --env-file-if-exists=.env scripts/check-models.ts",
     "db:inspia": "tsx --env-file-if-exists=.env scripts/seed-inspia-lanzamiento.ts",
+    "db:inspia-publicidad": "tsx --env-file-if-exists=.env scripts/seed-inspia-publicidad.ts",
     "db:observatorio": "tsx --env-file-if-exists=.env scripts/seed-observatorio-ia.ts"
   },
   "auditNotes": {
