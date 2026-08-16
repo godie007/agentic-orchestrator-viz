@@ -49,6 +49,16 @@ export interface CompanyConfig {
    * empezar un documento nuevo con otra clave.
    */
   artifacts: Artifact[];
+  /**
+   * Trabajo que quedó abierto en corridas anteriores.
+   *
+   * Es lo que permite retomar un encargo largo donde quedó en vez de volver a
+   * empezar: las tareas se adoptan en esta corrida —conservando de cuál vienen
+   * en `heredadaDeRunId`— y sus dueños arrancan con trabajo pendiente, así que
+   * el scheduler los convoca solo. Opcional para no obligar a los tests a
+   * construirlo.
+   */
+  tasks?: Task[];
 }
 
 /**
@@ -148,6 +158,21 @@ export class RunState {
     // Los de corridas anteriores entran al estado pero no se vuelven a
     // persistir: ya están guardados, y duplicarlos rompería el versionado.
     this.artifacts.push(...config.artifacts);
+
+    // El trabajo abierto de corridas anteriores se **adopta**: pasa a esta
+    // corrida (así el tablero de la UI y `listTasks` lo muestran) pero recuerda
+    // de dónde viene, para que su dueño sepa que no lo abrió recién. Al revés
+    // que los entregables, acá sí hay que persistir: la tarea cambia de dueño.
+    for (const previa of config.tasks ?? []) {
+      if (previa.runId === this.runId) continue;
+      const adoptada: Task = {
+        ...previa,
+        runId: this.runId,
+        heredadaDeRunId: previa.heredadaDeRunId ?? previa.runId,
+      };
+      this.tasks.push(adoptada);
+      this.persistence.saveTask(adoptada);
+    }
   }
 
   // --- AgentWorkspace: lectura de la configuración -------------------------
@@ -219,6 +244,7 @@ export class RunState {
       createTask: (input) => state.createTask(input, actorId),
       updateTask: (taskId, patch) => state.updateTask(taskId, patch),
       listTasks: (roleId) => state.listTasks(roleId),
+      listAllTasks: () => [...state.tasks],
       writeArtifact: (input) => state.writeArtifact(input, actorId),
       readArtifact: (key) => state.readArtifact(key),
       listArtifacts: () => state.listArtifacts(),
@@ -294,6 +320,7 @@ export class RunState {
       priority: input.priority,
       dueTick: input.dueTick,
       result: null,
+      heredadaDeRunId: null,
       createdAt: now,
       updatedAt: now,
     };

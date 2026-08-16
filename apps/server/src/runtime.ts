@@ -529,6 +529,10 @@ export class Runtime {
       // Lo que la empresa ya produjo, para que cualquier área lo lea y lo
       // versione en lugar de reescribirlo con otra clave.
       artifacts: this.store.listArtifactsByCompany(company.id),
+      // El trabajo que quedó abierto se adopta en esta corrida: un encargo
+      // largo se retoma donde quedó, y sus dueños arrancan con trabajo
+      // pendiente, así que el scheduler los convoca desde el primer ciclo.
+      tasks: this.store.listTasksAbiertasByCompany(company.id),
     };
     if (config.roles.length === 0) {
       throw new Error("La empresa no tiene roles: definí al menos uno antes de arrancar.");

@@ -180,6 +180,14 @@ export interface AgentWorkspace {
   createTask(input: CreateTaskInput): Promise<Task>;
   updateTask(taskId: string, patch: UpdateTaskInput): Promise<Task | null>;
   listTasks(assigneeRoleId: string): Promise<Task[]>;
+  /**
+   * El tablero completo de la corrida, de todos los roles.
+   *
+   * Existe para supervisar: `listTasks` sirve para trabajar (lo mío), esto
+   * sirve para ver dónde está trabado el encargo. Quién puede mirarlo lo
+   * decide la herramienta que lo usa (`estado_del_proceso`).
+   */
+  listAllTasks(): Task[];
   writeArtifact(input: WriteArtifactInput): Promise<Artifact>;
   readArtifact(key: string): Promise<Artifact | null>;
   /** Los de la empresa, no solo los de esta corrida. */

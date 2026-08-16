@@ -1038,6 +1038,135 @@ const checkActivity: RegisteredTool = {
 };
 
 /**
+ * La foto del encargo entero, para quien tiene que conducirlo.
+ *
+ * `check_activity` responde "qué ejecutó cada uno" y `list_my_tasks` "qué me
+ * toca a mí"; ninguna de las dos responde **dónde está trabado el trabajo**.
+ * Sin eso, supervisar era preguntarle a cada agente y creerle la respuesta —
+ * que es justamente el error que el sistema ya sabe que se comete: informar
+ * como hecho lo que no se hizo.
+ *
+ * Muestra el tablero completo (de todos, no sólo del que pregunta), qué
+ * entregables hay con su versión, quién viene fallando, y qué se heredó de
+ * corridas anteriores. Con eso, corregir es `update_task` + `assign_task` +
+ * `send_message`, que ya existen.
+ */
+const estadoDelProceso: RegisteredTool = {
+  name: "estado_del_proceso",
+  origin: "coordination",
+  readOnly: true,
+  requiresApproval: false,
+  description:
+    "La foto del encargo: en qué anda cada agente, qué tareas están abiertas, trabadas o " +
+    "sin empezar, qué entregables existen y quién viene fallando. Usalo antes de decidir " +
+    "si el trabajo avanza, para encontrar dónde está trabado y para retomar un encargo " +
+    "que viene de una corrida anterior. Después corregí con update_task, assign_task o " +
+    "send_message.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      solo_pendiente: {
+        type: "boolean",
+        description: "Sólo lo que falta: tareas abiertas y agentes sin producir. Default false.",
+      },
+    },
+    additionalProperties: false,
+  },
+  async execute(args, ctx) {
+    const soloPendiente = args.solo_pendiente === true;
+    const tareas = ctx.workspace.listAllTasks();
+    const artefactos = await ctx.workspace.listArtifacts();
+    const actividad = ctx.workspace.listActivity();
+    const nombre = (roleId: string | null): string =>
+      ctx.workspace.roles.find((role) => role.id === roleId)?.name ?? "?";
+
+    const partes: string[] = [`Ciclo ${ctx.tick} de la corrida.`];
+
+    // --- Tablero, agrupado por dueño ---------------------------------------
+    const ABIERTAS = new Set(["pending", "in_progress", "in_review", "blocked"]);
+    const visibles = soloPendiente ? tareas.filter((t) => ABIERTAS.has(t.status)) : tareas;
+    if (visibles.length === 0) {
+      partes.push(
+        soloPendiente
+          ? "\nTAREAS: no queda ninguna abierta."
+          : "\nTAREAS: todavía nadie abrió ninguna. Si el encargo ya se repartió, se está " +
+            "coordinando sólo por mensajes y no hay forma de ver el avance: pedile a quien " +
+            "reparte que use assign_task.",
+      );
+    } else {
+      const porRol = new Map<string, typeof visibles>();
+      for (const tarea of visibles) {
+        const grupo = porRol.get(tarea.assigneeRoleId) ?? [];
+        grupo.push(tarea);
+        porRol.set(tarea.assigneeRoleId, grupo);
+      }
+      const lineas: string[] = [];
+      for (const [roleId, grupo] of porRol) {
+        lineas.push(`  ${nombre(roleId)}:`);
+        for (const tarea of grupo) {
+          const heredada = tarea.heredadaDeRunId ? " · viene de una corrida anterior" : "";
+          const trabada = tarea.status === "blocked" ? " ← TRABADA" : "";
+          const cerrada = tarea.result ? ` · resultado: ${preview(tarea.result, 120)}` : "";
+          lineas.push(
+            `    - [${tarea.status}] ${tarea.title}${trabada}${heredada}${cerrada}`,
+          );
+        }
+      }
+      const abiertas = visibles.filter((t) => ABIERTAS.has(t.status)).length;
+      partes.push(`\nTAREAS (${visibles.length}, ${abiertas} abiertas):\n${lineas.join("\n")}`);
+    }
+
+    // --- Qué se produjo -----------------------------------------------------
+    if (artefactos.length === 0) {
+      partes.push("\nENTREGABLES: ninguno todavía.");
+    } else {
+      const lineas = artefactos.map(
+        (art) =>
+          `  - ${art.key} v${art.version} · "${art.title}"` +
+          (art.deOtraCorrida ? " · de un trabajo anterior" : ""),
+      );
+      partes.push(`\nENTREGABLES (${artefactos.length}):\n${lineas.join("\n")}`);
+    }
+
+    // --- Quién trabaja y quién no ------------------------------------------
+    const ejecutadasPorRol = new Map<string, { total: number; fallos: number }>();
+    for (const entrada of actividad) {
+      const cuenta = ejecutadasPorRol.get(entrada.roleId) ?? { total: 0, fallos: 0 };
+      cuenta.total += 1;
+      if (!entrada.ok) cuenta.fallos += 1;
+      ejecutadasPorRol.set(entrada.roleId, cuenta);
+    }
+    const lineasAgentes = ctx.workspace.roles.map((role) => {
+      const cuenta = ejecutadasPorRol.get(role.id);
+      if (!cuenta) return `  - ${role.name} (${role.title}): sin ejecutar nada todavía`;
+      return (
+        `  - ${role.name} (${role.title}): ${cuenta.total} llamadas` +
+        (cuenta.fallos > 0 ? `, ${cuenta.fallos} con error` : "")
+      );
+    });
+    partes.push(`\nAGENTES:\n${lineasAgentes.join("\n")}`);
+
+    // --- Lo último que se rompió -------------------------------------------
+    const fallos = actividad.filter((entrada) => !entrada.ok).slice(-8);
+    if (fallos.length > 0) {
+      const lineas = fallos.map(
+        (entrada) =>
+          `  - c${entrada.tick} ${nombre(entrada.roleId)} · ${entrada.tool} · ${entrada.detail}`,
+      );
+      partes.push(
+        `\nÚLTIMOS FALLOS (${fallos.length} de ${actividad.filter((e) => !e.ok).length}):\n` +
+          `${lineas.join("\n")}\n` +
+          `  Si un agente repite el mismo error, no le pidas que insista: cambiale el enfoque ` +
+          `o reasignale la tarea.`,
+      );
+    }
+
+    const abiertas = tareas.filter((t) => ABIERTAS.has(t.status)).length;
+    return ok(partes.join("\n"), `${abiertas} tareas abiertas, ${artefactos.length} entregables`);
+  },
+};
+
+/**
  * Memoria de la empresa. Es la herramienta que evita volver a pagar por lo
  * mismo: lo que se registra acá entra en el prompt de todas las corridas
  * siguientes, así que el conocimiento no se re-deriva a fuerza de mensajes.
@@ -1497,6 +1626,7 @@ export const coordinationTools: RegisteredTool[] = [
   readArtifact,
   listArtifacts,
   checkActivity,
+  estadoDelProceso,
   recordLesson,
   requestNewRole,
   convocarEspecialista,

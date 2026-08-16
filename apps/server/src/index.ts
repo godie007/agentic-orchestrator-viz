@@ -22,6 +22,19 @@ const app = Fastify({
 await app.register(cors, { origin: true });
 await registerRoutes(app, { store, runtime, providers, misiones });
 
+// Una corrida no sobrevive al reinicio: su estado vivo está en memoria. Con un
+// apagado ordenado quedan en `stopped`, pero una caída dura las dejaba en
+// `running` para siempre — la UI mostraba una corrida en curso que no existe, y
+// las misiones de esa empresa quedaban bloqueadas por `tieneCorridaViva`.
+const huerfanas = store.sanearCorridasHuerfanas();
+if (huerfanas > 0) {
+  app.log.warn(
+    `${huerfanas} corrida(s) habían quedado marcadas como vivas de un arranque anterior: ` +
+      `se cerraron. Su traza y sus entregables siguen; el trabajo abierto lo hereda la ` +
+      `próxima corrida de esa empresa.`,
+  );
+}
+
 misiones.start();
 if (!env.emailWebhookUrl) {
   app.log.warn(

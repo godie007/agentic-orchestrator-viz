@@ -504,3 +504,107 @@ describe("cascada al borrar un servidor MCP", () => {
     ]);
   });
 });
+
+/**
+ * Continuidad entre corridas. Los entregables ya sobrevivían a su corrida; el
+ * trabajo abierto no, así que retomar un encargo largo empezaba con el tablero
+ * vacío. Y una caída dura dejaba corridas marcadas como vivas para siempre,
+ * que además bloquean las misiones de esa empresa.
+ */
+describe("trabajo abierto de la empresa", () => {
+  const ahora = Date.now();
+
+  const corrida = (id: string, company = companyId, status = "completed") => ({
+    id,
+    companyId: company,
+    objective: "Un encargo largo",
+    status,
+    mode: "manual" as const,
+    tick: 3,
+    maxTicks: 10,
+    budgetUsd: 5,
+    spentUsd: 0,
+    cronIntervalMs: 60_000,
+    stopReason: null,
+    startedAt: ahora,
+    endedAt: null,
+  });
+
+  const tarea = (runId: string, title: string, status: string) => ({
+    id: ids.task(),
+    runId,
+    title,
+    detail: "",
+    assigneeRoleId: ids.role(),
+    createdByRoleId: null,
+    status,
+    priority: "normal" as const,
+    dueTick: null,
+    result: null,
+    heredadaDeRunId: null,
+    createdAt: ahora,
+    updatedAt: ahora,
+  });
+
+  it("devuelve lo pendiente de cualquier corrida y deja afuera lo terminado", () => {
+    const vieja = corrida(ids.run());
+    const otra = corrida(ids.run(), otraEmpresa);
+    store.saveRun(vieja as never);
+    store.saveRun(otra as never);
+    store.saveTask(tarea(vieja.id, "Grabar la escena 3", "in_progress") as never);
+    store.saveTask(tarea(vieja.id, "Escribir el guion", "done") as never);
+    store.saveTask(tarea(vieja.id, "Revisar el corte", "blocked") as never);
+    store.saveTask(tarea(vieja.id, "Idea descartada", "cancelled") as never);
+    store.saveTask(tarea(otra.id, "De otra empresa", "pending") as never);
+
+    const abiertas = store.listTasksAbiertasByCompany(companyId).map((t) => t.title);
+    expect(abiertas.sort()).toEqual(["Grabar la escena 3", "Revisar el corte"]);
+  });
+
+  it("una empresa sin trabajo previo devuelve la lista vacía", () => {
+    expect(store.listTasksAbiertasByCompany(companyId)).toEqual([]);
+  });
+});
+
+describe("saneo de corridas huérfanas", () => {
+  const ahora = Date.now();
+  const corrida = (status: string) => ({
+    id: ids.run(),
+    companyId,
+    objective: "x",
+    status,
+    mode: "continuous" as const,
+    tick: 1,
+    maxTicks: 10,
+    budgetUsd: 1,
+    spentUsd: 0,
+    cronIntervalMs: 60_000,
+    stopReason: null,
+    startedAt: ahora,
+    endedAt: null,
+  });
+
+  it("cierra las que quedaron vivas y explica por qué, sin tocar las terminadas", () => {
+    const corriendo = corrida("running");
+    const esperando = corrida("awaiting_approval");
+    const pausada = corrida("paused");
+    const terminada = corrida("completed");
+    for (const run of [corriendo, esperando, pausada, terminada]) store.saveRun(run as never);
+
+    expect(store.sanearCorridasHuerfanas()).toBe(3);
+
+    for (const id of [corriendo.id, esperando.id, pausada.id]) {
+      const run = store.getRun(id)!;
+      expect(run.status).toBe("stopped");
+      expect(run.stopReason).toContain("reinició");
+      expect(run.endedAt).not.toBeNull();
+    }
+    expect(store.getRun(terminada.id)?.status).toBe("completed");
+  });
+
+  it("es idempotente: correrlo de nuevo no encuentra nada", () => {
+    store.saveRun(corrida("running") as never);
+    expect(store.sanearCorridasHuerfanas()).toBe(1);
+    expect(store.sanearCorridasHuerfanas()).toBe(0);
+  });
+});

@@ -505,6 +505,14 @@ export const taskSchema = z.object({
   /** Tick en el que el asignado debería haberla terminado. */
   dueTick: z.number().int().nonnegative().nullable().default(null),
   result: z.string().max(20000).nullable().default(null),
+  /**
+   * Corrida en la que se abrió, cuando la tarea viene de una anterior.
+   *
+   * El trabajo pendiente sobrevive a la corrida que lo abrió: una empresa que
+   * retoma un encargo largo tiene que encontrar su tablero como lo dejó, no
+   * uno vacío. `null` = nació en la corrida actual.
+   */
+  heredadaDeRunId: idSchema.nullable().default(null),
   createdAt: timestampSchema,
   updatedAt: timestampSchema,
 });

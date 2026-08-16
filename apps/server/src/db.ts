@@ -587,6 +587,52 @@ export class Store {
     return this.many<Task>("SELECT data FROM tasks WHERE run_id = ?", runId);
   }
 
+  /**
+   * El trabajo que la empresa dejó a medias, de cualquier corrida.
+   *
+   * Los entregables ya sobrevivían a su corrida; las tareas no, y por eso una
+   * corrida nueva sobre un encargo largo arrancaba con el tablero vacío — sin
+   * forma de saber qué quedó pendiente ni retomarlo. Se une por `runs` porque
+   * la tabla sólo guarda `run_id`. `done` y `cancelled` quedan afuera: lo
+   * terminado no es trabajo pendiente, y su registro vive en la traza.
+   */
+  listTasksAbiertasByCompany(companyId: string): Task[] {
+    return this.many<Task>(
+      `SELECT t.data FROM tasks t
+       JOIN runs r ON r.id = t.run_id
+       WHERE r.company_id = ?
+         AND json_extract(t.data, '$.status') NOT IN ('done', 'cancelled')`,
+      companyId,
+    );
+  }
+
+  /**
+   * Cierra las corridas que quedaron marcadas como vivas sin estarlo.
+   *
+   * Una corrida no sobrevive al reinicio del servidor: su estado vivo está en
+   * memoria. Con un apagado ordenado quedan en `stopped`, pero un `kill -9` o
+   * una caída dejaba la fila en `running` para siempre — y desde la UI eso se
+   * lee como "hay una corrida en curso", que además bloquea las misiones de
+   * esa empresa (`tieneCorridaViva`). Se llama al arrancar, antes de servir.
+   */
+  sanearCorridasHuerfanas(): number {
+    const vivas = this.many<Run>(
+      `SELECT data FROM runs
+       WHERE json_extract(data, '$.status') IN ('running', 'awaiting_approval', 'paused')`,
+    );
+    for (const run of vivas) {
+      this.saveRun({
+        ...run,
+        status: "stopped",
+        stopReason:
+          "El servidor se reinició mientras corría. Las corridas no sobreviven a un reinicio: " +
+          "su traza y sus entregables quedan, pero para seguir hay que arrancar una nueva.",
+        endedAt: run.endedAt ?? Date.now(),
+      });
+    }
+    return vivas.length;
+  }
+
   saveArtifact(artifact: Artifact, companyId?: string): void {
     this.upsertRunScoped("artifacts", artifact.id, artifact.runId, artifact);
     if (companyId) {

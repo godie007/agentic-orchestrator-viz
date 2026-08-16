@@ -895,3 +895,116 @@ describe("solicitar_servidor_mcp", () => {
     expect(ultima.mcpProposal[0]!.transport.type).toBe("stdio");
   });
 });
+
+/**
+ * `estado_del_proceso` existe porque supervisar era preguntarle a cada agente
+ * y creerle: `check_activity` dice qué se ejecutó y `list_my_tasks` sólo lo
+ * propio, pero nadie respondía "dónde está trabado el encargo". Estos tests
+ * fijan lo que tiene que mostrar y, sobre todo, que no mienta cuando no hay
+ * nada: un tablero vacío es información, no un éxito.
+ */
+describe("estado_del_proceso", () => {
+  const ahora = Date.now();
+  const tarea = (overrides: Record<string, unknown> = {}) => ({
+    id: `tsk_${Math.random().toString(36).slice(2)}`,
+    runId: "run_test",
+    title: "Grabar la escena 3",
+    detail: "",
+    assigneeRoleId: "rol_2",
+    createdByRoleId: "rol_1",
+    status: "in_progress",
+    priority: "normal",
+    dueTick: null,
+    result: null,
+    heredadaDeRunId: null,
+    createdAt: ahora,
+    updatedAt: ahora,
+    ...overrides,
+  });
+
+  function workspaceCon(datos: {
+    tasks?: unknown[];
+    artifacts?: unknown[];
+    activity?: unknown[];
+  }): AgentWorkspace {
+    return {
+      roles: [
+        { id: "rol_1", name: "Ana", title: "Directora" },
+        { id: "rol_2", name: "Diego", title: "Realizador" },
+      ],
+      departments: [],
+      listAllTasks: () => datos.tasks ?? [],
+      listArtifacts: async () => datos.artifacts ?? [],
+      listActivity: () => datos.activity ?? [],
+    } as unknown as AgentWorkspace;
+  }
+
+  const correr = (workspace: AgentWorkspace, args: Record<string, unknown> = {}) =>
+    tool("estado_del_proceso").execute(args, { ...ctx, workspace });
+
+  it("dice que no hay tablero en vez de dar el encargo por encaminado", async () => {
+    const resultado = await correr(workspaceCon({}));
+    expect(resultado.ok).toBe(true);
+    // El caso peligroso: coordinación sólo por mensajes, sin avance medible.
+    expect(resultado.content).toContain("todavía nadie abrió ninguna");
+    expect(resultado.content).toContain("assign_task");
+  });
+
+  it("agrupa las tareas por dueño y marca las trabadas", async () => {
+    const resultado = await correr(
+      workspaceCon({
+        tasks: [
+          tarea({ title: "Escribir el guion", assigneeRoleId: "rol_1", status: "done" }),
+          tarea({ title: "Grabar la escena 3", status: "blocked" }),
+        ],
+      }),
+    );
+    expect(resultado.content).toContain("Ana:");
+    expect(resultado.content).toContain("Diego:");
+    expect(resultado.content).toContain("← TRABADA");
+  });
+
+  it("`solo_pendiente` deja afuera lo terminado", async () => {
+    const workspace = workspaceCon({
+      tasks: [
+        tarea({ title: "Escribir el guion", status: "done" }),
+        tarea({ title: "Grabar la escena 3", status: "pending" }),
+      ],
+    });
+    const completo = await correr(workspace);
+    const pendiente = await correr(workspace, { solo_pendiente: true });
+    expect(completo.content).toContain("Escribir el guion");
+    expect(pendiente.content).not.toContain("Escribir el guion");
+    expect(pendiente.content).toContain("Grabar la escena 3");
+  });
+
+  it("señala lo heredado de una corrida anterior", async () => {
+    const resultado = await correr(
+      workspaceCon({ tasks: [tarea({ heredadaDeRunId: "run_viejo" })] }),
+    );
+    expect(resultado.content).toContain("viene de una corrida anterior");
+  });
+
+  it("nombra a los agentes que todavía no ejecutaron nada", async () => {
+    const resultado = await correr(
+      workspaceCon({
+        activity: [{ roleId: "rol_2", tick: 1, tool: "grabar_clip", ok: true, detail: "listo" }],
+      }),
+    );
+    expect(resultado.content).toContain("Ana (Directora): sin ejecutar nada todavía");
+    expect(resultado.content).toContain("Diego (Realizador): 1 llamadas");
+  });
+
+  it("muestra los últimos fallos y qué hacer con ellos", async () => {
+    const resultado = await correr(
+      workspaceCon({
+        activity: [
+          { roleId: "rol_2", tick: 3, tool: "grabar_clip", ok: false, detail: "no apareció el texto" },
+        ],
+      }),
+    );
+    expect(resultado.content).toContain("ÚLTIMOS FALLOS");
+    expect(resultado.content).toContain("no apareció el texto");
+    expect(resultado.content).toContain("reasignale la tarea");
+  });
+});
