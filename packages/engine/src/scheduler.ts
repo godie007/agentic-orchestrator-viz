@@ -363,11 +363,18 @@ export class Orchestrator {
   private ultimoErrorDeTurno: string | null = null;
 
   private async runTurns(roleIds: string[]): Promise<{ intentados: number; fallidos: number }> {
-    // Nadie espera un lugar: el ciclo termina cuando termina el último, así que
-    // dejar a un agente en cola no ahorra nada y alarga el ciclo entero. Con 5
-    // roles y un tope de 4, uno arrancaba recién cuando otro terminaba.
-    // El tope configurado se respeta como piso, no como techo.
-    const concurrency = Math.max(1, this.deps.concurrency ?? 4, roleIds.length);
+    // El tope es un techo de verdad, y esto cambió después de romperlo.
+    //
+    // Antes se usaba como piso —`max(concurrency, roleIds.length)`— con el
+    // argumento de que el ciclo termina cuando termina el último, así que dejar
+    // a alguien en cola sólo alarga el ciclo. Eso vale mientras el proveedor
+    // aguante. Con uno que delega un agent loop entero por turno, cada turno
+    // pesa cientos de miles de tokens, y disparar seis a la vez los hace fallar
+    // **a todos juntos**: tres ciclos seguidos sin un turno bueno y la corrida
+    // se declara fallida. Un ciclo más lento es mejor que una corrida muerta, y
+    // quien opera la empresa ya tiene la perilla para decidirlo
+    // (`AGENT_CONCURRENCY`), que hasta acá no limitaba nada.
+    const concurrency = Math.max(1, Math.min(this.deps.concurrency ?? 4, roleIds.length));
     const queue = [...roleIds];
     let intentados = 0;
     let fallidos = 0;
