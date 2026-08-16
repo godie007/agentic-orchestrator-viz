@@ -68,11 +68,17 @@ const STAGING = "https://inspia-staging.codla.co";
  *
  * **Todo va por la suscripción y nada por OpenRouter**, que cobra por token: en
  * una producción de doce clips con varias corridas, el gasto real se va en los
- * reintentos, no en el resultado. La contracara es que acá el costo no se mide
- * en dólares sino en la ventana de uso de la suscripción, y por eso **ningún
- * rol llega a `smart`**: Opus la consume mucho más rápido y para este trabajo
- * —escribir un guion, leer un tablero, encadenar clips— Sonnet alcanza. Los dos
- * roles de trámite (investigación ya hecha y supervisión) van en `cheap`.
+ * reintentos, no en el resultado. Una corrida agotó el saldo y las siguientes
+ * murieron con un 402.
+ *
+ * El reparto de tiers sigue dónde se juega la calidad, no dónde hay más
+ * trabajo. `smart` (Opus) para los tres roles que **deciden**: quien escribe el
+ * guion —una pieza publicitaria se gana o se pierde en la escritura—, quien la
+ * aprueba y quien mira los cuadros y dice si sirve. `standard` (Sonnet) para
+ * los que **ejecutan**: filmar clip por clip son dieciséis iteraciones
+ * mecánicas donde Opus quemaría la ventana de uso sin que el clic salga mejor.
+ * `cheap` no se usa: en una pieza que tiene que vender, ahorrar en criterio
+ * sale caro.
  */
 const model = (tierMinimo: ModelSelection["tier"], tierMaximo: ModelSelection["tier"]): ModelSelection => ({
   providerId: "claude-code",
@@ -260,7 +266,7 @@ at the extracted frames yourself with your file-reading tool. "No errors reporte
 "it looks good". Approve explicitly, or send it back naming the scene and what is wrong.
 
 If a capability is missing mid-run, convocá un especialista instead of stalling.`,
-  model: model("standard", "standard"),
+  model: model("smart", "smart"),
   toolIds: herramientas("read_output_file", "list_output", "inspeccionar_medio"),
   authority: "executive",
   reportsTo: null,
@@ -296,7 +302,7 @@ WHAT YOU DELIVER, as one artifact with key "brief-inspia":
 
 Say explicitly what you could not confirm in the vault. An honest gap is worth more than
 a plausible sentence that the video cannot back with an image.`,
-  model: model("cheap", "cheap"),
+  model: model("standard", "standard"),
   toolIds: herramientas("list_output", "read_output_file"),
   authority: "executor",
   reportsTo: directora.id,
@@ -362,7 +368,7 @@ Write for the person who signs the cheque, not for the inspector: they buy
 defensibility, speed of delivery and being able to prove what was done. And never write
 a sentence that could belong to any other software ("solución integral", "optimiza
 procesos"): every claim must be visible on the screen being filmed at that moment.`,
-  model: model("standard", "standard"),
+  model: model("smart", "smart"),
   toolIds: [],
   authority: "manager",
   reportsTo: directora.id,
@@ -468,7 +474,7 @@ Write your verdict as an artifact with key "qa-inspia-publicidad" and send it to
 and Valentina. Do not approve anything you did not look at. If you could not check
 something, say so — a reviewer who guesses spreads false findings with the same
 authority as real ones.`,
-  model: model("standard", "standard"),
+  model: model("smart", "smart"),
   toolIds: herramientas("extraer_cuadros", "inspeccionar_medio", "read_output_file", "list_output"),
   authority: "manager",
   reportsTo: directora.id,
@@ -509,7 +515,7 @@ starts. Use record_lesson for anything that will still be true next time: an exa
 a URL that works, a trap in the app.
 
 You do not film and you do not write the script. You make sure both are happening.`,
-  model: model("cheap", "cheap"),
+  model: model("standard", "standard"),
   toolIds: herramientas("list_output", "read_output_file", "inspeccionar_medio"),
   authority: "manager",
   reportsTo: directora.id,
