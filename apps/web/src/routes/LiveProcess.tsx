@@ -431,6 +431,8 @@ function enCriollo(event: TraceEvent): string {
       return "termina el ciclo";
     case "agent.thinking":
       return "un agente piensa";
+    case "model.selected":
+      return event.escalado ? "el motor elige el modelo" : "modelo del turno";
     case "agent.turn_end":
       return "un agente cierra su turno";
     case "agent.message":

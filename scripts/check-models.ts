@@ -5,7 +5,7 @@
  *
  *   npm run check:models
  */
-import { buildRegistry, resolveAllTiers } from "@orq/llm";
+import { buildRegistry, resolverTodosLosTiers } from "@orq/llm";
 
 const registry = buildRegistry(process.env);
 const providers = registry.list();
@@ -28,7 +28,7 @@ for (const provider of providers) {
   console.log(`  ✓ ${health.detail}`);
 
   const models = await provider.listModels();
-  const tiers = resolveAllTiers(models);
+  const tiers = resolverTodosLosTiers(provider.id, models);
 
   for (const [tier, resolution] of Object.entries(tiers)) {
     if (!resolution) {

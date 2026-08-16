@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { ModelInfo, ProviderId } from "@orq/shared";
+import { enriquecerConPreciosClaude } from "../modelos-claude.js";
 import {
   LlmError,
   type ChatEvent,
@@ -78,16 +79,16 @@ export class AnthropicProvider implements LlmProvider {
           // Estos campos llegaron a la Models API en 2026; si el SDK instalado
           // es más viejo no vienen y el catálogo los muestra en cero.
           contextLength: (model as { max_input_tokens?: number }).max_input_tokens ?? 0,
-          // La API de Anthropic no publica precios. El ledger cuenta tokens
-          // pero no puede valorizarlos: para control de gasto fino, usá el
-          // mismo modelo vía OpenRouter.
+          // La API de Anthropic no publica precios: los completa la tabla
+          // curada de `modelos-claude.ts` con precios de lista, para que el
+          // ledger pueda valorizar tokens y `budgetUsd` corte de verdad.
           inputPricePerMTok: null,
           outputPricePerMTok: null,
           supportsTools: true,
         });
       }
-      this.cache = models;
-      return models;
+      this.cache = enriquecerConPreciosClaude(models);
+      return this.cache;
     } catch (error) {
       throw wrapError(error, this.id);
     }

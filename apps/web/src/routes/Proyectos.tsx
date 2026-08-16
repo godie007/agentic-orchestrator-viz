@@ -54,6 +54,7 @@ export function Proyectos({
           providerId: "openrouter",
           modelSlug: null,
           tier: "standard",
+          escalado: null,
           temperature: null,
           maxOutputTokens: 4096,
         },

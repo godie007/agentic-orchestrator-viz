@@ -34,6 +34,7 @@ const model = (tier: ModelSelection["tier"]): ModelSelection => ({
   providerId: "openrouter",
   modelSlug: null, // se resuelve contra el catálogo vivo al arrancar la corrida
   tier,
+  escalado: null,
   temperature: null,
   maxOutputTokens: 4096,
 });

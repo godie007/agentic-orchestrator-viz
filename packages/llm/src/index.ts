@@ -1,5 +1,6 @@
 export * from "./types.js";
 export * from "./tiers.js";
+export * from "./modelos-claude.js";
 export * from "./ledger.js";
 export * from "./registry.js";
 export { OpenRouterProvider, type OpenRouterConfig } from "./adapters/openrouter.js";

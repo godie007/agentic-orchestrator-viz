@@ -667,12 +667,18 @@ igual** su lugar en la cadena y autentica en blanco, por eso `buildRegistry` la
 borra del entorno al prender la sesión. No es la suscripción de claude.ai: sigue
 facturando como API.
 
-**Sin precios no hay tope de gasto.** La API de Anthropic no los publica, así que
-`computeCost` deja `costUsd` en 0, `spentUsd` no crece y **`budgetUsd` nunca se
-dispara**: con `anthropic` y `claude-sesion` el único freno del orquestador es
-`maxTicks`. Es la misma causa por la que los tiers no resuelven y hay que fijar
-`modelSlug`. Medido en una corrida real: 4 llamadas, 33k tokens de entrada,
-`spentUsd: 0.0000`. Para control de gasto fino, el mismo modelo por OpenRouter.
+**Los precios de Claude son una tabla curada, no vienen de la API.** La API de
+Anthropic no los publica; `modelos-claude.ts` (`packages/llm`) los completa con
+precios de lista fechados, así `computeCost` valoriza tokens y **`budgetUsd`
+corta de verdad** con `anthropic` y `claude-sesion`. El costo es una estimación
+por precio de lista, no un `reportedCostUsd`. Los tiers de esos proveedores
+tampoco pasan por las bandas de `tiers.ts`: con precios reales, Haiku
+(US$1.80 mezclado) y Sonnet (US$5.40) caerían los dos en la banda `standard` —
+`resolverTierEstatico` asigna el tier por mapa (cheap=Haiku, standard=Sonnet,
+smart=Opus) y las bandas quedan para catálogos heterogéneos como OpenRouter.
+Cuando sale un modelo nuevo, se agrega una fila a `PRECIOS_CLAUDE` y listo. En
+`claude-code` el costo sigue en 0 a propósito: la suscripción no factura por
+token.
 
 **Una empresa creada por la API tiene que sembrar sus herramientas**
 (`Runtime.sembrarHerramientas`, en `POST /api/companies`). Es el mismo problema

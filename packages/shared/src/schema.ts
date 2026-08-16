@@ -54,6 +54,20 @@ export const modelSelectionSchema = z.object({
   /** Slug exacto, ej. "anthropic/claude-sonnet-5". Tiene prioridad sobre el tier. */
   modelSlug: z.string().min(1).nullable().default(null),
   tier: modelTierSchema.default("standard"),
+  /**
+   * Escalado automático: el motor elige el tier de cada turno según la
+   * dificultad medida (bandeja, tareas, contexto, fallos), acotado al rango.
+   * `null` = apagado, el rol usa siempre su `tier`. Un `modelSlug` fijo lo
+   * desactiva por completo: el slug tiene prioridad absoluta.
+   */
+  escalado: z
+    .object({
+      activo: z.boolean().default(false),
+      tierMinimo: modelTierSchema.default("cheap"),
+      tierMaximo: modelTierSchema.default("smart"),
+    })
+    .nullable()
+    .default(null),
   /** Sobrescribe la temperatura del proveedor. `null` = default del proveedor. */
   temperature: z.number().min(0).max(2).nullable().default(null),
   maxOutputTokens: z.number().int().positive().default(4096),

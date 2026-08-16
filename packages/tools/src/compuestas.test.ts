@@ -70,6 +70,7 @@ function makeCtx(opciones: {
         providerId: "openai",
         modelSlug: null,
         tier: "cheap",
+        escalado: null,
         temperature: null,
         maxOutputTokens: 1024,
       },

@@ -10,6 +10,7 @@ const model: ModelSelection = {
   providerId: "openai",
   modelSlug: "fake-model",
   tier: "cheap",
+  escalado: null,
   temperature: null,
   maxOutputTokens: 1024,
 };

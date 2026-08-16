@@ -3,6 +3,7 @@ import {
   idSchema,
   mcpConnectionStatusSchema,
   messageTypeSchema,
+  modelTierSchema,
   runStatusSchema,
   taskStatusSchema,
   timestampSchema,
@@ -60,6 +61,25 @@ const agentThinkingEvent = z.object({
   modelSlug: z.string(),
   /** Iteración dentro del turno (un turno puede tener varias vueltas de tools). */
   iteration: z.number().int().nonnegative(),
+});
+
+/**
+ * Qué modelo corre este turno y por qué. Se emite en todo turno —con o sin
+ * escalado—: sin este evento, el modelo elegido por dificultad sería una
+ * decisión invisible, y un costo que varía entre turnos no se podría explicar.
+ */
+const modelSelectedEvent = z.object({
+  ...base,
+  type: z.literal("model.selected"),
+  roleId: idSchema,
+  providerId: z.string(),
+  modelSlug: z.string(),
+  /** Tier que resolvió, o null cuando el rol fijó un slug exacto. */
+  tier: modelTierSchema.nullable().default(null),
+  /** `true` cuando el tier lo eligió el medidor de dificultad. */
+  escalado: z.boolean().default(false),
+  /** Explicación legible de la elección, para la traza y el organigrama. */
+  motivo: z.string(),
 });
 
 const agentTurnEndEvent = z.object({
@@ -221,6 +241,7 @@ export const traceEventSchema = z.discriminatedUnion("type", [
   tickStartEvent,
   tickEndEvent,
   agentThinkingEvent,
+  modelSelectedEvent,
   agentTurnEndEvent,
   agentMessageEvent,
   toolSelectionEvent,

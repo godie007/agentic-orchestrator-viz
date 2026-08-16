@@ -741,3 +741,208 @@ describe("contestarle a la persona que dio el encargo", () => {
     expect(`${detalle.error ?? ""}${detalle.preview ?? ""}`).toContain("request_context");
   });
 });
+
+/**
+ * Con `escalado.activo`, el tier de cada turno lo decide la dificultad medida
+ * en vez del campo fijo del rol. Estos tests fijan las tres reglas: el fake
+ * recibe el modelo del tier elegido, la elección se anuncia con
+ * `model.selected`, y un slug fijo apaga el escalado por completo.
+ */
+class FakeConCatalogo extends FakeProvider {
+  override async listModels() {
+    // Un modelo por banda de precio: barato (0.6 mezclado), medio (3.4) y caro
+    // (12), para que cada tier resuelva a un slug distinto.
+    const base = { providerId: this.id, contextLength: 200_000, supportsTools: true };
+    return [
+      { ...base, slug: "modelo-barato", name: "Barato", inputPricePerMTok: 0.5, outputPricePerMTok: 1 },
+      { ...base, slug: "modelo-medio", name: "Medio", inputPricePerMTok: 3, outputPricePerMTok: 5 },
+      { ...base, slug: "modelo-caro", name: "Caro", inputPricePerMTok: 10, outputPricePerMTok: 20 },
+    ];
+  }
+}
+
+describe("escalado de modelo por dificultad", () => {
+  function escenarioEscalado(rol: Parameters<typeof makeRole>[3] = {}) {
+    const { agente: _ignorado, ...resto } = escenario([]);
+    void _ignorado;
+    return resto;
+  }
+
+  it("un turno liviano corre con el modelo del tier mínimo", async () => {
+    const company = makeCompany();
+    const dep = makeDepartment(company.id, "Tecnología");
+    const agente = makeRole(company.id, dep.id, "Diego", {
+      model: {
+        providerId: "openai",
+        modelSlug: null,
+        tier: "standard",
+        escalado: { activo: true, tierMinimo: "cheap", tierMaximo: "smart" },
+        temperature: null,
+        maxOutputTokens: 1024,
+      },
+    });
+    const config: CompanyConfig = {
+      company,
+      departments: [dep],
+      roles: [agente],
+      policies: [],
+      tools: [],
+      mcpServers: [],
+      requests: [],
+      artifacts: [],
+      learnings: [],
+    };
+    const run = makeRun(company.id);
+    const state = new RunState(run.id, config);
+    const bus = new EventBus();
+    const eventos: TraceEvent[] = [];
+    bus.subscribe((event) => eventos.push(event));
+
+    const provider = new FakeConCatalogo(() => ({ text: "Listo." }));
+    const providers = new ProviderRegistry();
+    providers.register(provider);
+
+    await runAgentTurn(state, agente, {
+      bus,
+      providers,
+      tools: new ToolRegistry(),
+      ledger: new RunLedger(10),
+      objective: "Ok",
+      maxTicks: 5,
+    });
+
+    // Sin bandeja, sin tareas y sin contexto: dificultad mínima.
+    expect(provider.calls[0]?.model).toBe("modelo-barato");
+
+    const seleccion = eventos.find((event) => event.type === "model.selected");
+    expect(seleccion).toBeDefined();
+    expect(seleccion).toMatchObject({ escalado: true, tier: "cheap", modelSlug: "modelo-barato" });
+    expect((seleccion as { motivo: string }).motivo).not.toBe("");
+  });
+
+  it("una bandeja cargada de un executive sube al tier máximo", async () => {
+    const company = makeCompany();
+    const dep = makeDepartment(company.id, "Dirección");
+    const agente = makeRole(company.id, dep.id, "Ana", {
+      authority: "executive",
+      model: {
+        providerId: "openai",
+        modelSlug: null,
+        tier: "standard",
+        escalado: { activo: true, tierMinimo: "cheap", tierMaximo: "smart" },
+        temperature: null,
+        maxOutputTokens: 1024,
+      },
+    });
+    const config: CompanyConfig = {
+      company,
+      departments: [dep],
+      roles: [agente],
+      policies: [],
+      tools: [],
+      mcpServers: [],
+      requests: [],
+      artifacts: [],
+      learnings: [],
+    };
+    const run = makeRun(company.id);
+    const state = new RunState(run.id, config);
+    for (let i = 0; i < 5; i++) {
+      await state.sendMessage({
+        toRoleId: agente.id,
+        toDepartmentId: null,
+        type: "request",
+        subject: `Pedido ${i}`,
+        body: "x".repeat(2000),
+        threadId: null,
+        inReplyTo: null,
+      });
+    }
+    const bus = new EventBus();
+    const eventos: TraceEvent[] = [];
+    bus.subscribe((event) => eventos.push(event));
+
+    const provider = new FakeConCatalogo(() => ({ text: "Delego." }));
+    const providers = new ProviderRegistry();
+    providers.register(provider);
+
+    await runAgentTurn(state, agente, {
+      bus,
+      providers,
+      tools: new ToolRegistry(),
+      ledger: new RunLedger(10),
+      objective: "Coordinar",
+      maxTicks: 5,
+    });
+
+    expect(provider.calls[0]?.model).toBe("modelo-caro");
+    const seleccion = eventos.find((event) => event.type === "model.selected");
+    expect(seleccion).toMatchObject({ escalado: true, tier: "smart" });
+  });
+
+  it("un modelSlug fijo apaga el escalado y el evento lo dice", async () => {
+    const company = makeCompany();
+    const dep = makeDepartment(company.id, "Tecnología");
+    const agente = makeRole(company.id, dep.id, "Diego", {
+      model: {
+        providerId: "openai",
+        modelSlug: "modelo-medio",
+        tier: "cheap",
+        escalado: { activo: true, tierMinimo: "cheap", tierMaximo: "smart" },
+        temperature: null,
+        maxOutputTokens: 1024,
+      },
+    });
+    const config: CompanyConfig = {
+      company,
+      departments: [dep],
+      roles: [agente],
+      policies: [],
+      tools: [],
+      mcpServers: [],
+      requests: [],
+      artifacts: [],
+      learnings: [],
+    };
+    const run = makeRun(company.id);
+    const state = new RunState(run.id, config);
+    const bus = new EventBus();
+    const eventos: TraceEvent[] = [];
+    bus.subscribe((event) => eventos.push(event));
+
+    const provider = new FakeConCatalogo(() => ({ text: "Listo." }));
+    const providers = new ProviderRegistry();
+    providers.register(provider);
+
+    await runAgentTurn(state, agente, {
+      bus,
+      providers,
+      tools: new ToolRegistry(),
+      ledger: new RunLedger(10),
+      objective: "Ok",
+      maxTicks: 5,
+    });
+
+    expect(provider.calls[0]?.model).toBe("modelo-medio");
+    const seleccion = eventos.find((event) => event.type === "model.selected");
+    expect(seleccion).toMatchObject({ escalado: false, tier: null, modelSlug: "modelo-medio" });
+  });
+
+  it("incorporarRol nace con escalado activo acotado a executor", () => {
+    const { state } = escenarioEscalado();
+    const rol = state.incorporarRol({
+      name: "Especialista",
+      title: "Especialista",
+      departmentName: "Tecnología",
+      systemPrompt: "…",
+      reportsToId: null,
+      toolIds: [],
+    });
+    expect(rol.model.escalado).toEqual({
+      activo: true,
+      tierMinimo: "cheap",
+      tierMaximo: "standard",
+    });
+    expect(rol.authority).toBe("executor");
+  });
+});

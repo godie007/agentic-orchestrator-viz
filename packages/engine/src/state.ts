@@ -512,6 +512,24 @@ export class RunState {
     return this.verificaciones.get(clave);
   }
 
+  /**
+   * Llamadas fallidas consecutivas del rol, contando desde la última exitosa.
+   *
+   * Es una señal para el medidor de dificultad: un agente que viene fallando
+   * suele necesitar un modelo mejor, no más intentos. Se lee de `activity` —lo
+   * graba el loop, no el agente— así que no introduce estado mutable por turno.
+   */
+  fallosConsecutivos(roleId: string): number {
+    let fallos = 0;
+    for (let i = this.activity.length - 1; i >= 0; i--) {
+      const entry = this.activity[i]!;
+      if (entry.roleId !== roleId) continue;
+      if (entry.ok) break;
+      fallos++;
+    }
+    return fallos;
+  }
+
   /** Registra una llamada a herramienta. Lo llama el agent loop. */
   recordActivity(entry: ActivityEntry): void {
     this.activity.push(entry);
@@ -603,7 +621,20 @@ export class RunState {
       name: input.name,
       title: input.title,
       systemPrompt: input.systemPrompt,
-      model: this.config.company.defaultModel,
+      // Hereda el modelo de la empresa pero con escalado por dificultad
+      // acotado abajo: un convocado nace executor y sus turnos livianos no
+      // tienen por qué correr con el modelo del CEO. Si la empresa fijó un
+      // slug exacto se respeta —el slug gana siempre—, porque puede ser la
+      // única forma de resolver en proveedores sin precios ni mapa (ollama,
+      // openai, nvidia). Una empresa en tier `free` no escala a modelos
+      // pagos: correría derecho a un 402 en el primer turno pesado.
+      model: {
+        ...this.config.company.defaultModel,
+        escalado:
+          this.config.company.defaultModel.tier === "free"
+            ? { activo: true, tierMinimo: "free", tierMaximo: "free" }
+            : { activo: true, tierMinimo: "cheap", tierMaximo: "standard" },
+      },
       toolIds: input.toolIds,
       authority: "executor",
       reportsTo: input.reportsToId,

@@ -21,6 +21,7 @@ import type { EventBus } from "./events.js";
 import type { RunState } from "./state.js";
 import { createClaudeMcpBridge } from "./claude-mcp.js";
 import { buildSystemPrompt, buildTurnPrompt } from "./prompt.js";
+import { elegirTierPorDificultad } from "./dificultad.js";
 
 /**
  * Agent loop: un turno de un rol.
@@ -119,7 +120,54 @@ export async function runAgentTurn(
   // compartido que los turnos paralelos se pisarían entre sí.
   const workspace = state.forActor(role.id);
 
-  const { provider, modelSlug, modelInfo } = await providers.resolveModel(role.model);
+  // El contexto de trabajo se arma antes de elegir el modelo: son las mismas
+  // señales que consumen el tool router y el medidor de dificultad.
+  const taskContext = [
+    deps.objective,
+    ...inbox.map((message) => `${message.subject} ${message.body}`),
+    ...tasks.map((task) => `${task.title} ${task.detail}`),
+  ].join(" ");
+
+  // Con escalado activo, el tier del turno lo decide la dificultad medida; un
+  // slug fijo lo desactiva porque el slug tiene prioridad absoluta.
+  const escalado = role.model.escalado;
+  const escalar = Boolean(escalado?.activo) && !role.model.modelSlug;
+  const eleccion = escalar
+    ? elegirTierPorDificultad(
+        {
+          mensajes: inbox.length,
+          tareas: tasks.length,
+          caracteres: taskContext.length,
+          autoridad: role.authority,
+          reanudando: interrumpido != null,
+          fallosRecientes: state.fallosConsecutivos(role.id),
+        },
+        { tierMinimo: escalado!.tierMinimo, tierMaximo: escalado!.tierMaximo },
+      )
+    : null;
+
+  const { provider, modelSlug, modelInfo } = await providers.resolveModel(
+    eleccion ? { ...role.model, tier: eleccion.tier } : role.model,
+  );
+
+  // Se emite siempre, no sólo al escalar: un costo que varía entre turnos
+  // tiene que poder explicarse mirando la traza.
+  bus.emit({
+    type: "model.selected",
+    runId,
+    tick: state.tick,
+    roleId: role.id,
+    providerId: provider.id,
+    modelSlug,
+    tier: role.model.modelSlug ? null : (eleccion?.tier ?? role.model.tier),
+    escalado: eleccion != null,
+    motivo: eleccion
+      ? eleccion.motivo
+      : role.model.modelSlug
+        ? `Modelo fijado por el rol: ${role.model.modelSlug}.`
+        : `Tier ${role.model.tier} del rol, sin escalado.`,
+  });
+
   const allowed = tools.forRole(role, state.tools);
 
   // La búsqueda web nativa del proveedor reemplaza a la herramienta: se activa
@@ -130,12 +178,6 @@ export async function runAgentTurn(
   const exposable = nativeWebSearch
     ? allowed.filter((tool) => tool.name !== WEB_SEARCH_TOOL_NAME)
     : allowed;
-
-  const taskContext = [
-    deps.objective,
-    ...inbox.map((message) => `${message.subject} ${message.body}`),
-    ...tasks.map((task) => `${task.title} ${task.detail}`),
-  ].join(" ");
 
   const selection = selectTools(exposable, taskContext);
   bus.emit({

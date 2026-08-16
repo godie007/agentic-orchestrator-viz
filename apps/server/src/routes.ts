@@ -14,7 +14,7 @@ import {
   roleSchema,
   misionSchema,
 } from "@orq/shared";
-import { resolveAllTiers, type ProviderRegistry } from "@orq/llm";
+import { resolverTodosLosTiers, type ProviderRegistry } from "@orq/llm";
 import type { Store } from "./db.js";
 import type { Runtime } from "./runtime.js";
 import { contentTypeOf, previewDe, previewLiviano } from "./exports.js";
@@ -69,7 +69,7 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
           label: provider.label,
           ...health,
           modelCount: models.length,
-          tiers: resolveAllTiers(models),
+          tiers: resolverTodosLosTiers(provider.id, models),
         };
       }),
     );

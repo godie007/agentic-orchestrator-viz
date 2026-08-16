@@ -2,6 +2,7 @@ import type { ModelInfo, ModelSelection, ProviderId } from "@orq/shared";
 import type { LlmProvider } from "./types.js";
 import { LlmError } from "./types.js";
 import { resolveTier } from "./tiers.js";
+import { resolverTierEstatico } from "./modelos-claude.js";
 import { OpenRouterProvider } from "./adapters/openrouter.js";
 import { AnthropicProvider, ClaudeSesionProvider } from "./adapters/anthropic.js";
 import { ClaudeCodeProvider } from "./adapters/claude-code.js";
@@ -66,7 +67,11 @@ export class ProviderRegistry {
       };
     }
 
-    const resolved = resolveTier(models, selection.tier);
+    // Los proveedores Claude no publican precios utilizables por banda: para
+    // ellos manda el mapa curado. El resto sigue resolviendo por precio real.
+    const resolved =
+      resolverTierEstatico(selection.providerId, selection.tier, models) ??
+      resolveTier(models, selection.tier);
     if (!resolved) {
       throw new LlmError(
         `Ningún modelo de ${provider.label} califica para el tier "${selection.tier}". ` +

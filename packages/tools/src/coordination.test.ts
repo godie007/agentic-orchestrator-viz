@@ -35,6 +35,7 @@ const ctx: ToolContext = {
       providerId: "openai",
       modelSlug: null,
       tier: "cheap",
+      escalado: null,
       temperature: null,
       maxOutputTokens: 1024,
     },

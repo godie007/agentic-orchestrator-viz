@@ -3,6 +3,7 @@ import type {
   AgentRequest,
   CreateRunInput,
   McpServerHealth,
+  ModelSelection,
   Role,
   RoleProposal,
   Run,
@@ -36,6 +37,25 @@ import { ExportStore } from "./exports.js";
  */
 
 export type EventSink = (event: TraceEvent) => void;
+
+/**
+ * Activa el escalado por dificultad sobre un modelo heredado, con el rango que
+ * le corresponde a la autoridad: un executive puede subir hasta `smart`, un
+ * executor no pasa de `standard`. Una empresa en tier `free` no escala a
+ * modelos pagos —iría derecho a un 402—, y un slug fijo queda como está: el
+ * slug tiene prioridad absoluta y el escalado sería letra muerta.
+ */
+export function conEscaladoPorAutoridad(
+  base: ModelSelection,
+  authority: Role["authority"],
+): ModelSelection {
+  if (base.tier === "free") {
+    return { ...base, escalado: { activo: true, tierMinimo: "free", tierMaximo: "free" } };
+  }
+  const tierMaximo = authority === "executive" ? "smart" : "standard";
+  const tierMinimo = authority === "executive" ? "standard" : "cheap";
+  return { ...base, escalado: { activo: true, tierMinimo, tierMaximo } };
+}
 
 interface CompanyRuntime {
   companyId: string;
@@ -638,15 +658,22 @@ export class Runtime {
         name: propuesta.name,
         title: propuesta.title,
         systemPrompt: propuesta.systemPrompt,
-        // Hereda el modelo por defecto de la empresa: quien lo aprueba puede
-        // cambiarlo después desde el diseñador.
-        model: company?.defaultModel ?? {
-          providerId: "openrouter",
-          modelSlug: null,
-          tier: "cheap",
-          temperature: null,
-          maxOutputTokens: 2048,
-        },
+        // Hereda el modelo por defecto de la empresa con escalado por
+        // dificultad acotado según la autoridad propuesta: quien lo aprueba
+        // puede cambiarlo después desde el diseñador. El slug fijo de la
+        // empresa —si lo hay— se respeta: puede ser la única forma de resolver
+        // en proveedores sin precios ni mapa curado.
+        model: conEscaladoPorAutoridad(
+          company?.defaultModel ?? {
+            providerId: "openrouter",
+            modelSlug: null,
+            tier: "cheap",
+            escalado: null,
+            temperature: null,
+            maxOutputTokens: 2048,
+          },
+          propuesta.authority,
+        ),
         toolIds: [],
         authority: propuesta.authority,
         reportsTo: jefe?.id ?? null,
