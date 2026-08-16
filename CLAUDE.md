@@ -459,6 +459,18 @@ archivo ahí, a la vista de todos menos del programa. Del mismo tema en `.wav` y
 `.mp3` entra uno solo, y **entre pistas que empatan gana la más larga**: una cama
 que se repite cada cuarenta segundos se escucha como una cama que se repite.
 
+**Una cama que no se escucha es peor que no tener música.** Los dos números que
+lo deciden viven juntos en `sonido.ts` (`MUSICA.lufs` y `DUCKING`) porque el
+error fue la **suma** de dos decisiones que por separado parecían prudentes:
+normalizar a −26 LUFS —ya bajo para una cama— y encima ducking con `ratio=10`,
+que a esa altura no aparta la música, la apaga. Medido sobre un video real, la
+música quedaba en −40 dB. Un ducking musical baja 8-10 dB bajo la voz, no 20:
+`ratio=4`, `attack` corto (agarra la primera sílaba, si no cada frase arranca
+con un pico de música encima) y `release=300` para que la cama vuelva **entre
+frase y frase**, que es cuando una cama se tiene que oír. Verificalo midiendo
+el hueco entre dos frases, no el promedio del video ni la cola (ahí está el
+fade out y siempre da bajo).
+
 **La cama se mide en sonoridad, no en volumen.** Un `volume` fijo no significa
 nada: una pista comprada llega a −14 LUFS y una sintetizada a −24, así que el
 mismo número deja una inaudible y la otra encima de la voz. Se normaliza con

@@ -21,7 +21,26 @@
  * objetivo y recién ahí se la acuesta bajo la narración: así **cualquier** pista
  * que dejes en la biblioteca suena igual de presente.
  */
-export const MUSICA = { lufs: -26, entrada: 2.5, salida: 3.5 } as const;
+export const MUSICA = { lufs: -20, entrada: 2.5, salida: 3.5 } as const;
+
+/**
+ * Cuánto se aparta la cama cuando alguien habla.
+ *
+ * Estos cuatro números decidieron un video entero en el que **la música no se
+ * escuchaba**, y la causa era la suma de dos errores que por separado parecían
+ * prudentes: la cama nacía a −26 LUFS —ya bajo para una cama— y encima entraba
+ * a un `sidechaincompress` con `ratio=10`, que a esa altura no es un ducker
+ * sino una compuerta. Medido sobre el video real: en la cola, sin una sola
+ * palabra encima, la música quedaba en −40 dB. Inaudible en cualquier parlante.
+ *
+ * Un ducking musical baja la cama entre 8 y 10 dB bajo la voz, no 20. `ratio=4`
+ * comprime en vez de cortar; el `attack` corto agarra la primera sílaba (si no,
+ * cada frase arranca con un pico de música por encima de la voz) y el `release`
+ * de 300 ms la devuelve **entre frase y frase**, que es justo cuando una cama
+ * tiene que oírse. Con `release=400` y una narración corrida, la música vivía
+ * hundida de punta a punta.
+ */
+const DUCKING = { threshold: 0.06, ratio: 4, attack: 5, release: 300 } as const;
 
 /**
  * Se fija el formato de la mezcla de voz: la música y el compresor de cadena
@@ -79,7 +98,8 @@ export function construirSonido(pedido: PedidoSonido): string {
     // La música se aparta sola cuando alguien habla. Sin esto hay que elegir
     // entre una cama inaudible y una voz tapada, y las dos opciones suenan a
     // video hecho a las apuradas.
-    "[cama][vozlado]sidechaincompress=threshold=0.02:ratio=10:attack=20:release=400[camaduck]",
+    `[cama][vozlado]sidechaincompress=threshold=${DUCKING.threshold}:ratio=${DUCKING.ratio}:` +
+      `attack=${DUCKING.attack}:release=${DUCKING.release}[camaduck]`,
     `[vozmix][camaduck]amix=inputs=2:duration=first:normalize=0,${LIMITADOR}[aud]`,
   ].join(";");
 }
