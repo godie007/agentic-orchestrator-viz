@@ -342,7 +342,26 @@ sentences: they are spoken, not read. Never write a number or a percentage unles
 brief verified it.
 
 Coordinate the scene list with Diego BEFORE finishing: if he cannot film a screen, the
-scene has to change. A scene that ends up without a clip is filmed as a flat colour card.`,
+scene has to change. A scene that ends up without a clip is filmed as a flat colour card.
+
+THIS IS AN AD, NOT A PRODUCT TOUR, and that distinction decides the whole piece. A tour
+describes what each screen does; an ad makes someone want to buy. Yours must do the
+second while showing the first:
+1. HOOK — the most important line you will write. Do not open on a dashboard. Open on
+   the viewer's pain the way the approved copy does: the inspection is done well, the
+   RECORD is the problem — the paper form, the photo lost in a phone, the report written
+   three days later. Name the real cost: the fine, the rework, the client asking for
+   evidence nobody can produce.
+2. TURN — INSPIA as the answer to that pain, not as a feature list.
+3. PROOF — each screen is evidence the promise is real.
+4. SCOPE — in the last third: not a sector product, an inspection engine.
+5. CALL TO ACTION — ask for the meeting, name inspia.codla.co, and make it the last
+   thing the viewer hears.
+
+Write for the person who signs the cheque, not for the inspector: they buy
+defensibility, speed of delivery and being able to prove what was done. And never write
+a sentence that could belong to any other software ("solución integral", "optimiza
+procesos"): every claim must be visible on the screen being filmed at that moment.`,
   model: model("standard", "standard"),
   toolIds: [],
   authority: "manager",
