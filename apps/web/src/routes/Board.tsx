@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { Task, TaskStatus, TraceEvent } from "@orq/shared";
 import { api, type CompanyBundle } from "../api.js";
 import { useRunStream } from "../lib/stream.js";
-import { derive, type DerivedTask } from "../lib/derive.js";
+import { derive, porcentajeCache, type DerivedTask } from "../lib/derive.js";
 import { accionDeHerramienta } from "../lib/acciones.js";
 import { Empty, Status, relativeTime } from "../lib/ui.js";
 import { iniciales, tonosPorArea } from "./OrgGraph.js";
@@ -167,10 +167,12 @@ export function Board({ company }: { company: CompanyBundle }) {
         </span>
       </header>
 
+      <EnCurso state={state} rolePorId={rolePorId} tonos={tonos} />
+
       {tareas.length === 0 ? (
         <Empty>
-          Esta corrida todavía no creó tareas. Aparecen acá en cuanto un agente use{" "}
-          <code className="mx-1 text-accent">assign_task</code>.
+          Todavía no hay tareas abiertas. Arriba se ve igual lo que los agentes están
+          ejecutando ahora: el trabajo fino ocurre aunque nadie haya abierto una tarea.
         </Empty>
       ) : (
         // El tablero scrollea a lo ancho adentro suyo: con cinco columnas en
@@ -601,4 +603,106 @@ function Detalle({
       </div>
     </div>
   );
+}
+
+
+/**
+ * Qué está pasando ahora mismo, con el detalle que el tablero no tiene.
+ *
+ * El tablero muestra las tareas que los agentes se acuerdan de abrir, y un
+ * encargo puede avanzar veinte pasos sin que aparezca ninguna: quien mira la
+ * pantalla no ve nada y no sabe si el sistema trabaja o está trabado. Acá va lo
+ * que sí ocurre siempre — cada llamada a herramienta, con su resultado— más el
+ * consumo de tokens por agente, que es el recurso que de verdad se gasta.
+ */
+function EnCurso({
+  state,
+  rolePorId,
+  tonos,
+}: {
+  state: ReturnType<typeof derive>;
+  rolePorId: Map<string, { name: string; departmentId: string }>;
+  tonos: Map<string, number>;
+}) {
+  const activos = [...state.roles.entries()]
+    .filter(([, actividad]) => actividad.turns > 0 || actividad.thinking)
+    .sort((a, b) => b[1].inputTokens - a[1].inputTokens);
+  const recientes = [...state.acciones].reverse().slice(0, 14);
+
+  if (activos.length === 0 && recientes.length === 0) return null;
+
+  const nombre = (roleId: string): string => rolePorId.get(roleId)?.name ?? "?";
+
+  return (
+    <section className="mb-3 grid min-h-0 shrink-0 gap-3 lg:grid-cols-[minmax(0,340px)_minmax(0,1fr)]">
+      <div className="rounded-lg border border-line bg-surface p-2">
+        <h3 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-ink-dim">
+          Agentes · consumo en vivo
+        </h3>
+        <ul className="space-y-1">
+          {activos.map(([roleId, a]) => (
+            <li key={roleId} className="flex items-center gap-2 text-xs">
+              <span
+                className="grid size-6 shrink-0 place-items-center rounded-full text-[10px] font-semibold text-ink"
+                style={{ background: `oklch(0.45 0.12 ${tonos.get(rolePorId.get(roleId)?.departmentId ?? "") ?? 260})` }}
+              >
+                {iniciales(nombre(roleId))}
+              </span>
+              <span className="min-w-0 flex-1 truncate text-ink">
+                {nombre(roleId)}
+                {a.runningTool && (
+                  <span className="ml-1.5 text-[11px] text-warn">
+                    · {accionDeHerramienta(a.runningTool)}…
+                  </span>
+                )}
+              </span>
+              <span className="tabular shrink-0 text-[11px] text-ink-faint" title="tokens de entrada / salida de este agente">
+                ↓{miles(a.inputTokens)} ↑{miles(a.outputTokens)}
+              </span>
+            </li>
+          ))}
+        </ul>
+        <p className="mt-1.5 border-t border-line/60 pt-1.5 text-[11px] text-ink-faint">
+          Total de la corrida:{" "}
+          <span className="tabular text-ink-dim">
+            ↓{miles(state.inputTokens)} ↑{miles(state.outputTokens)}
+          </span>
+          {state.inputTokens > 0 && (
+            <span className="ml-1.5">· {porcentajeCache(state)}% del contexto vino de caché</span>
+          )}
+        </p>
+      </div>
+
+      <div className="min-w-0 rounded-lg border border-line bg-surface p-2">
+        <h3 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-ink-dim">
+          Procesamiento · últimas acciones
+        </h3>
+        {recientes.length === 0 ? (
+          <p className="text-[11px] text-ink-faint">Todavía no se ejecutó ninguna herramienta.</p>
+        ) : (
+          <ul className="max-h-40 space-y-0.5 overflow-auto pr-1">
+            {recientes.map((accion) => (
+              <li key={accion.id} className="flex items-baseline gap-2 text-[11px]">
+                <span className="tabular w-8 shrink-0 text-ink-faint">c{accion.tick}</span>
+                <span className="w-24 shrink-0 truncate text-ink-dim">{nombre(accion.roleId)}</span>
+                <span className={`shrink-0 ${accion.ok ? "text-ok" : "text-danger"}`}>
+                  {accion.ok ? "✓" : "✕"}
+                </span>
+                <span className="min-w-0 flex-1 truncate text-ink" title={accion.detalle}>
+                  {accionDeHerramienta(accion.tool)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </section>
+  );
+}
+
+/** 12.480 → 12,5k. En una corrida son millones y el número crudo no informa. */
+function miles(valor: number): string {
+  if (valor >= 1_000_000) return `${(valor / 1_000_000).toFixed(1)}M`;
+  if (valor >= 1_000) return `${(valor / 1_000).toFixed(1)}k`;
+  return String(valor);
 }

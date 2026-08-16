@@ -33,6 +33,24 @@ export interface MessageFlow {
   tick: number;
 }
 
+/**
+ * Una acción concreta que un agente ejecutó, con su resultado.
+ *
+ * El tablero mostraba sólo las tareas que los agentes se acuerdan de abrir, y
+ * un encargo puede avanzar veinte pasos sin que aparezca ninguna: quien mira
+ * la pantalla no ve nada y no sabe si el sistema trabaja o está trabado. Esto
+ * es el trabajo fino —cada llamada a herramienta— que sí ocurre siempre.
+ */
+export interface AccionReciente {
+  id: string;
+  roleId: string;
+  tool: string;
+  ok: boolean;
+  tick: number;
+  at: number;
+  detalle: string;
+}
+
 export interface McpActivity {
   serverId: string;
   toolName: string;
@@ -72,6 +90,8 @@ export interface DerivedState {
   /** Tareas por id, en el orden en que aparecieron. */
   tasks: Map<string, DerivedTask>;
   mcpCalls: McpActivity[];
+  /** Últimas llamadas a herramienta, para seguir el procesamiento en vivo. */
+  acciones: AccionReciente[];
   toolSelections: Map<string, { exposed: string[]; candidates: string[]; reason: string }>;
   tick: number;
   maxTick: number;
@@ -111,6 +131,7 @@ export function derive(events: TraceEvent[], upTo = events.length): DerivedState
   const flows: MessageFlow[] = [];
   const tasks = new Map<string, DerivedTask>();
   const mcpCalls: McpActivity[] = [];
+  const acciones: AccionReciente[] = [];
   const toolSelections = new Map<string, { exposed: string[]; candidates: string[]; reason: string }>();
   const eventsPerTick = new Map<number, number>();
 
@@ -213,6 +234,18 @@ export function derive(events: TraceEvent[], upTo = events.length): DerivedState
       case "tool.end": {
         const role = roleOf(event.roleId);
         if (role.runningTool === event.toolName) role.runningTool = null;
+        acciones.push({
+          id: event.id,
+          roleId: event.roleId,
+          tool: event.toolName,
+          ok: event.ok,
+          tick: event.tick,
+          at: event.at,
+          detalle: (event.error ?? event.preview ?? "").slice(0, 160),
+        });
+        // Una corrida larga hace miles: alcanza con la cola reciente, que es
+        // lo que alguien puede leer mientras mira.
+        if (acciones.length > 120) acciones.splice(0, acciones.length - 120);
         if (event.mcpServerId) {
           mcpCalls.push({
             serverId: event.mcpServerId,
@@ -248,6 +281,7 @@ export function derive(events: TraceEvent[], upTo = events.length): DerivedState
     flows,
     tasks,
     mcpCalls,
+    acciones,
     toolSelections,
     tick,
     maxTick,

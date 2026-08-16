@@ -100,11 +100,12 @@ export class Orchestrator {
       //
       // Hablar sin hacer nada, repetido, es no tener trabajo. Un mensaje nuevo
       // en la bandeja sí lo es, y lo reactiva.
-      const activeRoleIds = this.state.rolesWithWork().filter((roleId) => {
+      const conTrabajo = this.state.rolesWithWork().filter((roleId) => {
         const vacios = this.turnosSinHacerNada.get(roleId) ?? 0;
         if (vacios < TURNOS_VACIOS_TOLERADOS) return true;
         return this.state.inbox(roleId).length > 0;
       });
+      const activeRoleIds = this.ordenarPorUrgencia(conTrabajo);
 
       this.deps.bus.emit({
         type: "tick.start",
@@ -361,6 +362,51 @@ export class Orchestrator {
   /** Ciclos consecutivos en los que ningún turno pudo completarse. */
   private ticksSinTurnosOk = 0;
   private ultimoErrorDeTurno: string | null = null;
+
+  /**
+   * En qué orden se atiende a los que tienen trabajo.
+   *
+   * Con la concurrencia acotada, el orden **decide el ciclo**: si los dos
+   * lugares se los llevan agentes que están esperando a un tercero, el ciclo
+   * entero se va en turnos que no destraban nada. Antes no había orden —salía
+   * el que `rolesWithWork` devolviera primero, que es el orden de declaración
+   * de los roles— y una corrida podía gastar varios ciclos moviendo a los
+   * mismos dos.
+   *
+   * El criterio es "quién destraba a más gente", en tres señales que ya
+   * existen y no hace falta que nadie declare:
+   *
+   * 1. **Quien tiene a alguien esperándole una respuesta va primero.** Un
+   *    pedido sin contestar bloquea al que preguntó, y ese bloqueo se propaga.
+   * 2. **Después, el peso del trabajo propio**: tareas abiertas y bandeja.
+   * 3. **Y al final, quien viene fallando.** Un agente que encadena errores
+   *    quema el turno sin producir; que pase después de los que sí avanzan
+   *    —no se lo saltea, porque a veces el error se resuelve solo con contexto
+   *    nuevo, pero deja de comerse el lugar del que sí puede trabajar.
+   */
+  private ordenarPorUrgencia(roleIds: readonly string[]): string[] {
+    const puntaje = new Map<string, number>();
+    for (const roleId of roleIds) {
+      const bandeja = this.state.inbox(roleId);
+      const esperanRespuesta = bandeja.filter(
+        (mensaje) => mensaje.type === "request" || mensaje.type === "escalation",
+      ).length;
+      const abiertas = this.state.tasks.filter(
+        (tarea) =>
+          tarea.assigneeRoleId === roleId &&
+          (tarea.status === "pending" || tarea.status === "in_progress"),
+      ).length;
+      const fallos = this.state.fallosConsecutivos(roleId);
+
+      puntaje.set(
+        roleId,
+        esperanRespuesta * 10 + Math.min(bandeja.length, 5) * 2 + Math.min(abiertas, 5) - fallos * 4,
+      );
+    }
+    // Orden estable: ante el mismo puntaje se respeta el orden original, así el
+    // reparto no baila entre ciclos sin motivo.
+    return [...roleIds].sort((a, b) => (puntaje.get(b) ?? 0) - (puntaje.get(a) ?? 0));
+  }
 
   private async runTurns(roleIds: string[]): Promise<{ intentados: number; fallidos: number }> {
     // El tope es un techo de verdad, y esto cambió después de romperlo.
