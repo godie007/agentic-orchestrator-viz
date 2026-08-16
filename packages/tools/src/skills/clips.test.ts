@@ -13,26 +13,49 @@ const ubicada = (inicio: number): EscenaUbicada =>
 
 describe("atarClips", () => {
   it("ata por el número del nombre, con o sin prefijo escena-", () => {
-    const atados = atarClips(
+    const { clips } = atarClips(
       ["clips/02-formatos.mp4", "clips/escena-01.mp4", "clips/03-aplicar.webm"],
       3,
     );
-    expect(atados).toEqual(["clips/escena-01.mp4", "clips/02-formatos.mp4", "clips/03-aplicar.webm"]);
+    expect(clips).toEqual(["clips/escena-01.mp4", "clips/02-formatos.mp4", "clips/03-aplicar.webm"]);
   });
 
   it("la escena sin clip queda en null y un número fuera de rango se ignora", () => {
-    const atados = atarClips(["clips/07-nada.mp4", "clips/01-intro.mp4"], 3);
-    expect(atados).toEqual(["clips/01-intro.mp4", null, null]);
+    const { clips } = atarClips(["clips/07-nada.mp4", "clips/01-intro.mp4"], 3);
+    expect(clips).toEqual(["clips/01-intro.mp4", null, null]);
   });
 
   it("no ata lo que no es video", () => {
-    expect(atarClips(["clips/01-intro.png", "clips/01-intro.txt"], 1)).toEqual([null]);
+    expect(atarClips(["clips/01-intro.png", "clips/01-intro.txt"], 1).clips).toEqual([null]);
   });
 
   it("el 00 es portada, no la escena 1: no entra al mapa de escenas", () => {
-    expect(atarClips(["clips/00-portada.mp4", "clips/01-intro.mp4"], 1)).toEqual([
+    expect(atarClips(["clips/00-portada.mp4", "clips/01-intro.mp4"], 1).clips).toEqual([
       "clips/01-intro.mp4",
     ]);
+  });
+
+  /**
+   * Pasó filmando de verdad: al regrabar una escena con otro nombre quedaron
+   * las dos tomas, y el motor eligió la vieja en silencio porque alfabéticamente
+   * iba primero. El video se armaba con la pantalla que se quería reemplazar y
+   * no había forma de notarlo salvo mirándolo cuadro por cuadro.
+   */
+  it("avisa cuando hay dos clips para la misma escena y dice cuál usó", () => {
+    const { clips, avisos } = atarClips(
+      ["clips/07-mis-proyectos.mp4", "clips/07-no-conformidad.mp4", "clips/01-intro.mp4"],
+      7,
+    );
+    expect(clips[6]).toBe("clips/07-mis-proyectos.mp4");
+    expect(avisos).toHaveLength(1);
+    expect(avisos[0]).toContain("escena 7");
+    expect(avisos[0]).toContain("07-mis-proyectos.mp4");
+    expect(avisos[0]).toContain("07-no-conformidad.mp4");
+    expect(avisos[0]).toContain("delete_files");
+  });
+
+  it("sin repetidos no inventa avisos", () => {
+    expect(atarClips(["clips/01-intro.mp4", "clips/02-fin.mp4"], 2).avisos).toEqual([]);
   });
 });
 

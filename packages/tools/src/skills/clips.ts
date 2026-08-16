@@ -44,8 +44,12 @@ const hex = (color: string): string => `0x${color.slice(1)}`;
  * misma convención que las láminas del estudio (`03-mediciones.mp4` es la
  * tercera escena). El guion ya dice el orden; el archivo sólo dice cuál es.
  */
-export function atarClips(rutas: readonly string[], escenas: number): Array<string | null> {
+export function atarClips(
+  rutas: readonly string[],
+  escenas: number,
+): { clips: Array<string | null>; avisos: string[] } {
   const porNumero = new Map<number, string>();
+  const repetidos = new Map<number, string[]>();
   for (const ruta of rutas) {
     const nombre = ruta.split("/").pop() ?? "";
     if (!/\.(mp4|webm|mov)$/i.test(nombre)) continue;
@@ -54,8 +58,27 @@ export function atarClips(rutas: readonly string[], escenas: number): Array<stri
     const numero = Number(marca[1]);
     if (numero < 1 || numero > escenas) continue;
     if (!porNumero.has(numero)) porNumero.set(numero, ruta);
+    else repetidos.set(numero, [...(repetidos.get(numero) ?? [porNumero.get(numero)!]), ruta]);
   }
-  return Array.from({ length: escenas }, (_, i) => porNumero.get(i + 1) ?? null);
+
+  // Dos clips para la misma escena es lo que pasa al regrabar con otro nombre:
+  // queda el viejo al lado del nuevo y gana el primero por orden alfabético,
+  // que suele ser justamente la toma que se quería reemplazar. Elegir en
+  // silencio es la peor opción — el video sale con la pantalla vieja y nadie se
+  // entera hasta mirarlo cuadro por cuadro.
+  const avisos = [...repetidos.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(
+      ([numero, todos]) =>
+        `La escena ${numero} tiene ${todos.length} clips y se usó "${porNumero.get(numero)!}" ` +
+        `(el primero por orden alfabético): ${todos.join(", ")}. Si regrabaste con otro nombre, ` +
+        `borrá el que ya no va con delete_files — si no, el video se arma con la toma vieja.`,
+    );
+
+  return {
+    clips: Array.from({ length: escenas }, (_, i) => porNumero.get(i + 1) ?? null),
+    avisos,
+  };
 }
 
 /**
@@ -356,7 +379,8 @@ export async function renderClips(
     // Numerarlas juntas fue el error que corrió un video entero una escena.
 
     const sinPortada = escenas.filter((ubicada) => !ubicada.escena.esPortada).length;
-    const atados = atarClips(opciones.clips, sinPortada);
+    const { clips: atados, avisos: repetidos } = atarClips(opciones.clips, sinPortada);
+    avisos.push(...repetidos);
     const absolutos: Array<string | null> = [];
     let ordinal = 0;
     for (const ubicada of escenas) {
