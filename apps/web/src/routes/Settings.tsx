@@ -924,6 +924,83 @@ function RoleEditor({
           </select>
         </Field>
 
+        <Field
+          label="Escalado por dificultad"
+          hint={
+            draft.model.modelSlug
+              ? "Con un modelo fijo el escalado no aplica: el slug gana siempre."
+              : "El motor mide cada turno (bandeja, tareas, contexto, fallos) y elige el tier dentro del rango. Un turno liviano corre barato; uno pesado sube. La elección se ve en la traza como «modelo del turno»."
+          }
+        >
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="flex cursor-pointer items-center gap-1.5 text-xs text-ink">
+              <input
+                type="checkbox"
+                className="accent-accent"
+                disabled={draft.model.modelSlug != null}
+                checked={draft.model.escalado?.activo ?? false}
+                onChange={(event) =>
+                  update("model", {
+                    ...draft.model,
+                    escalado: event.target.checked
+                      ? {
+                          activo: true,
+                          tierMinimo: draft.model.escalado?.tierMinimo ?? "cheap",
+                          tierMaximo: draft.model.escalado?.tierMaximo ?? "smart",
+                        }
+                      : null,
+                  })
+                }
+              />
+              automático
+            </label>
+            {draft.model.escalado?.activo && !draft.model.modelSlug && (
+              <div className="flex items-center gap-2 text-xs text-ink-dim">
+                <span>de</span>
+                <select
+                  value={draft.model.escalado.tierMinimo}
+                  onChange={(event) =>
+                    update("model", {
+                      ...draft.model,
+                      escalado: {
+                        ...draft.model.escalado!,
+                        tierMinimo: event.target.value as ModelTier,
+                      },
+                    })
+                  }
+                  className="rounded border border-line bg-canvas px-2 py-1 text-xs text-ink"
+                >
+                  {(["free", "cheap", "standard", "smart"] as const).map((tier) => (
+                    <option key={tier} value={tier}>
+                      {tier}
+                    </option>
+                  ))}
+                </select>
+                <span>a</span>
+                <select
+                  value={draft.model.escalado.tierMaximo}
+                  onChange={(event) =>
+                    update("model", {
+                      ...draft.model,
+                      escalado: {
+                        ...draft.model.escalado!,
+                        tierMaximo: event.target.value as ModelTier,
+                      },
+                    })
+                  }
+                  className="rounded border border-line bg-canvas px-2 py-1 text-xs text-ink"
+                >
+                  {(["free", "cheap", "standard", "smart"] as const).map((tier) => (
+                    <option key={tier} value={tier}>
+                      {tier}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+          </div>
+        </Field>
+
         <div className="grid grid-cols-3 gap-4">
           <Field label="Reporta a">
             <select

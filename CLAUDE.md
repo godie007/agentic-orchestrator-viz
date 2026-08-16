@@ -558,6 +558,57 @@ modelo; sin techo, `smart` elige algo de US$60/MTok y un turno se come el
 presupuesto. Los `QUALITY_HINTS` penalizan variantes `-fast` (cobran el doble por
 velocidad, no por calidad).
 
+**El modelo de un turno puede elegirlo la dificultad, no el rol.** Con
+`model.escalado.activo` (campo de `modelSelectionSchema`, default `null` para
+que las filas viejas parseen), el motor mide el turno con las mismas señales de
+`presupuestoDeIteraciones` —bandeja, tareas, contexto— más autoridad,
+reanudación y fallos consecutivos (`RunState.fallosConsecutivos`, leído de
+`activity`, sin estado mutable por turno) y elige el tier dentro del rango
+`tierMinimo..tierMaximo`. La función es pura (`packages/engine/src/dificultad.ts`)
+y los cortes están fijados con tests: más señales nunca bajan el tier. Un
+`modelSlug` fijo apaga el escalado — el slug gana siempre. **Todo turno emite
+`model.selected`** con su `motivo`; la cronología sólo dibuja los escalados. Los
+convocados y los roles aprobados nacen con escalado acotado por autoridad
+(`conEscaladoPorAutoridad` en `runtime.ts`); una empresa en tier `free` no
+escala a modelos pagos — iría derecho a un 402.
+
+**Los servidores MCP conocidos se instalan desde la tienda, no pegando JSON.**
+`CATALOGO_MCP` (`packages/shared/src/tienda-mcp.ts`) es un catálogo curado en el
+repo —validado por schema en CI, no en runtime— con categoría, ícono Lucide y
+`envRequeridas` declaradas de antemano: una credencial faltante se dice **al
+instalar**, no en un handshake fallido de después. `Runtime.instalarServidoresMcp`
+hace el ciclo completo (dedupe → chequeo de env → alta → sync esperando el
+handshake → descubrir → otorgar opcional) y lo reusan la aprobación de
+solicitudes, la tienda y nada más lo duplica. Pegar JSON sigue existiendo en el
+Hub para lo que no está en el catálogo. El CRUD de `mcp-servers` ya no es el
+`registerChild` genérico: el alta deduplica por nombre (409, el nombre es parte
+de `mcp__<servidor>__<tool>`) y sincroniza al toque, y **el borrado va en
+cascada** — disconnect del bridge, `deleteToolsByMcpServer` y
+`podarToolIdsHuerfanos`, o quedan herramientas fantasma y roles apuntando a ids
+muertos.
+
+**Un proyecto puede nacer con equipo.** `PLANTILLAS_EQUIPO`
+(`packages/shared/src/plantillas.ts`) trae organigramas probados extraídos de
+los seeds; `Runtime.generarEquipo` los materializa resolviendo nombres de
+herramientas contra el catálogo y **nombrando las faltantes** (las condicionadas
+al entorno —imágenes, navegador— pueden faltar legítimamente). El proveedor de
+los agentes nuevos sale de `proveedorPreferido()` — `claude-sesion > anthropic >
+claude-code > openrouter` — nunca de un hardcodeo. Los `mcpSugeridos` de la
+plantilla **no se instalan solos**: conectar lo decide una persona, desde la
+tienda.
+
+**La navegación vive en la URL.** react-router v7 en modo librería:
+`/p/:companyId/{empresa,proceso,tablero,tienda,mcp,…}` con shell de sidebar
+(App.tsx). "Qué proyecto está abierto" ya no es estado de React: al borrar una
+empresa se navega a `/proyectos` (el reemplazo de `onCompanyGone`). El tema
+claro/oscuro va por tokens indirectos (`--t-*` en styles.css) con
+`data-theme` y default al sistema, aplicado en `index.html` **antes del primer
+pintado** para que la carga no parpadee; los componentes usan los mismos nombres
+de clase de siempre (`canvas`, `ink`, `surface`). Los componentes compartidos
+nuevos viven en `apps/web/src/ui/` (Modal sobre `<dialog>`, Toast, ConfirmDialog,
+Badge, Tabs…); `lib/ui.tsx` se reexporta desde ahí durante la transición —
+importá de `ui/index.js`.
+
 **Una misión es la receta de una corrida, más cuándo repetirla.** No confundir
 `mode: "cron"` de una corrida —que pacea los ciclos *dentro* de una corrida— con
 una **misión** (`misionSchema`, `apps/server/src/misiones.ts`), que es un encargo

@@ -945,6 +945,27 @@ function armarCronologia(
         });
         break;
 
+      // Sólo cuando el motor eligió por dificultad: el modelo fijo de siempre
+      // no es noticia, y dibujarlo en cada turno duplicaría la cronología.
+      case "model.selected":
+        if (event.escalado) {
+          push(event.tick, {
+            id: event.id,
+            at: event.at,
+            nivel: 1,
+            punto: "bg-accent",
+            titulo: (
+              <span className="text-ink-dim">
+                el turno corre con{" "}
+                <span className="font-mono text-[10px] text-ink">{event.modelSlug}</span>
+                {event.tier && <span className="ml-1 text-ink-faint">({event.tier})</span>}
+              </span>
+            ),
+            detalle: event.motivo,
+          });
+        }
+        break;
+
       // `agent.turn_end`, `tool.selection` y `cost.updated` no se dibujan: el
       // primero no agrega nada sobre las filas del turno, el segundo vive en el
       // panel del agente —"Herramientas a mano"— y el tercero en la cabecera.

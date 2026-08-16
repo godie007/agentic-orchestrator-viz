@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { PlantillaEquipo } from "@orq/shared";
 import { api, type ResumenProyecto } from "../api.js";
-import { Button, Empty, Field, Panel, Status, inputClass, peso, relativeTime } from "../lib/ui.js";
+import { Button, Empty, Field, Panel, Status, inputClass, peso, relativeTime, useToast } from "../ui/index.js";
 
 /**
  * Proyectos: la puerta de entrada.
@@ -28,6 +28,7 @@ export function Proyectos({
   onBorrado: (id: string) => void;
 }) {
   const queryClient = useQueryClient();
+  const avisar = useToast();
   const [creando, setCreando] = useState(false);
   const [borrando, setBorrando] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -79,8 +80,26 @@ export function Proyectos({
     onSuccess: (creado) => {
       setCreando(false);
       refrescar();
-      // Un proyecto recién creado está vacío: lo único que se puede hacer con él
-      // es armarle la organización, así que se entra directo.
+      if (creado.equipo) {
+        avisar(
+          `Equipo creado: ${creado.equipo.roles.length} agentes listos para trabajar.`,
+          "ok",
+        );
+        if (creado.equipo.herramientasFaltantes.length > 0) {
+          // Nombradas, nunca calladas: una habilidad condicionada al entorno
+          // (API key de imágenes, navegador) no se registró y el rol que la
+          // esperaba tiene que saberlo quien arma el proyecto.
+          avisar(
+            `Sin registrar en esta máquina: ${creado.equipo.herramientasFaltantes.join(", ")}.`,
+          );
+        }
+        if (creado.equipo.mcpSugeridos.length > 0) {
+          avisar(
+            `Este equipo aprovecha servidores MCP: ${creado.equipo.mcpSugeridos.join(", ")}. Instalálos desde la Tienda.`,
+          );
+        }
+      }
+      // Se entra directo: lo primero es ver el equipo (o armarlo, si nació vacío).
       onAbrir(creado.id);
     },
     onError: (fallo: Error) => setError(fallo.message),

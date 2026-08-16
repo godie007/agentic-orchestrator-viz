@@ -21,6 +21,7 @@ import {
   Plug,
   Receipt,
   ServerCog,
+  Store,
 } from "lucide-react";
 import { api, type CompanyBundle } from "./api.js";
 import { Empty, Skeleton, BotonDeTema, ToastProvider } from "./ui/index.js";
@@ -32,6 +33,7 @@ import { CompanyDesigner, Costs, Providers } from "./routes/Settings.js";
 import { Memory } from "./routes/Memory.js";
 import { Requests } from "./routes/Requests.js";
 import { Output } from "./routes/Output.js";
+import { Tienda } from "./routes/Tienda.js";
 
 /**
  * El shell de la aplicación: header global + sidebar por proyecto, con la
@@ -48,7 +50,8 @@ const SECCIONES = [
   { path: "tablero", etiqueta: "Tablero", icono: KanbanSquare, title: "Las tareas de la corrida como kanban." },
   { path: "empresa", etiqueta: "Empresa", icono: Network, title: "La organización: áreas, agentes y sus herramientas." },
   { path: "solicitudes", etiqueta: "Solicitudes", icono: Inbox, title: "Lo que los agentes te piden: roles, datos, accesos, servidores." },
-  { path: "mcp", etiqueta: "MCP", icono: Plug, title: "Servidores MCP: tienda, salud y probador." },
+  { path: "tienda", etiqueta: "Tienda", icono: Store, title: "Catálogo de servidores MCP, instalables en un click." },
+  { path: "mcp", etiqueta: "MCP", icono: Plug, title: "Servidores MCP conectados: salud, reconexión y probador." },
   { path: "salida", etiqueta: "Salida", icono: FolderOutput, title: "Los archivos que la empresa produjo." },
   { path: "memoria", etiqueta: "Memoria", icono: Brain, title: "Lo que la empresa aprendió entre corridas." },
   { path: "costos", etiqueta: "Costos", icono: Receipt, title: "Cuánto gastó cada corrida, por agente y por modelo." },
@@ -69,6 +72,7 @@ export function App() {
               <Route path="tablero" element={<Pantalla render={(c) => <Board key={c.company.id} company={c} />} />} />
               <Route path="empresa" element={<EmpresaRuta />} />
               <Route path="solicitudes" element={<Pantalla render={(c) => <Requests key={c.company.id} company={c} />} />} />
+              <Route path="tienda" element={<Pantalla render={(c) => <Tienda key={c.company.id} company={c} />} />} />
               <Route path="mcp" element={<Pantalla render={(c) => <McpHub key={c.company.id} company={c} />} />} />
               <Route path="salida" element={<Pantalla render={(c) => <Output company={c} />} />} />
               <Route path="memoria" element={<Pantalla render={(c) => <Memory key={c.company.id} company={c} />} />} />
