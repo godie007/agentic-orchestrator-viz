@@ -14,7 +14,9 @@ import type {
   Message,
   ModelInfo,
   ModelTier,
+  PlantillaEquipo,
   Policy,
+  ProviderId,
   Role,
   Run,
   Task,
@@ -44,6 +46,13 @@ export interface ResultadoInstalacionMcp {
   toolNames: string[];
   herramientasOtorgadas: string[];
   avisos: string[];
+}
+
+/** Lo que devuelve generar un equipo desde una plantilla. */
+export interface EquipoGenerado {
+  roles: Role[];
+  herramientasFaltantes: string[];
+  mcpSugeridos: string[];
 }
 
 export interface TreeFile {
@@ -168,9 +177,26 @@ export const api = {
   /** Una línea por proyecto, con sus cuentas y su peso en disco. */
   resumenProyectos: () => request<ResumenProyecto[]>("/companies/resumen"),
   company: (id: string) => request<CompanyBundle>(`/companies/${id}`),
-  /** Crea un proyecto vacío, ya con sus herramientas built-in registradas. */
-  createCompany: (input: { name: string; mission: string; defaultModel: Company["defaultModel"] }) =>
-    request<Company>("/companies", { method: "POST", body: JSON.stringify(input) }),
+  /** Plantillas de equipo disponibles, más el proveedor con el que se armarían. */
+  plantillas: () =>
+    request<{ plantillas: PlantillaEquipo[]; proveedorPreferido: ProviderId | null }>(
+      "/plantillas",
+    ),
+  /**
+   * Crea un proyecto, ya con sus herramientas built-in registradas. Con
+   * `plantillaId`, nace además con el equipo de la plantilla; la respuesta
+   * trae `equipo` con las herramientas faltantes y los MCP sugeridos.
+   */
+  createCompany: (input: {
+    name: string;
+    mission: string;
+    defaultModel: Company["defaultModel"];
+    plantillaId?: string;
+  }) =>
+    request<Company & { equipo?: EquipoGenerado }>("/companies", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
   blueprint: (id: string) => request<unknown>(`/companies/${id}/blueprint`),
   importCompany: (blueprint: unknown) =>
     request<{ companyId: string }>("/companies/import", {

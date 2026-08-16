@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import type { PlantillaEquipo } from "@orq/shared";
 import { api, type ResumenProyecto } from "../api.js";
 import { Button, Empty, Field, Panel, Status, inputClass, peso, relativeTime } from "../lib/ui.js";
 
@@ -42,22 +43,37 @@ export function Proyectos({
     void queryClient.invalidateQueries({ queryKey: ["companies"] });
   };
 
+  const plantillas = useQuery({
+    queryKey: ["plantillas"],
+    queryFn: () => api.plantillas(),
+  });
+
   const crear = useMutation({
-    mutationFn: ({ name, mission }: { name: string; mission: string }) =>
+    mutationFn: ({
+      name,
+      mission,
+      plantillaId,
+    }: {
+      name: string;
+      mission: string;
+      plantillaId: string | null;
+    }) =>
       api.createCompany({
         name,
         mission,
-        // El tier por defecto es `standard`: es el que sirve para los roles que
-        // coordinan, y bajarlo después es más barato que descubrir por qué el
-        // ejecutivo se fue por las ramas.
+        // El proveedor sale de lo configurado (los Claude primero: sus tiers
+        // resuelven por mapa curado), no de un hardcodeo de openrouter. El
+        // tier de reposo es `standard` —el que sirve para coordinar— y el
+        // escalado por dificultad baja los turnos livianos solo.
         defaultModel: {
-          providerId: "openrouter",
+          providerId: plantillas.data?.proveedorPreferido ?? "openrouter",
           modelSlug: null,
           tier: "standard",
-          escalado: null,
+          escalado: { activo: true, tierMinimo: "cheap", tierMaximo: "smart" },
           temperature: null,
           maxOutputTokens: 4096,
         },
+        ...(plantillaId ? { plantillaId } : {}),
       }),
     onMutate: () => setError(null),
     onSuccess: (creado) => {
@@ -114,8 +130,11 @@ export function Proyectos({
           {creando && (
             <NuevoProyecto
               pendiente={crear.isPending}
+              plantillas={plantillas.data?.plantillas ?? []}
               onCancelar={() => setCreando(false)}
-              onCrear={(name, mission) => crear.mutate({ name, mission })}
+              onCrear={(name, mission, plantillaId) =>
+                crear.mutate({ name, mission, plantillaId })
+              }
             />
           )}
 
@@ -153,25 +172,28 @@ export function Proyectos({
   );
 }
 
-/** Alta: sólo el nombre y la misión. El resto se edita adentro. */
+/** Alta: nombre, misión y —si se quiere— un equipo de plantilla. */
 function NuevoProyecto({
   onCrear,
   onCancelar,
   pendiente,
+  plantillas,
 }: {
-  onCrear: (name: string, mission: string) => void;
+  onCrear: (name: string, mission: string, plantillaId: string | null) => void;
   onCancelar: () => void;
   pendiente: boolean;
+  plantillas: PlantillaEquipo[];
 }) {
   const [name, setName] = useState("");
   const [mission, setMission] = useState("");
+  const [plantillaId, setPlantillaId] = useState<string | null>(null);
 
   return (
     <form
       className="space-y-2 rounded border border-accent/40 bg-accent/5 p-3"
       onSubmit={(evento) => {
         evento.preventDefault();
-        if (name.trim()) onCrear(name.trim(), mission.trim());
+        if (name.trim()) onCrear(name.trim(), mission.trim(), plantillaId);
       }}
     >
       <Field label="Nombre" hint="Cómo se llama la empresa que vas a modelar.">
@@ -194,6 +216,60 @@ function NuevoProyecto({
           placeholder="Diseñamos software a medida para empresas medianas."
         />
       </Field>
+      {plantillas.length > 0 && (
+        <Field
+          label="Equipo inicial"
+          hint="Un organigrama probado para esa clase de encargo, con roles, jerarquía y herramientas ya asignadas."
+        >
+          <div className="grid gap-1.5 sm:grid-cols-2">
+            <label
+              className={`cursor-pointer rounded border px-2 py-1.5 text-xs ${
+                plantillaId === null
+                  ? "border-accent bg-accent/10 text-ink"
+                  : "border-line text-ink-dim hover:border-line/80"
+              }`}
+            >
+              <input
+                type="radio"
+                name="plantilla"
+                className="sr-only"
+                checked={plantillaId === null}
+                onChange={() => setPlantillaId(null)}
+              />
+              <span className="font-medium">Empezar vacío</span>
+              <span className="mt-0.5 block text-[11px] text-ink-faint">
+                Sin agentes: la organización se arma a mano adentro.
+              </span>
+            </label>
+            {plantillas.map((plantilla) => (
+              <label
+                key={plantilla.id}
+                className={`cursor-pointer rounded border px-2 py-1.5 text-xs ${
+                  plantillaId === plantilla.id
+                    ? "border-accent bg-accent/10 text-ink"
+                    : "border-line text-ink-dim hover:border-line/80"
+                }`}
+                title={plantilla.tipoDeEncargo}
+              >
+                <input
+                  type="radio"
+                  name="plantilla"
+                  className="sr-only"
+                  checked={plantillaId === plantilla.id}
+                  onChange={() => setPlantillaId(plantilla.id)}
+                />
+                <span className="font-medium">{plantilla.nombre}</span>
+                <span className="ml-1 text-[10px] text-ink-faint">
+                  {plantilla.roles.length} agentes
+                </span>
+                <span className="mt-0.5 block text-[11px] text-ink-faint">
+                  {plantilla.descripcion}
+                </span>
+              </label>
+            ))}
+          </div>
+        </Field>
+      )}
       <div className="flex items-center gap-2">
         <Button type="submit" variant="primary" disabled={pendiente || !name.trim()}>
           {pendiente ? "creando…" : "crear y abrir"}
@@ -202,7 +278,9 @@ function NuevoProyecto({
           cancelar
         </Button>
         <span className="text-[11px] text-ink-faint">
-          Nace vacío pero con sus herramientas listas para asignar.
+          {plantillaId
+            ? "Nace con el equipo de la plantilla, listo para recibir un encargo."
+            : "Nace vacío pero con sus herramientas listas para asignar."}
         </span>
       </div>
     </form>

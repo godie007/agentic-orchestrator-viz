@@ -1,10 +1,12 @@
-import { ids, mcpServerSchema } from "@orq/shared";
+import { ids, mcpServerSchema, plantillaEquipo } from "@orq/shared";
 import type {
   AgentRequest,
   CreateRunInput,
+  Department,
   McpServer,
   McpServerHealth,
   ModelSelection,
+  ProviderId,
   Role,
   RoleProposal,
   Run,
@@ -172,6 +174,133 @@ export class Runtime {
       nuevas += 1;
     }
     return nuevas;
+  }
+
+  /**
+   * El proveedor con el que conviene armar agentes nuevos, entre los
+   * configurados. Los Claude van primero porque sus tiers resuelven por el
+   * mapa curado y el escalado por dificultad funciona sin fijar slugs;
+   * OpenRouter cierra la lista porque resuelve por bandas de precio.
+   */
+  proveedorPreferido(): ProviderId | null {
+    const prioridad: ProviderId[] = ["claude-sesion", "anthropic", "claude-code", "openrouter"];
+    for (const id of prioridad) {
+      if (this.providers.has(id)) return id;
+    }
+    return this.providers.list()[0]?.id ?? null;
+  }
+
+  /**
+   * Genera el equipo de una plantilla dentro de una empresa.
+   *
+   * Siembra las herramientas si hace falta (sin filas en `tools`, `toolIds` no
+   * puede apuntar a nada), crea departamentos y roles resolviendo la jerarquía
+   * por nombre, y arma cada modelo con el proveedor disponible y escalado por
+   * dificultad. Las herramientas que la plantilla nombra y el catálogo no
+   * tiene **se nombran en la respuesta** — la regla de convocar: descartarlas
+   * en silencio deja a un agente buscando una herramienta que le prometieron.
+   * Los MCP sugeridos no se instalan solos: conectarlos lo decide una persona.
+   */
+  async generarEquipo(
+    companyId: string,
+    plantillaId: string,
+  ): Promise<{
+    roles: Role[];
+    herramientasFaltantes: string[];
+    mcpSugeridos: string[];
+  }> {
+    const plantilla = plantillaEquipo(plantillaId);
+    if (!plantilla) throw new Error(`No existe la plantilla "${plantillaId}".`);
+
+    await this.sembrarHerramientas(companyId);
+    const catalogo = this.store.listTools(companyId);
+    const porNombre = new Map(catalogo.map((tool) => [tool.name, tool.id]));
+
+    const providerId = this.proveedorPreferido();
+    if (!providerId) {
+      throw new Error(
+        "No hay ningún proveedor LLM configurado. Agregá una API key en .env y reiniciá.",
+      );
+    }
+
+    // Departamentos primero, en fila, para que el organigrama arranque legible.
+    const departamentos = new Map<string, Department>();
+    const existentes = this.store.listDepartments(companyId);
+    plantilla.departamentos.forEach((dep, indice) => {
+      const previo = existentes.find(
+        (candidato) => candidato.name.toLowerCase() === dep.nombre.toLowerCase(),
+      );
+      if (previo) {
+        departamentos.set(dep.nombre, previo);
+        return;
+      }
+      const nuevo: Department = {
+        id: ids.department(),
+        companyId,
+        name: dep.nombre,
+        purpose: dep.proposito,
+        parentId: null,
+        position: { x: 120 + indice * 260, y: 80 },
+      };
+      this.store.saveDepartment(nuevo);
+      departamentos.set(dep.nombre, nuevo);
+    });
+
+    const faltantes = new Set<string>();
+    const roles: Role[] = [];
+    const porNombreDeRol = new Map<string, Role>();
+
+    for (const rol of plantilla.roles) {
+      const department = departamentos.get(rol.departamento);
+      if (!department) throw new Error(`La plantilla referencia el área "${rol.departamento}" sin definirla.`);
+
+      const toolIds: string[] = [];
+      for (const nombre of rol.herramientas) {
+        const id = porNombre.get(nombre);
+        if (id) toolIds.push(id);
+        else faltantes.add(nombre);
+      }
+
+      const nuevo: Role = {
+        id: ids.role(),
+        companyId,
+        departmentId: department.id,
+        name: rol.nombre,
+        title: rol.titulo,
+        systemPrompt: rol.systemPrompt,
+        model: {
+          providerId,
+          modelSlug: null,
+          tier: rol.escalado.tierMinimo,
+          escalado: { activo: true, ...rol.escalado },
+          temperature: null,
+          maxOutputTokens: 4096,
+        },
+        toolIds,
+        authority: rol.authority,
+        reportsTo: null, // se resuelve después, cuando todos existen
+        maxTurns: rol.maxTurns,
+        spendApprovalThresholdUsd: null,
+        // (0,0) alcanza: OrgGraph.autoLayout acomoda por jerarquía las
+        // posiciones repetidas y respeta las movidas a mano.
+        position: { x: 0, y: 0 },
+      };
+      roles.push(nuevo);
+      porNombreDeRol.set(rol.nombre, nuevo);
+    }
+
+    for (const [indice, rol] of plantilla.roles.entries()) {
+      const jefe = rol.reportaA ? porNombreDeRol.get(rol.reportaA) : null;
+      const nuevo = roles[indice]!;
+      nuevo.reportsTo = jefe?.id ?? null;
+      this.store.saveRole(nuevo);
+    }
+
+    return {
+      roles,
+      herramientasFaltantes: [...faltantes],
+      mcpSugeridos: plantilla.mcpSugeridos,
+    };
   }
 
   /**

@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 import {
   CATALOGO_MCP,
+  PLANTILLAS_EQUIPO,
   articuloDeTienda,
   companyBlueprintSchema,
   companySchema,
@@ -120,11 +121,19 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
     };
   });
 
+  app.get("/api/plantillas", async () =>
+    // El proveedor preferido viaja junto: el onboarding lo muestra en vez de
+    // hardcodear openrouter, y con él decide si puede ofrecer escalado.
+    ({ plantillas: PLANTILLAS_EQUIPO, proveedorPreferido: runtime.proveedorPreferido() }),
+  );
+
   app.post("/api/companies", async (request, reply) => {
     const now = Date.now();
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const { plantillaId, ...cuerpo } = body;
     const parsed = companySchema
       .partial({ id: true, createdAt: true, updatedAt: true })
-      .safeParse(request.body);
+      .safeParse(cuerpo);
     if (!parsed.success) return invalid(reply, parsed.error);
 
     const company = {
@@ -138,8 +147,22 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
     // no hay nada que asignarle a un agente y el primero que intente exportar
     // algo va a informar que no encuentra la herramienta.
     await runtime.sembrarHerramientas(company.id);
+
+    // Con plantilla, el proyecto nace con su equipo: roles, jerarquía y
+    // herramientas resueltas. Las faltantes y los MCP sugeridos vuelven en la
+    // respuesta para que la UI los ofrezca — instalarlos lo decide una persona.
+    let equipo: Awaited<ReturnType<typeof runtime.generarEquipo>> | null = null;
+    if (typeof plantillaId === "string" && plantillaId) {
+      try {
+        equipo = await runtime.generarEquipo(company.id, plantillaId);
+      } catch (error) {
+        reply.code(400);
+        return { error: error instanceof Error ? error.message : String(error) };
+      }
+    }
+
     reply.code(201);
-    return company;
+    return { ...company, ...(equipo ? { equipo } : {}) };
   });
 
   app.patch("/api/companies/:id", async (request, reply) => {
