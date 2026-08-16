@@ -608,3 +608,44 @@ describe("saneo de corridas huérfanas", () => {
     expect(store.sanearCorridasHuerfanas()).toBe(0);
   });
 });
+
+/**
+ * La adopción tiene que mover la fila de corrida, no sólo su JSON.
+ *
+ * El primer test de herencia miraba el objeto en memoria y pasaba en verde
+ * mientras la columna `run_id` seguía apuntando a la corrida vieja: el tablero
+ * de la corrida que heredaba salía vacío y la continuidad no existía en los
+ * hechos. `listTasks` filtra por la columna, así que es la columna la que hay
+ * que verificar.
+ */
+describe("adoptar una tarea la mueve de corrida", () => {
+  const ahora = Date.now();
+
+  it("listTasks la encuentra en la corrida nueva y no en la vieja", () => {
+    const vieja = ids.run();
+    const nueva = ids.run();
+    const tarea = {
+      id: ids.task(),
+      runId: vieja,
+      title: "Grabar la escena 3",
+      detail: "",
+      assigneeRoleId: ids.role(),
+      createdByRoleId: null,
+      status: "in_progress",
+      priority: "normal" as const,
+      dueTick: null,
+      result: null,
+      heredadaDeRunId: null,
+      createdAt: ahora,
+      updatedAt: ahora,
+    };
+    store.saveTask(tarea as never);
+    expect(store.listTasks(vieja)).toHaveLength(1);
+
+    store.saveTask({ ...tarea, runId: nueva, heredadaDeRunId: vieja } as never);
+
+    expect(store.listTasks(nueva)).toHaveLength(1);
+    expect(store.listTasks(nueva)[0]?.heredadaDeRunId).toBe(vieja);
+    expect(store.listTasks(vieja)).toHaveLength(0);
+  });
+});

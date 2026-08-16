@@ -737,11 +737,19 @@ export class Store {
       .run(id, companyId, JSON.stringify(value));
   }
 
+  /**
+   * `run_id` también se actualiza, y no es cosmético: una tarea abierta que la
+   * corrida siguiente adopta cambia de dueño. Sin esto, el JSON decía la
+   * corrida nueva y la columna seguía diciendo la vieja, así que
+   * `listTasks(runId)` —que filtra por la columna— no la encontraba: el
+   * tablero de la corrida que heredó el trabajo salía vacío y la continuidad
+   * no existía en los hechos.
+   */
   private upsertRunScoped(table: string, id: string, runId: string, value: unknown): void {
     this.db
       .prepare(
         `INSERT INTO ${table} (id, run_id, data) VALUES (?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET data = excluded.data`,
+         ON CONFLICT(id) DO UPDATE SET data = excluded.data, run_id = excluded.run_id`,
       )
       .run(id, runId, JSON.stringify(value));
   }

@@ -280,9 +280,13 @@ the three profiles in the order of a real workday: Administrador sets up, Direct
 assigns and approves, Inspector works in the field. Close with a call to action naming
 inspia.codla.co.
 
-TIMING: the voice-over IS the clock — each scene lasts exactly as long as its narration.
-Aim for 12 to 20 spoken words per scene, 10 to 14 scenes. Short sentences: they are
-spoken, not read. Never write a number or a percentage unless the brief verified it.
+TIMING: the voice-over IS the clock — the video lasts exactly as long as the narration,
+so the word count IS the running time. Do the arithmetic before you write: at roughly 160
+spoken words per minute, a 2-to-3-minute piece needs 320 to 480 narrated words. Spread
+them over 10 to 14 scenes — around 30 words each, which is two or three sentences: one
+saying what is on screen, one saying why it matters to whoever signs the purchase. Short
+sentences: they are spoken, not read. Never write a number or a percentage unless the
+brief verified it.
 
 Coordinate the scene list with Diego BEFORE finishing: if he cannot film a screen, the
 scene has to change. A scene that ends up without a clip is filmed as a flat colour card.`,

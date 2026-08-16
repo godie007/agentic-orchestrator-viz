@@ -251,7 +251,15 @@ export class ClaudeCodeProvider implements LlmProvider {
           resolve(resultEvt.result);
           return;
         }
-        const detail = resultEvt?.error ?? (stderr.trim() || `CLI salió con código ${String(code)}`);
+        // El diagnóstico tiene que sobrevivir al fallo. Cuando el CLI muere sin
+        // emitir un `result` —MCP que no levanta, modelo no disponible, límite
+        // de uso— el código de salida solo no dice nada, y una corrida entera
+        // se cae con "CLI salió con código 1" sin forma de saber por qué. Lo
+        // último que escribió el CLI es lo que explica la causa, así que viaja
+        // en el error.
+        const detail =
+          resultEvt?.error ??
+          (stderr.trim() || `CLI salió con código ${String(code)}${ultimoAliento(stdout)}`);
         reject(new LlmError(`Claude Code: ${detail}`, "claude-code", false));
       });
     });
@@ -393,4 +401,23 @@ function mcpConfigPath(session: OrgToolsSession): string {
 
 function cap(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+/**
+ * Lo último que dijo el CLI antes de morir, para pegarlo al error.
+ *
+ * La salida es `stream-json`: una línea por evento. Los eventos que explican
+ * una muerte —`rate_limit_event`, un `system` de error, un `result` truncado—
+ * están al final, y el resto del stream es ruido enorme. Se recortan las
+ * últimas líneas y cada una a lo suyo, porque esto va a un mensaje de error
+ * que alguien tiene que poder leer.
+ */
+function ultimoAliento(stdout: string): string {
+  const lineas = stdout
+    .split("\n")
+    .map((linea) => linea.trim())
+    .filter(Boolean)
+    .slice(-3)
+    .map((linea) => (linea.length > 300 ? `${linea.slice(0, 300)}…` : linea));
+  return lineas.length > 0 ? `. Lo último que emitió: ${lineas.join(" | ")}` : "";
 }
