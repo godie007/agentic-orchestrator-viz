@@ -123,6 +123,10 @@ export class McpBridge {
       lastInvokedAt: previa?.lastInvokedAt ?? null,
       connectedAt: null,
       reconnectAttempts: 0,
+      // Las referencias sin valor se declaran acá, no se omiten en silencio:
+      // el Hub y la tienda tienen que poder decir "falta GITHUB_TOKEN" antes
+      // de que el handshake falle con un error de auth ajeno.
+      envFaltantes: this.referenciasSinValor(server),
     };
     const conn: Connection = {
       server,
@@ -194,6 +198,15 @@ export class McpBridge {
       conn.health.errors += 1;
       this.scheduleReconnect(conn, message);
     }
+  }
+
+  /** Referencias de env/headers del transporte que no resuelven a un valor. */
+  private referenciasSinValor(server: McpServer): string[] {
+    const refs =
+      server.transport.type === "stdio"
+        ? Object.values(server.transport.envRefs)
+        : Object.values(server.transport.headerRefs);
+    return [...new Set(refs.filter((ref) => this.resolveSecret(ref) == null))];
   }
 
   private buildTransport(server: McpServer) {

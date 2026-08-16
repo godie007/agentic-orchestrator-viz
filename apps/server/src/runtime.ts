@@ -2,6 +2,7 @@ import { ids, mcpServerSchema } from "@orq/shared";
 import type {
   AgentRequest,
   CreateRunInput,
+  McpServer,
   McpServerHealth,
   ModelSelection,
   Role,
@@ -281,6 +282,30 @@ export class Runtime {
       if (!vigentes.has(serverId)) runtime.health.delete(serverId);
     }
     return [...runtime.health.values()];
+  }
+
+  /**
+   * Borra un servidor MCP en cascada: desconecta el proceso (no se cae solo
+   * por borrar filas — misma lección que `eliminarEmpresa`), borra sus filas
+   * de `tools` y poda los `toolIds` muertos de los roles. Antes el CRUD sólo
+   * borraba la fila del servidor y quedaban herramientas fantasma en la base y
+   * roles apuntando a ids inexistentes.
+   */
+  async eliminarServidorMcp(
+    companyId: string,
+    serverId: string,
+  ): Promise<{ herramientas: number; rolesPodados: number }> {
+    const runtime = this.companies.get(companyId);
+    await runtime?.mcp.disconnect(serverId);
+    runtime?.health.delete(serverId);
+
+    const herramientas = this.store
+      .listTools(companyId)
+      .filter((tool) => tool.mcpServerId === serverId).length;
+    this.store.deleteToolsByMcpServer(companyId, serverId);
+    this.store.deleteMcpServer(serverId);
+    const rolesPodados = this.store.podarToolIdsHuerfanos(companyId);
+    return { herramientas, rolesPodados };
   }
 
   async reconnectMcp(companyId: string, serverId: string): Promise<boolean> {
@@ -716,88 +741,161 @@ export class Runtime {
         throw new Error("La solicitud no trae ningún servidor propuesto.");
       }
 
-      // La propuesta pudo quedar vieja: alguien conectó el mismo servidor desde
-      // el Hub mientras la solicitud esperaba. Los repetidos no son un error —
-      // la capacidad ya está—, pero si no queda ninguno nuevo, aprobar no haría
-      // nada y conviene decirlo.
-      const existentes = new Set(this.store.listMcpServers(companyId).map((server) => server.name));
-      const nuevos = request.mcpProposal.filter((server) => !existentes.has(server.name));
-      const repetidos = request.mcpProposal
-        .filter((server) => existentes.has(server.name))
-        .map((server) => server.name);
-      if (nuevos.length === 0) {
+      const resultado = await this.instalarServidoresMcp(companyId, request.mcpProposal, {
+        otorgarARolId: request.requestedByRoleId,
+        runId: request.runId,
+      });
+      if (resultado.instalados.length === 0) {
         throw new Error(
-          `Todos los servidores propuestos ya están configurados: ${repetidos.join(", ")}. ` +
+          `Todos los servidores propuestos ya están configurados: ${resultado.yaExistian.join(", ")}. ` +
             `No hay nada que aprobar; si al agente le faltan sus herramientas, va a pedirlas aparte.`,
         );
       }
-
-      for (const propuesto of nuevos) {
-        this.store.saveMcpServer(
-          mcpServerSchema.parse({
-            id: ids.mcpServer(),
-            companyId,
-            name: propuesto.name,
-            description: propuesto.description,
-            transport: propuesto.transport,
-            enabled: true,
-            autoApproveTools: true,
-          }),
-        );
-      }
-
-      // Conectar es sincronizar contra la base, que ya tiene los nuevos. El
-      // handshake se espera acá para poder decirle al agente qué herramientas
-      // aparecieron, no solo que "se guardó una configuración".
-      const runtime = await this.companyRuntime(companyId);
-      this.persistMcpTools(companyId, runtime.tools);
-
-      const idsNuevos = new Set(
-        this.store
-          .listMcpServers(companyId)
-          .filter((server) => nuevos.some((propuesto) => propuesto.name === server.name))
-          .map((server) => server.id),
-      );
-      const descubiertas = this.store
-        .listTools(companyId)
-        .filter((tool) => tool.mcpServerId != null && idsNuevos.has(tool.mcpServerId));
-
-      // Lo pedido se otorga: un servidor aprobado cuyas herramientas no le
-      // llegan a nadie deja al solicitante igual de bloqueado que antes.
-      let otorgadas: string[] = [];
-      if (request.requestedByRoleId) {
-        const rol = this.store
-          .listRoles(companyId)
-          .find((candidate) => candidate.id === request.requestedByRoleId);
-        if (rol) {
-          const toolIds = [...new Set([...rol.toolIds, ...descubiertas.map((tool) => tool.id)])];
-          this.store.saveRole({ ...rol, toolIds });
-          otorgadas = descubiertas.map((tool) => tool.name);
-
-          // La corrida viva congela su catálogo al arrancar: las herramientas
-          // nuevas hay que sumárselas explícitamente o el agente que las pidió
-          // no las ve hasta la corrida siguiente.
-          const enCurso = request.runId ? this.runs.get(request.runId) : undefined;
-          if (enCurso) {
-            for (const tool of descubiertas) enCurso.state.incorporarHerramienta(tool, null);
-            enCurso.state.updateRoleTools(rol.id, toolIds);
-          }
-        }
-      }
-
-      const salud = this.mcpHealth(companyId)
-        .filter((estado) => idsNuevos.has(estado.serverId))
-        .map((estado) => `${estado.serverName}: ${estado.status}`);
-
       return {
-        servidores: nuevos.map((server) => server.name),
-        ...(repetidos.length > 0 ? { yaExistian: repetidos } : {}),
-        estado: salud,
-        herramientasOtorgadas: otorgadas,
+        servidores: resultado.instalados,
+        ...(resultado.yaExistian.length > 0 ? { yaExistian: resultado.yaExistian } : {}),
+        estado: resultado.estado,
+        herramientasOtorgadas: resultado.herramientasOtorgadas,
+        ...(resultado.avisos.length > 0 ? { avisos: resultado.avisos } : {}),
       };
     }
 
     return {}; // `context`: la respuesta viaja en el mensaje, no cambia config
+  }
+
+  /**
+   * Instala servidores MCP de punta a punta: dedupe por nombre, chequeo de
+   * variables requeridas, alta en la base, sync **esperando el handshake**,
+   * descubrimiento de herramientas y otorgamiento opcional a un rol.
+   *
+   * Es el ciclo que ya hacía la aprobación de solicitudes, extraído para que
+   * la tienda y el CRUD lo reusen: instalar desde cualquier lado tiene que
+   * conectar de verdad y poder decir "conectado, N herramientas", no "se
+   * guardó una configuración".
+   */
+  async instalarServidoresMcp(
+    companyId: string,
+    servidores: Array<{
+      name: string;
+      description: string;
+      transport: McpServer["transport"];
+      envRequeridas?: McpServer["envRequeridas"];
+      catalogoId?: string | null;
+    }>,
+    opciones: { otorgarARolId?: string | null; runId?: string | null } = {},
+  ): Promise<{
+    instalados: string[];
+    yaExistian: string[];
+    estado: string[];
+    toolCount: number;
+    toolNames: string[];
+    herramientasOtorgadas: string[];
+    avisos: string[];
+  }> {
+    const avisos: string[] = [];
+
+    // Los repetidos no son un error —la capacidad ya está—, pero se informan:
+    // instalar dos veces el mismo nombre rompería los ids `mcp__<name>__<tool>`.
+    const existentes = new Set(this.store.listMcpServers(companyId).map((server) => server.name));
+    const nuevos = servidores.filter((server) => !existentes.has(server.name));
+    const yaExistian = servidores
+      .filter((server) => existentes.has(server.name))
+      .map((server) => server.name);
+
+    for (const servidor of nuevos) {
+      // Un faltante no frena la instalación —la credencial la carga la persona
+      // por su lado— pero se dice acá, cerca de la causa, no en un handshake
+      // fallido de dentro de un rato.
+      const requeridas = servidor.envRequeridas ?? [];
+      const faltantes = requeridas
+        .filter((entrada) => entrada.obligatoria && !resolveSecret(entrada.ref))
+        .map((entrada) => entrada.ref);
+      if (faltantes.length > 0) {
+        avisos.push(
+          `"${servidor.name}" necesita ${faltantes.join(", ")} y no está en el entorno: ` +
+            `agregala al .env del servidor y reconectá.`,
+        );
+      }
+
+      this.store.saveMcpServer(
+        mcpServerSchema.parse({
+          id: ids.mcpServer(),
+          companyId,
+          name: servidor.name,
+          description: servidor.description,
+          transport: servidor.transport,
+          enabled: true,
+          autoApproveTools: true,
+          envRequeridas: requeridas,
+          catalogoId: servidor.catalogoId ?? null,
+        }),
+      );
+    }
+
+    if (nuevos.length === 0) {
+      return {
+        instalados: [],
+        yaExistian,
+        estado: [],
+        toolCount: 0,
+        toolNames: [],
+        herramientasOtorgadas: [],
+        avisos,
+      };
+    }
+
+    // Conectar es sincronizar contra la base, que ya tiene los nuevos. El
+    // handshake se espera acá para poder responder qué herramientas
+    // aparecieron.
+    const runtime = await this.companyRuntime(companyId);
+    this.persistMcpTools(companyId, runtime.tools);
+
+    const idsNuevos = new Set(
+      this.store
+        .listMcpServers(companyId)
+        .filter((server) => nuevos.some((propuesto) => propuesto.name === server.name))
+        .map((server) => server.id),
+    );
+    const descubiertas = this.store
+      .listTools(companyId)
+      .filter((tool) => tool.mcpServerId != null && idsNuevos.has(tool.mcpServerId));
+
+    // Lo pedido se otorga: un servidor aprobado cuyas herramientas no le
+    // llegan a nadie deja al solicitante igual de bloqueado que antes.
+    let otorgadas: string[] = [];
+    if (opciones.otorgarARolId) {
+      const rol = this.store
+        .listRoles(companyId)
+        .find((candidate) => candidate.id === opciones.otorgarARolId);
+      if (rol) {
+        const toolIds = [...new Set([...rol.toolIds, ...descubiertas.map((tool) => tool.id)])];
+        this.store.saveRole({ ...rol, toolIds });
+        otorgadas = descubiertas.map((tool) => tool.name);
+
+        // La corrida viva congela su catálogo al arrancar: las herramientas
+        // nuevas hay que sumárselas explícitamente o el agente que las pidió
+        // no las ve hasta la corrida siguiente.
+        const enCurso = opciones.runId ? this.runs.get(opciones.runId) : undefined;
+        if (enCurso) {
+          for (const tool of descubiertas) enCurso.state.incorporarHerramienta(tool, null);
+          enCurso.state.updateRoleTools(rol.id, toolIds);
+        }
+      }
+    }
+
+    const estado = this.mcpHealth(companyId)
+      .filter((salud) => idsNuevos.has(salud.serverId))
+      .map((salud) => `${salud.serverName}: ${salud.status}`);
+
+    return {
+      instalados: nuevos.map((server) => server.name),
+      yaExistian,
+      estado,
+      toolCount: descubiertas.length,
+      toolNames: descubiertas.map((tool) => tool.name),
+      herramientasOtorgadas: otorgadas,
+      avisos,
+    };
   }
 
   /**

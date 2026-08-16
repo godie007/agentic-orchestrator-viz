@@ -512,6 +512,26 @@ export class Store {
     for (const tool of tools) stmt.run(tool.id);
   }
 
+  /**
+   * Saca de los roles los `toolIds` que ya no apuntan a ninguna herramienta.
+   *
+   * Al borrar un servidor MCP, sus filas de `tools` se van pero los roles
+   * seguían apuntando a ids muertos: silencioso en el motor —`forRole`
+   * resuelve por intersección— pero ruido permanente en la UI de asignación.
+   * Devuelve cuántos roles quedaron podados.
+   */
+  podarToolIdsHuerfanos(companyId: string): number {
+    const vigentes = new Set(this.listTools(companyId).map((tool) => tool.id));
+    let podados = 0;
+    for (const role of this.listRoles(companyId)) {
+      const toolIds = role.toolIds.filter((id) => vigentes.has(id));
+      if (toolIds.length === role.toolIds.length) continue;
+      this.saveRole({ ...role, toolIds });
+      podados++;
+    }
+    return podados;
+  }
+
   // --- Corridas ------------------------------------------------------------
 
   saveRun(run: Run): void {

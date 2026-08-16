@@ -447,3 +447,60 @@ describe("resumen de proyectos", () => {
     expect(store.resumenEmpresas()[0]?.ultimaCorridaAt).toBe(900);
   });
 });
+
+/**
+ * Borrar un servidor MCP tiene que llevarse sus herramientas y podar los
+ * `toolIds` muertos de los roles. `deleteToolsByMcpServer` existía sin ningún
+ * llamador: las filas quedaban huérfanas en la base y los roles apuntando a
+ * ids inexistentes — silencioso en el motor, ruido permanente en la UI.
+ */
+describe("cascada al borrar un servidor MCP", () => {
+  const tool = (name: string, mcpServerId: string | null, origin: "mcp" | "skill" = "mcp") => ({
+    id: ids.tool(),
+    name,
+    description: "",
+    origin,
+    inputSchema: {},
+    readOnly: false,
+    requiresApproval: false,
+    mcpServerId,
+    composicion: null,
+  });
+
+  it("borra las tools del servidor y poda los toolIds de los roles", () => {
+    const serverId = ids.mcpServer();
+    const delServidor = tool("mcp__uno__leer", serverId);
+    const deOtro = tool("mcp__otro__leer", ids.mcpServer());
+    const habilidad = tool("export_pdf", null, "skill");
+    store.saveTool(companyId, delServidor);
+    store.saveTool(companyId, deOtro);
+    store.saveTool(companyId, habilidad);
+
+    const agente = { ...rol("Diego"), toolIds: [delServidor.id, deOtro.id, habilidad.id] };
+    store.saveRole(agente);
+
+    store.deleteToolsByMcpServer(companyId, serverId);
+    const podados = store.podarToolIdsHuerfanos(companyId);
+
+    const restantes = store.listTools(companyId).map((t) => t.name);
+    expect(restantes).toContain("mcp__otro__leer");
+    expect(restantes).toContain("export_pdf");
+    expect(restantes).not.toContain("mcp__uno__leer");
+
+    expect(podados).toBe(1);
+    const actualizado = store.listRoles(companyId).find((r) => r.id === agente.id);
+    expect(actualizado?.toolIds).toEqual([deOtro.id, habilidad.id]);
+  });
+
+  it("la poda no toca roles sanos ni cuenta de más", () => {
+    const habilidad = tool("export_docx", null, "skill");
+    store.saveTool(companyId, habilidad);
+    const sano = { ...rol("Ana"), toolIds: [habilidad.id] };
+    store.saveRole(sano);
+
+    expect(store.podarToolIdsHuerfanos(companyId)).toBe(0);
+    expect(store.listRoles(companyId).find((r) => r.id === sano.id)?.toolIds).toEqual([
+      habilidad.id,
+    ]);
+  });
+});

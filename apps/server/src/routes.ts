@@ -1,6 +1,8 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 import {
+  CATALOGO_MCP,
+  articuloDeTienda,
   companyBlueprintSchema,
   companySchema,
   createRunSchema,
@@ -337,10 +339,113 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
     return run;
   });
 
-  registerChild(app, "mcp-servers", mcpServerSchema, ids.mcpServer, {
-    list: (companyId) => store.listMcpServers(companyId),
-    save: (value) => store.saveMcpServer(value),
-    remove: (id) => store.deleteMcpServer(id),
+  // Los servidores MCP no usan `registerChild`: el alta tiene que conectar y
+  // descubrir al toque (no en la próxima corrida), el nombre no puede repetirse
+  // —es el segmento de `mcp__<servidor>__<tool>`— y el borrado va en cascada:
+  // sin eso quedaban herramientas fantasma en la base y roles apuntando a ids
+  // muertos.
+  app.get("/api/companies/:companyId/mcp-servers", async (request) => {
+    const { companyId } = request.params as { companyId: string };
+    return store.listMcpServers(companyId);
+  });
+
+  app.post("/api/companies/:companyId/mcp-servers", async (request, reply) => {
+    const { companyId } = request.params as { companyId: string };
+    const body = request.body as Record<string, unknown>;
+    const parsed = mcpServerSchema.safeParse({
+      ...body,
+      companyId,
+      id: body.id ?? ids.mcpServer(),
+    });
+    if (!parsed.success) return invalid(reply, parsed.error);
+    if (store.listMcpServers(companyId).some((server) => server.name === parsed.data.name)) {
+      reply.code(409);
+      return {
+        error:
+          `Ya hay un servidor llamado "${parsed.data.name}". El nombre es parte del id de ` +
+          `cada herramienta, así que no puede repetirse.`,
+      };
+    }
+    store.saveMcpServer(parsed.data);
+    await runtime.companyRuntime(companyId); // conecta y descubre ahora
+    reply.code(201);
+    return parsed.data;
+  });
+
+  app.patch("/api/companies/:companyId/mcp-servers/:id", async (request, reply) => {
+    const { companyId, id } = request.params as { companyId: string; id: string };
+    const current = store.listMcpServers(companyId).find((server) => server.id === id);
+    if (!current) return notFound(reply, "mcp-servers", id);
+    const parsed = mcpServerSchema.safeParse({
+      ...current,
+      ...(request.body as object),
+      id,
+      companyId,
+    });
+    if (!parsed.success) return invalid(reply, parsed.error);
+    if (
+      store
+        .listMcpServers(companyId)
+        .some((server) => server.id !== id && server.name === parsed.data.name)
+    ) {
+      reply.code(409);
+      return { error: `Ya hay otro servidor llamado "${parsed.data.name}".` };
+    }
+    store.saveMcpServer(parsed.data);
+    await runtime.companyRuntime(companyId); // el sync reconecta lo que cambió
+    return parsed.data;
+  });
+
+  app.delete("/api/companies/:companyId/mcp-servers/:id", async (request) => {
+    const { companyId, id } = request.params as { companyId: string; id: string };
+    const resultado = await runtime.eliminarServidorMcp(companyId, id);
+    return { ok: true, cascaded: resultado.herramientas, rolesPodados: resultado.rolesPodados };
+  });
+
+  // --- Tienda de servidores MCP -------------------------------------------
+
+  app.get("/api/tienda-mcp", async (request) => {
+    const { companyId } = request.query as { companyId?: string };
+    const instalados = companyId
+      ? store.listMcpServers(companyId)
+      : ([] as ReturnType<typeof store.listMcpServers>);
+    return CATALOGO_MCP.map((articulo) => ({
+      ...articulo,
+      instalado: instalados.some(
+        (server) => server.catalogoId === articulo.id || server.name === articulo.servidor.name,
+      ),
+      envFaltantes: articulo.envRequeridas
+        .filter((entrada) => entrada.obligatoria && !process.env[entrada.ref])
+        .map((entrada) => entrada.ref),
+    }));
+  });
+
+  app.post("/api/companies/:companyId/tienda-mcp/:articuloId", async (request, reply) => {
+    const { companyId, articuloId } = request.params as {
+      companyId: string;
+      articuloId: string;
+    };
+    const articulo = articuloDeTienda(articuloId);
+    if (!articulo) return notFound(reply, "artículo de la tienda", articuloId);
+
+    const resultado = await runtime.instalarServidoresMcp(companyId, [
+      {
+        name: articulo.servidor.name,
+        description: articulo.servidor.description || articulo.descripcion,
+        transport: articulo.servidor.transport,
+        envRequeridas: articulo.envRequeridas,
+        catalogoId: articulo.id,
+      },
+    ]);
+
+    if (resultado.instalados.length === 0) {
+      reply.code(409);
+      return {
+        error: `"${articulo.nombre}" ya está instalado en este proyecto.`,
+        avisos: resultado.avisos,
+      };
+    }
+    return resultado;
   });
 
   app.get("/api/companies/:companyId/tools", async (request) => {

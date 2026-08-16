@@ -270,6 +270,8 @@ const mcpServers: McpServer[] = [
     },
     enabled: true,
     autoApproveTools: true,
+    envRequeridas: [],
+    catalogoId: null,
   },
   {
     id: ids.mcpServer(),
@@ -286,6 +288,8 @@ const mcpServers: McpServer[] = [
     },
     enabled: true,
     autoApproveTools: true,
+    envRequeridas: [],
+    catalogoId: null,
   },
 ];
 

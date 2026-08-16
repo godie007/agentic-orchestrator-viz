@@ -344,6 +344,23 @@ export const mcpServerSchema = z.object({
   enabled: z.boolean().default(true),
   /** Auto-aprobar todas las tools de este servidor al descubrirlas. */
   autoApproveTools: z.boolean().default(true),
+  /**
+   * Qué variables de entorno necesita el servidor, declaradas de antemano.
+   * `ref` es el **nombre** de la variable (regla de secretos por referencia).
+   * Sin esta lista, una credencial ausente se descubría recién en el
+   * handshake, lejos de su causa.
+   */
+  envRequeridas: z
+    .array(
+      z.object({
+        ref: z.string().min(1),
+        descripcion: z.string().default(""),
+        obligatoria: z.boolean().default(true),
+      }),
+    )
+    .default([]),
+  /** Id del artículo de la tienda del que salió, o null si se pegó a mano. */
+  catalogoId: z.string().nullable().default(null),
 });
 export type McpServer = z.infer<typeof mcpServerSchema>;
 
@@ -371,6 +388,12 @@ export const mcpServerHealthSchema = z.object({
   connectedAt: timestampSchema.nullable().default(null),
   /** Intentos de reconexión consecutivos. Se resetea al conectar. */
   reconnectAttempts: z.number().int().nonnegative().default(0),
+  /**
+   * Referencias de env/headers declaradas en el transporte que no tienen valor
+   * en el entorno del servidor. Antes se omitían en silencio y el error
+   * aparecía lejos de su causa.
+   */
+  envFaltantes: z.array(z.string()).default([]),
 });
 export type McpServerHealth = z.infer<typeof mcpServerHealthSchema>;
 

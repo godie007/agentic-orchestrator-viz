@@ -1,6 +1,7 @@
 import type {
   AgentRequest,
   ApprovalRequest,
+  ArticuloDeTienda,
   RoleProposal,
   Artifact,
   Company,
@@ -26,6 +27,24 @@ import type {
 /** Codifica cada segmento por separado: las barras son parte de la ruta. */
 const encodePath = (path: string): string =>
   path.split("/").map(encodeURIComponent).join("/");
+
+/** Un artículo del catálogo con su estado en esta empresa. */
+export interface ArticuloDeTiendaConEstado extends ArticuloDeTienda {
+  instalado: boolean;
+  /** Variables obligatorias sin valor en el entorno del servidor. */
+  envFaltantes: string[];
+}
+
+/** Lo que devuelve instalar: el feedback "conectado, N herramientas". */
+export interface ResultadoInstalacionMcp {
+  instalados: string[];
+  yaExistian: string[];
+  estado: string[];
+  toolCount: number;
+  toolNames: string[];
+  herramientasOtorgadas: string[];
+  avisos: string[];
+}
 
 export interface TreeFile {
   kind: "file";
@@ -283,6 +302,14 @@ export const api = {
     }),
   borrarMcpServer: (companyId: string, id: string) =>
     request<{ ok: boolean }>(`/companies/${companyId}/mcp-servers/${id}`, { method: "DELETE" }),
+  /** Catálogo de la tienda, con el flag `instalado` para esta empresa. */
+  tiendaMcp: (companyId: string) =>
+    request<ArticuloDeTiendaConEstado[]>(`/tienda-mcp?companyId=${companyId}`),
+  /** Instala un artículo: alta + handshake + descubrimiento, en una llamada. */
+  instalarDeTienda: (companyId: string, articuloId: string) =>
+    request<ResultadoInstalacionMcp>(`/companies/${companyId}/tienda-mcp/${articuloId}`, {
+      method: "POST",
+    }),
   probeTool: (companyId: string, toolName: string, args: Record<string, unknown>) =>
     request<{ ok: boolean; content: string }>(`/companies/${companyId}/mcp/probe`, {
       method: "POST",

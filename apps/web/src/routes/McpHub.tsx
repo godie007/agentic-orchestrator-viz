@@ -58,6 +58,7 @@ export function McpHub({ company }: { company: CompanyBundle }) {
     : null;
 
   const [agregando, setAgregando] = useState(false);
+  const [tienda, setTienda] = useState(false);
 
   const olvidar = useMutation({
     mutationFn: (serverId: string) => api.borrarMcpServer(companyId, serverId),
@@ -77,14 +78,32 @@ export function McpHub({ company }: { company: CompanyBundle }) {
         <Panel
           title="Servidores MCP"
           actions={
-            <Button variant="primary" onClick={() => setAgregando((v) => !v)}>
-              {agregando ? "cancelar" : "+ servidor"}
-            </Button>
+            <div className="flex gap-1">
+              <Button
+                variant={tienda ? "default" : "primary"}
+                title="Catálogo de servidores conocidos, instalables en un click."
+                onClick={() => {
+                  setTienda((v) => !v);
+                  setAgregando(false);
+                }}
+              >
+                {tienda ? "cerrar tienda" : "tienda"}
+              </Button>
+              <Button
+                onClick={() => {
+                  setAgregando((v) => !v);
+                  setTienda(false);
+                }}
+              >
+                {agregando ? "cancelar" : "+ pegar JSON"}
+              </Button>
+            </div>
           }
         >
           {agregando && (
             <AltaDeServidor companyId={companyId} onListo={() => setAgregando(false)} />
           )}
+          {tienda && <TiendaMinima companyId={companyId} />}
           {servers.length === 0 && !agregando ? (
             <Empty>
               Todavía no hay ningún servidor MCP conectado. Tocá «+ servidor» y pegá la
@@ -174,6 +193,88 @@ export function McpHub({ company }: { company: CompanyBundle }) {
 }
 
 /**
+ * La tienda, en su versión mínima: el catálogo curado con instalación de un
+ * click. Instalar hace el ciclo entero en el servidor —alta, handshake,
+ * descubrimiento— y acá sólo se muestra el resultado: "conectado, N
+ * herramientas" o los avisos (una credencial que falta se dice al instalar,
+ * no en un error de auth de dentro de un rato).
+ */
+function TiendaMinima({ companyId }: { companyId: string }) {
+  const queryClient = useQueryClient();
+  const [resultado, setResultado] = useState<string | null>(null);
+
+  const catalogo = useQuery({
+    queryKey: ["tienda-mcp", companyId],
+    queryFn: () => api.tiendaMcp(companyId),
+  });
+
+  const instalar = useMutation({
+    mutationFn: (articuloId: string) => api.instalarDeTienda(companyId, articuloId),
+    onSuccess: (data) => {
+      const avisos = data.avisos.length > 0 ? ` — ${data.avisos.join(" ")}` : "";
+      setResultado(
+        data.instalados.length > 0
+          ? `Conectado: ${data.instalados.join(", ")} (${data.toolCount} herramientas)${avisos}`
+          : `Ya estaba instalado${avisos}`,
+      );
+      void queryClient.invalidateQueries({ queryKey: ["company", companyId] });
+      void queryClient.invalidateQueries({ queryKey: ["mcp-health", companyId] });
+      void queryClient.invalidateQueries({ queryKey: ["tools", companyId] });
+      void queryClient.invalidateQueries({ queryKey: ["tienda-mcp", companyId] });
+    },
+    onError: (error) => setResultado(error instanceof Error ? error.message : String(error)),
+  });
+
+  return (
+    <div className="border-b border-line/60 p-3">
+      {resultado && (
+        <p className="mb-2 rounded border border-line bg-surface-2 px-2 py-1 text-[11px] text-ink">
+          {resultado}
+        </p>
+      )}
+      {catalogo.isLoading && <p className="text-xs text-ink-faint">Cargando catálogo…</p>}
+      <ul className="max-h-72 space-y-1 overflow-auto pr-1">
+        {(catalogo.data ?? []).map((articulo) => (
+          <li
+            key={articulo.id}
+            className="flex items-center justify-between gap-2 rounded border border-line/60 px-2 py-1.5"
+          >
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-medium text-ink">{articulo.nombre}</span>
+                <span className="text-[10px] uppercase tracking-wide text-ink-faint">
+                  {articulo.categoria}
+                </span>
+              </div>
+              <p className="truncate text-[11px] text-ink-faint" title={articulo.descripcion}>
+                {articulo.descripcion}
+              </p>
+              {articulo.envFaltantes.length > 0 && (
+                <p className="text-[10px] text-warn">
+                  falta en .env: {articulo.envFaltantes.join(", ")}
+                </p>
+              )}
+            </div>
+            {articulo.instalado ? (
+              <span className="shrink-0 text-[11px] text-ok">instalado ✓</span>
+            ) : (
+              <Button
+                onClick={() => instalar.mutate(articulo.id)}
+                title={`Instala y conecta ${articulo.nombre}. ${articulo.docsUrl}`}
+              >
+                {instalar.isPending && instalar.variables === articulo.id
+                  ? "instalando…"
+                  : "instalar"}
+              </Button>
+            )}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/**
  * Alta de servidores pegando la configuración que ya tenés.
  *
  * El formato `{"mcpServers": {…}}` es el que publica cada servidor en su README
@@ -210,6 +311,8 @@ function AltaDeServidor({
           transport: servidor.transport,
           enabled: true,
           autoApproveTools: true,
+          envRequeridas: [],
+          catalogoId: null,
         });
       }
     },
