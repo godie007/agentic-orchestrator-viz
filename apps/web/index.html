@@ -1,10 +1,21 @@
 <!doctype html>
-<html lang="es" class="dark">
+<html lang="es">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Orquestador Agéntico</title>
+    <script>
+      // El tema elegido se aplica antes del primer pintado, o la página
+      // parpadea del claro al oscuro al cargar. "system" no marca nada: manda
+      // el media query.
+      (function () {
+        var tema = localStorage.getItem("orq-tema");
+        if (tema === "dark" || tema === "light") {
+          document.documentElement.dataset.theme = tema;
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

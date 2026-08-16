@@ -1,7 +1,29 @@
-import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { api } from "./api.js";
-import { Empty } from "./lib/ui.js";
+import {
+  BrowserRouter,
+  Navigate,
+  NavLink,
+  Outlet,
+  Route,
+  Routes,
+  useNavigate,
+  useOutletContext,
+  useParams,
+} from "react-router";
+import {
+  Activity,
+  Brain,
+  FolderOutput,
+  Inbox,
+  KanbanSquare,
+  LayoutGrid,
+  Network,
+  Plug,
+  Receipt,
+  ServerCog,
+} from "lucide-react";
+import { api, type CompanyBundle } from "./api.js";
+import { Empty, Skeleton, BotonDeTema, ToastProvider } from "./ui/index.js";
 import { Board } from "./routes/Board.js";
 import { LiveProcess } from "./routes/LiveProcess.js";
 import { McpHub } from "./routes/McpHub.js";
@@ -11,158 +33,204 @@ import { Memory } from "./routes/Memory.js";
 import { Requests } from "./routes/Requests.js";
 import { Output } from "./routes/Output.js";
 
-const TABS = [
-  { id: "proyectos", label: "Proyectos" },
-  { id: "proceso", label: "Proceso en vivo" },
-  { id: "tablero", label: "Tablero" },
-  { id: "mcp", label: "MCP Hub" },
-  { id: "solicitudes", label: "Solicitudes" },
-  { id: "empresa", label: "Empresa" },
-  { id: "salida", label: "Salida" },
-  { id: "memoria", label: "Memoria" },
-  { id: "costos", label: "Costos" },
-  { id: "proveedores", label: "Proveedores" },
+/**
+ * El shell de la aplicación: header global + sidebar por proyecto, con la
+ * selección viviendo en la URL.
+ *
+ * Antes la navegación era un `useState` con diez pestañas: sin URLs no había
+ * forma de mandar un enlace a una corrida, refrescar perdía el lugar, y el
+ * back del navegador no hacía nada. `companyId` viaja en `/p/:companyId/…`,
+ * así que "qué proyecto está abierto" ya no es estado de React.
+ */
+
+const SECCIONES = [
+  { path: "proceso", etiqueta: "Proceso", icono: Activity, title: "La corrida en vivo: organigrama animado, timeline y controles." },
+  { path: "tablero", etiqueta: "Tablero", icono: KanbanSquare, title: "Las tareas de la corrida como kanban." },
+  { path: "empresa", etiqueta: "Empresa", icono: Network, title: "La organización: áreas, agentes y sus herramientas." },
+  { path: "solicitudes", etiqueta: "Solicitudes", icono: Inbox, title: "Lo que los agentes te piden: roles, datos, accesos, servidores." },
+  { path: "mcp", etiqueta: "MCP", icono: Plug, title: "Servidores MCP: tienda, salud y probador." },
+  { path: "salida", etiqueta: "Salida", icono: FolderOutput, title: "Los archivos que la empresa produjo." },
+  { path: "memoria", etiqueta: "Memoria", icono: Brain, title: "Lo que la empresa aprendió entre corridas." },
+  { path: "costos", etiqueta: "Costos", icono: Receipt, title: "Cuánto gastó cada corrida, por agente y por modelo." },
 ] as const;
 
-type TabId = (typeof TABS)[number]["id"];
-
-/**
- * Las pestañas que no dependen de que haya un proyecto elegido.
- *
- * Proyectos es donde se crea el primero, así que exigirle uno sería un callejón
- * sin salida en una instalación nueva; Proveedores es configuración global.
- */
-const SIN_PROYECTO = new Set<TabId>(["proyectos", "proveedores"]);
-
 export function App() {
-  // Arranca en Proyectos: es la puerta de entrada, y con más de una empresa
-  // cargada lo primero que hay que decidir es con cuál se trabaja.
-  const [tab, setTab] = useState<TabId>("proyectos");
-  const [companyId, setCompanyId] = useState<string | null>(null);
+  return (
+    <ToastProvider>
+      <BrowserRouter>
+        <Routes>
+          <Route element={<Shell />}>
+            <Route index element={<Navigate to="/proyectos" replace />} />
+            <Route path="/proyectos" element={<ProyectosRuta />} />
+            <Route path="/proveedores" element={<Providers />} />
+            <Route path="/p/:companyId" element={<ProyectoLayout />}>
+              <Route index element={<Navigate to="empresa" replace />} />
+              <Route path="proceso" element={<Pantalla render={(c) => <LiveProcess key={c.company.id} company={c} />} />} />
+              <Route path="tablero" element={<Pantalla render={(c) => <Board key={c.company.id} company={c} />} />} />
+              <Route path="empresa" element={<EmpresaRuta />} />
+              <Route path="solicitudes" element={<Pantalla render={(c) => <Requests key={c.company.id} company={c} />} />} />
+              <Route path="mcp" element={<Pantalla render={(c) => <McpHub key={c.company.id} company={c} />} />} />
+              <Route path="salida" element={<Pantalla render={(c) => <Output company={c} />} />} />
+              <Route path="memoria" element={<Pantalla render={(c) => <Memory key={c.company.id} company={c} />} />} />
+              <Route path="costos" element={<Pantalla render={(c) => <Costs key={c.company.id} company={c} />} />} />
+            </Route>
+            <Route path="*" element={<Navigate to="/proyectos" replace />} />
+          </Route>
+        </Routes>
+      </BrowserRouter>
+    </ToastProvider>
+  );
+}
 
+/** Header global: marca, selector de proyecto y tema. */
+function Shell() {
+  const navigate = useNavigate();
+  const { companyId } = useParams();
   const companies = useQuery({ queryKey: ["companies"], queryFn: () => api.companies() });
-  const activeId = companyId ?? companies.data?.[0]?.id ?? null;
-
-  const company = useQuery({
-    queryKey: ["company", activeId],
-    queryFn: () => api.company(activeId!),
-    enabled: activeId != null,
-  });
-
-  const abrirProyecto = (id: string) => {
-    setCompanyId(id);
-    setTab("empresa");
-  };
-
-  /** Al borrar el proyecto activo hay que soltarlo o queda un id muerto. */
-  const soltarProyecto = (id: string) => {
-    if (companyId === id) setCompanyId(null);
-  };
-
-  const contenido = () => {
-    if (tab === "proyectos") {
-      return <Proyectos activeId={activeId} onAbrir={abrirProyecto} onBorrado={soltarProyecto} />;
-    }
-    if (tab === "proveedores") return <Providers />;
-
-    if (companies.isLoading) return <Empty>Cargando…</Empty>;
-    if (!activeId) {
-      return (
-        <Empty>
-          No hay ningún proyecto. Creá uno desde <b>Proyectos</b>, o ejecutá{" "}
-          <code className="mx-1 text-accent">npm run db:seed</code> para traer el de ejemplo.
-        </Empty>
-      );
-    }
-    // Un proyecto que se borró desde otra pestaña deja la consulta en error, no
-    // cargando: sin distinguirlas, la pantalla decía "Cargando…" para siempre.
-    if (company.isError) {
-      return (
-        <Empty>
-          Ese proyecto ya no existe. Elegí otro en <b>Proyectos</b>.
-        </Empty>
-      );
-    }
-    if (company.isLoading || !company.data) return <Empty>Cargando el proyecto…</Empty>;
-
-    const datos = company.data;
-    switch (tab) {
-      case "proceso":
-        return <LiveProcess key={activeId} company={datos} />;
-      case "tablero":
-        return <Board key={activeId} company={datos} />;
-      case "mcp":
-        return <McpHub key={activeId} company={datos} />;
-      case "solicitudes":
-        return <Requests key={activeId} company={datos} />;
-      case "empresa":
-        return (
-          <CompanyDesigner
-            key={activeId}
-            company={datos}
-            // Al borrarla hay que soltar la selección: `activeId` seguiría
-            // apuntando a un proyecto que ya no existe.
-            onCompanyGone={() => setCompanyId(null)}
-          />
-        );
-      case "salida":
-        return <Output company={datos} />;
-      case "memoria":
-        return <Memory key={activeId} company={datos} />;
-      case "costos":
-        return <Costs key={activeId} company={datos} />;
-    }
-  };
 
   return (
     <div className="grid h-full grid-rows-[auto_1fr]">
       <header className="flex items-center gap-4 border-b border-line bg-surface px-4 py-2">
-        <div className="flex items-baseline gap-2">
+        <NavLink to="/proyectos" className="flex items-baseline gap-2">
           <span className="text-sm font-semibold text-ink">Orquestador Agéntico</span>
-          <span className="text-[11px] text-ink-faint">empresa simulada</span>
-        </div>
+        </NavLink>
 
         <nav className="flex gap-1">
-          {TABS.map((item) => {
-            const bloqueada = !SIN_PROYECTO.has(item.id) && !activeId;
-            return (
-              <button
-                key={item.id}
-                disabled={bloqueada}
-                title={bloqueada ? "Elegí o creá un proyecto primero." : undefined}
-                onClick={() => setTab(item.id)}
-                className={`rounded px-2.5 py-1 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-30 ${
-                  tab === item.id
-                    ? "bg-accent/15 text-accent"
-                    : "text-ink-dim hover:bg-surface-2 hover:text-ink"
-                }`}
-              >
-                {item.label}
-              </button>
-            );
-          })}
+          <NavLink
+            to="/proyectos"
+            className={({ isActive }) =>
+              `flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors ${
+                isActive ? "bg-accent/15 text-accent" : "text-ink-dim hover:bg-surface-2 hover:text-ink"
+              }`
+            }
+          >
+            <LayoutGrid className="size-3.5" aria-hidden />
+            Proyectos
+          </NavLink>
+          <NavLink
+            to="/proveedores"
+            className={({ isActive }) =>
+              `flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors ${
+                isActive ? "bg-accent/15 text-accent" : "text-ink-dim hover:bg-surface-2 hover:text-ink"
+              }`
+            }
+          >
+            <ServerCog className="size-3.5" aria-hidden />
+            Proveedores
+          </NavLink>
         </nav>
 
-        {/* El selector queda para alternar rápido entre dos proyectos sin volver
-            a la pantalla; la gestión (crear, borrar, ver el estado) vive allá. */}
-        <div className="ml-auto">
+        <div className="ml-auto flex items-center gap-2">
+          {/* Alterna rápido entre proyectos conservando la sección abierta. */}
           <select
-            value={activeId ?? ""}
+            value={companyId ?? ""}
             disabled={(companies.data ?? []).length === 0}
-            onChange={(event) => setCompanyId(event.target.value)}
+            onChange={(event) => {
+              const id = event.target.value;
+              if (!id) return;
+              const seccion = window.location.pathname.split("/")[3] ?? "empresa";
+              void navigate(`/p/${id}/${seccion}`);
+            }}
             className="rounded border border-line bg-canvas px-2 py-1 text-xs text-ink disabled:opacity-40"
           >
-            {(companies.data ?? []).length === 0 && <option value="">sin proyectos</option>}
+            {!companyId && <option value="">elegir proyecto…</option>}
             {(companies.data ?? []).map((item) => (
               <option key={item.id} value={item.id}>
                 {item.name}
               </option>
             ))}
           </select>
+          <BotonDeTema />
         </div>
       </header>
 
-      <main className="min-h-0">{contenido()}</main>
+      <main className="min-h-0">
+        <Outlet />
+      </main>
     </div>
+  );
+}
+
+/** Sidebar + carga del proyecto activo. Las secciones reciben el bundle por contexto. */
+function ProyectoLayout() {
+  const { companyId } = useParams();
+  const navigate = useNavigate();
+
+  const company = useQuery({
+    queryKey: ["company", companyId],
+    queryFn: () => api.company(companyId!),
+    enabled: companyId != null,
+  });
+
+  return (
+    <div className="grid h-full min-h-0 grid-cols-[52px_1fr]">
+      <aside className="flex flex-col items-center gap-1 border-r border-line bg-surface py-2">
+        {SECCIONES.map((seccion) => (
+          <NavLink
+            key={seccion.path}
+            to={seccion.path}
+            title={`${seccion.etiqueta} — ${seccion.title}`}
+            className={({ isActive }) =>
+              `flex w-11 flex-col items-center gap-0.5 rounded-md px-1 py-1.5 transition-colors ${
+                isActive ? "bg-accent/15 text-accent" : "text-ink-faint hover:bg-surface-2 hover:text-ink"
+              }`
+            }
+          >
+            <seccion.icono className="size-4" aria-hidden />
+            <span className="text-[9px] font-medium leading-none">{seccion.etiqueta}</span>
+          </NavLink>
+        ))}
+      </aside>
+
+      <div className="min-h-0 min-w-0">
+        {company.isError ? (
+          <Empty>
+            Ese proyecto ya no existe.{" "}
+            <button className="text-accent underline" onClick={() => void navigate("/proyectos")}>
+              Volver a Proyectos
+            </button>
+          </Empty>
+        ) : company.isLoading || !company.data ? (
+          <div className="space-y-2 p-4">
+            <Skeleton className="h-6 w-64" />
+            <Skeleton className="h-40 w-full" />
+          </div>
+        ) : (
+          <Outlet context={company.data} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Adaptador: toma el bundle del contexto del layout y lo pasa como prop. */
+function Pantalla({ render }: { render: (company: CompanyBundle) => React.ReactElement }) {
+  const company = useOutletContext<CompanyBundle>();
+  return render(company);
+}
+
+function EmpresaRuta() {
+  const company = useOutletContext<CompanyBundle>();
+  const navigate = useNavigate();
+  return (
+    <CompanyDesigner
+      key={company.company.id}
+      company={company}
+      // Al borrar el proyecto hay que soltar la URL que lo apunta, o la
+      // pantalla queda cargando un id muerto para siempre.
+      onCompanyGone={() => void navigate("/proyectos")}
+    />
+  );
+}
+
+function ProyectosRuta() {
+  const navigate = useNavigate();
+  const { companyId } = useParams();
+  return (
+    <Proyectos
+      activeId={companyId ?? null}
+      onAbrir={(id) => void navigate(`/p/${id}/empresa`)}
+      onBorrado={() => undefined /* la selección vive en la URL: acá no hay nada que soltar */}
+    />
   );
 }
