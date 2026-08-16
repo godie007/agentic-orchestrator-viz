@@ -52,6 +52,7 @@ function escenario(toolIds: string[] = ["tool_1"]) {
         readOnly: true,
         requiresApproval: false,
         mcpServerId: "mcp_1",
+        composicion: null,
       },
       {
         id: "tool_1",
@@ -62,6 +63,7 @@ function escenario(toolIds: string[] = ["tool_1"]) {
         readOnly: true,
         requiresApproval: false,
         mcpServerId: "mcp_1",
+        composicion: null,
       },
     ],
     mcpServers: [],

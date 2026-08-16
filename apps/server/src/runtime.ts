@@ -1,4 +1,4 @@
-import { ids } from "@orq/shared";
+import { ids, mcpServerSchema } from "@orq/shared";
 import type {
   AgentRequest,
   CreateRunInput,
@@ -14,6 +14,8 @@ import {
   McpBridge,
   ToolRegistry,
   crearCorreo,
+  crearToolCompuesta,
+  createCrearHerramienta,
   createEmailTools,
   createSkillTools,
   type Correo,
@@ -96,6 +98,22 @@ export class Runtime {
       )) {
         tools.register(email);
       }
+      // Las herramientas compuestas que la empresa ya creó vuelven al catálogo
+      // vivo: se persisten como cualquier otra, pero lo ejecutable se arma acá.
+      // Una fila sin composición válida se saltea en vez de tumbar el runtime.
+      for (const fila of this.store.listTools(companyId)) {
+        if (fila.origin !== "creada" || !fila.composicion) continue;
+        tools.register(crearToolCompuesta(fila, (name) => tools.get(name)));
+      }
+      // Y la capacidad de crear nuevas, que necesita el catálogo de esta
+      // empresa a mano: por eso se registra acá y no entre las de coordinación
+      // globales.
+      tools.register(
+        createCrearHerramienta({
+          registrar: (creada) => tools.register(creada),
+          resolver: (name) => tools.get(name),
+        }),
+      );
       const health = new Map<string, McpServerHealth>();
       const mcp = new McpBridge(tools, resolveSecret, (update) => {
         health.set(update.serverId, update);
@@ -265,15 +283,18 @@ export class Runtime {
 
     // Se arma un contexto mínimo: la prueba manual no pertenece a ninguna
     // corrida, así que las herramientas de coordinación no son invocables acá.
-    if (tool.origin === "coordination" || tool.origin === "skill") {
+    if (tool.origin === "coordination" || tool.origin === "skill" || tool.origin === "creada") {
       return {
         ok: false,
         content:
           tool.origin === "coordination"
             ? "Las herramientas de coordinación necesitan una corrida en curso: " +
               "actúan sobre bandejas y tareas que todavía no existen."
-            : "Las habilidades exportan un entregable, y los entregables pertenecen " +
-              "a una corrida. Arrancá una y pedile al agente que la use.",
+            : tool.origin === "creada"
+              ? "Las herramientas compuestas encadenan pasos de coordinación y " +
+                "habilidades, que sólo existen dentro de una corrida."
+              : "Las habilidades exportan un entregable, y los entregables pertenecen " +
+                "a una corrida. Arrancá una y pedile al agente que la use.",
       };
     }
 
@@ -306,6 +327,10 @@ export class Runtime {
   private persistMcpTools(companyId: string, tools: ToolRegistry): void {
     const existing = new Map(this.store.listTools(companyId).map((tool) => [tool.name, tool]));
     for (const described of tools.describe()) {
+      // Las compuestas ya están persistidas **con su composición**; `describe`
+      // no la lleva, así que re-guardarlas desde acá las dejaría vacías: una
+      // herramienta que existe pero no ejecuta nada.
+      if (described.origin === "creada") continue;
       const previous = existing.get(described.name);
       this.store.saveTool(companyId, { ...described, id: previous?.id ?? ids.tool() });
     }
@@ -370,6 +395,9 @@ export class Runtime {
         if (department) this.store.saveDepartment(department);
         this.store.saveRole(role);
       },
+      // Una herramienta compuesta creada en medio de la corrida es de la
+      // empresa, como el especialista convocado: queda para las siguientes.
+      saveTool: (tool) => this.store.saveTool(company.id, tool),
     });
 
     const ledger = new RunLedger(run.budgetUsd, (record) => {
@@ -656,6 +684,92 @@ export class Runtime {
       return { otorgadas: encontradas.map((tool) => tool.name), inexistentes: faltantes };
     }
 
+    if (request.type === "mcp_server") {
+      if (request.mcpProposal.length === 0) {
+        throw new Error("La solicitud no trae ningún servidor propuesto.");
+      }
+
+      // La propuesta pudo quedar vieja: alguien conectó el mismo servidor desde
+      // el Hub mientras la solicitud esperaba. Los repetidos no son un error —
+      // la capacidad ya está—, pero si no queda ninguno nuevo, aprobar no haría
+      // nada y conviene decirlo.
+      const existentes = new Set(this.store.listMcpServers(companyId).map((server) => server.name));
+      const nuevos = request.mcpProposal.filter((server) => !existentes.has(server.name));
+      const repetidos = request.mcpProposal
+        .filter((server) => existentes.has(server.name))
+        .map((server) => server.name);
+      if (nuevos.length === 0) {
+        throw new Error(
+          `Todos los servidores propuestos ya están configurados: ${repetidos.join(", ")}. ` +
+            `No hay nada que aprobar; si al agente le faltan sus herramientas, va a pedirlas aparte.`,
+        );
+      }
+
+      for (const propuesto of nuevos) {
+        this.store.saveMcpServer(
+          mcpServerSchema.parse({
+            id: ids.mcpServer(),
+            companyId,
+            name: propuesto.name,
+            description: propuesto.description,
+            transport: propuesto.transport,
+            enabled: true,
+            autoApproveTools: true,
+          }),
+        );
+      }
+
+      // Conectar es sincronizar contra la base, que ya tiene los nuevos. El
+      // handshake se espera acá para poder decirle al agente qué herramientas
+      // aparecieron, no solo que "se guardó una configuración".
+      const runtime = await this.companyRuntime(companyId);
+      this.persistMcpTools(companyId, runtime.tools);
+
+      const idsNuevos = new Set(
+        this.store
+          .listMcpServers(companyId)
+          .filter((server) => nuevos.some((propuesto) => propuesto.name === server.name))
+          .map((server) => server.id),
+      );
+      const descubiertas = this.store
+        .listTools(companyId)
+        .filter((tool) => tool.mcpServerId != null && idsNuevos.has(tool.mcpServerId));
+
+      // Lo pedido se otorga: un servidor aprobado cuyas herramientas no le
+      // llegan a nadie deja al solicitante igual de bloqueado que antes.
+      let otorgadas: string[] = [];
+      if (request.requestedByRoleId) {
+        const rol = this.store
+          .listRoles(companyId)
+          .find((candidate) => candidate.id === request.requestedByRoleId);
+        if (rol) {
+          const toolIds = [...new Set([...rol.toolIds, ...descubiertas.map((tool) => tool.id)])];
+          this.store.saveRole({ ...rol, toolIds });
+          otorgadas = descubiertas.map((tool) => tool.name);
+
+          // La corrida viva congela su catálogo al arrancar: las herramientas
+          // nuevas hay que sumárselas explícitamente o el agente que las pidió
+          // no las ve hasta la corrida siguiente.
+          const enCurso = request.runId ? this.runs.get(request.runId) : undefined;
+          if (enCurso) {
+            for (const tool of descubiertas) enCurso.state.incorporarHerramienta(tool, null);
+            enCurso.state.updateRoleTools(rol.id, toolIds);
+          }
+        }
+      }
+
+      const salud = this.mcpHealth(companyId)
+        .filter((estado) => idsNuevos.has(estado.serverId))
+        .map((estado) => `${estado.serverName}: ${estado.status}`);
+
+      return {
+        servidores: nuevos.map((server) => server.name),
+        ...(repetidos.length > 0 ? { yaExistian: repetidos } : {}),
+        estado: salud,
+        herramientasOtorgadas: otorgadas,
+      };
+    }
+
     return {}; // `context`: la respuesta viaja en el mensaje, no cambia config
   }
 
@@ -703,7 +817,29 @@ export class Runtime {
     aplicado: Record<string, unknown>,
   ): "bandeja" | "memoria" | "descartada" {
     if (!request.requestedByRoleId) return "descartada";
-    const active = request.runId ? this.runs.get(request.runId) : undefined;
+    let active = request.runId ? this.runs.get(request.runId) : undefined;
+
+    // Las solicitudes pendientes se **heredan**: una corrida nueva las carga de
+    // la configuración de la empresa al arrancar. Si la corrida que la creó ya
+    // no está viva, la respuesta tiene que espejarse en la que la está
+    // esperando ahora — sin esto, esa corrida queda en `awaiting_approval` para
+    // siempre por una solicitud que ya está resuelta en la base. Lo medimos:
+    // una corrida entera con el trabajo aprobado, trabada en su cierre.
+    if (!active) {
+      active = [...this.runs.values()].find(
+        (candidata) =>
+          candidata.companyId === request.companyId &&
+          candidata.state.requests.some(
+            (pendiente) => pendiente.id === request.id && pendiente.status === "pending",
+          ),
+      );
+      // La reanudación de la ruta apunta al runId original, que acá no sirve:
+      // se dispara sobre la corrida que de verdad estaba esperando.
+      if (active) {
+        const heredera = active.run.id;
+        queueMicrotask(() => this.reanudarSiEsperaba(heredera));
+      }
+    }
 
     if (!active) {
       if (request.type !== "context" || !request.resolution?.trim()) return "descartada";
@@ -773,6 +909,11 @@ export class Runtime {
         (request.type === "create_role" && aprobada
           ? `\n\nYa está incorporado y disponible desde el próximo ciclo: escribile con ` +
             `send_message para ponerlo a trabajar.`
+          : "") +
+        (request.type === "mcp_server" && aprobada
+          ? `\n\nEl servidor ya está conectado y sus herramientas te quedaron asignadas: ` +
+            `las vas a ver en tu próximo turno. Si alguna necesita una credencial que ` +
+            `se descartó al importar, la persona a cargo la carga en el .env del servidor.`
           : ""),
       threadId: null,
       inReplyTo: null,

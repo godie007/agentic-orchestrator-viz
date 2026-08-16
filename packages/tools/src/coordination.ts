@@ -1,6 +1,6 @@
 import { bloques, buscarEnEntregables } from "./busqueda.js";
 import { calcular, verificarCifras } from "./calculo.js";
-import type { Role } from "@orq/shared";
+import { parsearConfigMcp, type Role } from "@orq/shared";
 import { fail, ok, preview, type AgentWorkspace, type RegisteredTool } from "./types.js";
 
 /**
@@ -1395,6 +1395,86 @@ const requestToolAccess: RegisteredTool = {
   },
 };
 
+/**
+ * Pedir la conexión de un servidor MCP que la empresa no tiene.
+ *
+ * Es el mismo circuito del Hub —pegás el bloque `{"mcpServers": …}` del README—
+ * pero iniciado por un agente y con la decisión en manos de una persona: la
+ * propuesta se sanea acá (los secretos literales se descartan y se avisan) y
+ * conectar de verdad recién ocurre al aprobarse. La diferencia con
+ * `request_tool_access` es qué falta: aquella reparte herramientas que la
+ * empresa ya descubrió; ésta trae una fuente de herramientas nueva.
+ */
+const solicitarServidorMcp: RegisteredTool = {
+  name: "solicitar_servidor_mcp",
+  origin: "coordination",
+  readOnly: false,
+  requiresApproval: false,
+  description:
+    "Pedile a la persona a cargo conectar un servidor MCP que la empresa todavía no " +
+    "tiene, cuando el encargo necesita una capacidad externa —una API, un servicio, " +
+    "una fuente de datos— que ninguna herramienta del catálogo cubre. Pegá en " +
+    "'config' el bloque JSON {\"mcpServers\": {…}} que publica el servidor en su " +
+    "README. Los secretos no viajan: si la config trae un token literal, se descarta " +
+    "y la persona lo carga por su lado. Si se aprueba, las herramientas descubiertas " +
+    "te llegan asignadas. Antes de usarla, revisá el catálogo con tu lista de " +
+    "herramientas: puede que lo que buscás ya exista.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      config: stringProp(
+        'El JSON de configuración, tal como lo publica el servidor: {"mcpServers": {"nombre": {"command": …}}} o el mapa a secas.',
+      ),
+      reason: stringProp("Qué capacidad falta, para qué tarea, y qué se desbloquea al conectarlo"),
+    },
+    required: ["config", "reason"],
+    additionalProperties: false,
+  },
+  async execute(args, ctx) {
+    const parsed = readRequired(args, ["config", "reason"]);
+    if (!parsed.ok) return fail(`solicitar_servidor_mcp: ${parsed.error}`);
+
+    const importado = parsearConfigMcp(parsed.values.config!);
+    if (importado.servidores.length === 0) {
+      return fail(
+        `solicitar_servidor_mcp: la configuración no define ningún servidor conectable. ` +
+          `${importado.avisos.join(" ")}`,
+      );
+    }
+
+    // Proponer un servidor que ya está configurado no necesita aprobación:
+    // necesita pedir las herramientas que ese servidor ya aporta.
+    const configurados = new Set(ctx.workspace.mcpServers.map((server) => server.name));
+    const repetidos = importado.servidores.filter((server) => configurados.has(server.name));
+    if (repetidos.length > 0) {
+      return fail(
+        `La empresa ya tiene configurado: ${repetidos.map((s) => `"${s.name}"`).join(", ")}. ` +
+          `Si lo que te falta son sus herramientas, pedilas con request_tool_access.`,
+      );
+    }
+
+    const request = await ctx.workspace.createRequest({
+      type: "mcp_server",
+      reason: parsed.values.reason!,
+      roleProposal: null,
+      question: null,
+      toolNames: [],
+      mcpProposal: importado.servidores,
+    });
+
+    const nombres = importado.servidores.map((server) => server.name).join(", ");
+    return ok(
+      `Pedido de conexión enviado a la persona a cargo (${request.id}): ${nombres}. ` +
+        `Si se aprueba, las herramientas que aporte te van a llegar asignadas y te ` +
+        `avisan por tu bandeja. Mientras tanto, avanzá con lo que no dependa de eso.` +
+        (importado.avisos.length > 0
+          ? `\n\nAvisos de la configuración (la persona los ve al decidir):\n- ${importado.avisos.join("\n- ")}`
+          : ""),
+      `🔌 propone MCP: ${preview(nombres, 60)}`,
+    );
+  },
+};
+
 /** Todas las herramientas de coordinación. Todo rol las recibe siempre. */
 export const coordinationTools: RegisteredTool[] = [
   // `calcular` no coordina a nadie, pero va acá porque las de coordinación se
@@ -1422,4 +1502,5 @@ export const coordinationTools: RegisteredTool[] = [
   convocarEspecialista,
   requestContext,
   requestToolAccess,
+  solicitarServidorMcp,
 ];

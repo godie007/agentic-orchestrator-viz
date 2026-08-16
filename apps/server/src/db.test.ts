@@ -49,6 +49,7 @@ const solicitud = (roleId: string | null, company = companyId): AgentRequest => 
   roleProposal: null,
   question: "¿Cuánto se factura por tenant?",
   toolNames: [],
+  mcpProposal: [],
   status: "pending",
   resolution: null,
   createdAt: Date.now(),

@@ -1046,6 +1046,12 @@ function AsignacionDeHerramientas({
       detalle: "Accesos generales, como buscar en la web.",
       tools: de("capability"),
     },
+    {
+      clave: "creada",
+      titulo: "Creadas por agentes",
+      detalle: "Compuestas con crear_herramienta: encadenan pasos de otras existentes.",
+      tools: de("creada"),
+    },
     // Un grupo por servidor: mezclar dos MCP en una sola lista hace que el
     // nombre de la herramienta sea lo único que distingue de dónde sale.
     ...mcpServers.map((server) => ({

@@ -245,6 +245,7 @@ export const toolOriginSchema = z.enum([
   "capability", // built-in: web_search, fetch_url
   "skill", // built-in: produce un archivo real (Word, PDF)
   "mcp", // descubierta de un servidor MCP
+  "creada", // compuesta por un agente a partir de herramientas existentes
 ]);
 export type ToolOrigin = z.infer<typeof toolOriginSchema>;
 
@@ -262,8 +263,31 @@ export const toolSchema = z.object({
   requiresApproval: z.boolean().default(false),
   /** Sin efectos secundarios: el motor puede ejecutarlas en paralelo. */
   readOnly: z.boolean().default(false),
+  /**
+   * Definición de una herramienta compuesta (`origin === "creada"`): una
+   * secuencia de herramientas existentes con argumentos fijos y huecos
+   * `{{parametro}}` que se completan al invocarla. Es declarativa a propósito:
+   * una herramienta creada por un agente no puede hacer nada que sus
+   * componentes no pudieran, y por eso no necesita aprobación ni sandbox.
+   */
+  composicion: z
+    .object({
+      pasos: z
+        .array(
+          z.object({
+            tool: z.string().min(1).max(128),
+            args: z.record(z.unknown()).default({}),
+          }),
+        )
+        .min(1)
+        .max(6),
+      creadaPorRoleId: idSchema.nullable().default(null),
+    })
+    .nullable()
+    .default(null),
 });
 export type Tool = z.infer<typeof toolSchema>;
+export type ComposicionDeTool = NonNullable<Tool["composicion"]>;
 
 export const mcpTransportSchema = z.discriminatedUnion("type", [
   z.object({
@@ -500,6 +524,7 @@ export const agentRequestTypeSchema = z.enum([
   "create_role", // "necesito a alguien que se ocupe de X"
   "context", // "necesito saber Y del negocio"
   "tool_access", // "necesito la herramienta Z"
+  "mcp_server", // "necesito conectar un servidor MCP que la empresa no tiene"
 ]);
 export type AgentRequestType = z.infer<typeof agentRequestTypeSchema>;
 
@@ -519,6 +544,22 @@ export const roleProposalSchema = z.object({
 });
 export type RoleProposal = z.infer<typeof roleProposalSchema>;
 
+/**
+ * Servidor MCP propuesto por un agente, ya saneado por `parsearConfigMcp`: los
+ * secretos literales quedaron afuera antes de llegar acá, así que aprobar esta
+ * propuesta nunca puede escribir una credencial en la base.
+ */
+export const servidorMcpPropuestoSchema = z.object({
+  name: z
+    .string()
+    .min(1)
+    .max(64)
+    .regex(/^[a-z0-9_-]+$/, "solo minúsculas, números, guiones y guiones bajos"),
+  description: z.string().max(1000).default(""),
+  transport: mcpTransportSchema,
+});
+export type ServidorMcpPropuesto = z.infer<typeof servidorMcpPropuestoSchema>;
+
 export const agentRequestSchema = z.object({
   id: idSchema,
   companyId: idSchema,
@@ -531,6 +572,8 @@ export const agentRequestSchema = z.object({
   roleProposal: roleProposalSchema.nullable().default(null),
   question: z.string().max(4000).nullable().default(null),
   toolNames: z.array(z.string()).default([]),
+  /** Servidores propuestos, si `type === "mcp_server"`. Ya sin secretos. */
+  mcpProposal: z.array(servidorMcpPropuestoSchema).default([]),
   status: agentRequestStatusSchema.default("pending"),
   /** Lo que respondió la persona: texto libre, o el motivo del rechazo. */
   resolution: z.string().max(8000).nullable().default(null),

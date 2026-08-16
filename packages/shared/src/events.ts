@@ -174,7 +174,7 @@ const agentRequestEvent = z.object({
   type: z.literal("request.created"),
   requestId: idSchema,
   requestedByRoleId: idSchema.nullable(),
-  requestType: z.enum(["create_role", "context", "tool_access"]),
+  requestType: z.enum(["create_role", "context", "tool_access", "mcp_server"]),
   reason: z.string(),
   summary: z.string(),
 });

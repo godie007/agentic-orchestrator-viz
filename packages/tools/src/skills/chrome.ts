@@ -35,6 +35,38 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+/**
+ * Mata a Chrome **con todos sus hijos** y limpia el perfil temporal.
+ *
+ * `--headless=new` es un árbol de procesos: el SIGTERM al lanzador solo dejaba
+ * a los ayudantes vivos cuando un turno se abortaba a mitad de captura —
+ * medimos seis huérfanos tras una tarde de corridas, comiéndose la memoria que
+ * después faltaba para cargar las páginas—. Por eso el spawn va `detached`
+ * (grupo de procesos propio) y acá se firma la partida del grupo entero, con
+ * SIGKILL de respaldo por si alguno ignora el aviso.
+ */
+function crearLimpieza(proceso: ChildProcess, perfil: string): () => Promise<void> {
+  return async () => {
+    const pid = proceso.pid;
+    if (pid) {
+      try {
+        process.kill(-pid, "SIGTERM");
+      } catch {
+        proceso.kill("SIGTERM");
+      }
+      const remate = setTimeout(() => {
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch {
+          // Ya no queda nadie del grupo: era lo que se buscaba.
+        }
+      }, 2000);
+      remate.unref();
+    }
+    await rm(perfil, { recursive: true, force: true });
+  };
+}
+
 /** Dónde suele estar Chrome, en orden de preferencia. */
 const CANDIDATOS = [
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -280,13 +312,10 @@ export async function abrirRevelado(opciones: OpcionesRevelado = {}): Promise<Re
       `--window-size=${LIENZO.ancho},${LIENZO.alto}`,
       "about:blank",
     ],
-    { stdio: ["ignore", "pipe", "pipe"] },
+    { stdio: ["ignore", "pipe", "pipe"], detached: true },
   );
 
-  const limpiar = async (): Promise<void> => {
-    proceso.kill("SIGTERM");
-    await rm(perfil, { recursive: true, force: true });
-  };
+  const limpiar = crearLimpieza(proceso, perfil);
 
   let puerto: number;
   try {
@@ -402,6 +431,408 @@ export async function abrirRevelado(opciones: OpcionesRevelado = {}): Promise<Re
       }
 
       return { cuadros: rutas, animacion, avisos };
+    },
+
+    async cerrar() {
+      cdp.cerrar();
+      await limpiar();
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Grabación en vivo: una aplicación real → cuadros JPEG con su tiempo.
+// ---------------------------------------------------------------------------
+
+/**
+ * Una acción de la grabación. Es una mini-DSL en castellano, deliberadamente
+ * chica: navegar, esperar contenido real, hacer clic, escribir y pausar. Lo
+ * que no entra acá no se graba — una grabación no es una suite de pruebas.
+ */
+export interface AccionDeGrabacion {
+  /** Navegar a una URL absoluta. */
+  ir?: string;
+  /**
+   * Esperar un texto visible **y estable**: aparece, se aguanta un segundo y
+   * sigue estando. Es la regla anti-loader: un esqueleto que se re-dibuja no
+   * sobrevive a la pausa, y la grabación no arranca sobre un spinner.
+   */
+  esperar_texto?: string;
+  /** Clic sobre la última coincidencia visible de un texto. */
+  clic?: string;
+  /** Clic sobre un selector CSS (primera coincidencia). */
+  clic_selector?: string;
+  /** Escribir en un campo, localizado por selector CSS. */
+  escribir?: { selector: string; texto: string };
+  /**
+   * Subir un archivo a un `input[type=file]` (funciona aunque esté oculto).
+   * `archivo` es una ruta absoluta; la habilidad la resuelve desde `salida://`.
+   */
+  subir_archivo?: { archivo: string; selector?: string };
+  /** Una tecla suelta: "Enter" o "Tab". */
+  tecla?: string;
+  /** Pausa, en milisegundos. */
+  esperar?: number;
+}
+
+export interface PlanDeClip {
+  /**
+   * Lo que pasa **fuera de cámara**: login, navegación previa, esperas. La
+   * grabación arranca recién cuando esto terminó, así el clip nunca muestra
+   * el formulario de acceso ni la carga inicial.
+   */
+  preparacion: AccionDeGrabacion[];
+  /** Lo que sí se filma. */
+  acciones: AccionDeGrabacion[];
+  /** Cuánto sostener la pantalla final, en segundos. */
+  colchon: number;
+}
+
+/** Un cuadro capturado y cuánto dura en pantalla. */
+export interface CuadroDeClip {
+  ruta: string;
+  duracion: number;
+}
+
+export interface Grabacion {
+  /** Ejecuta un plan y deja los cuadros JPEG en `destino`. */
+  grabar(plan: PlanDeClip, destino: string, prefijo: string): Promise<{
+    cuadros: CuadroDeClip[];
+    segundos: number;
+    avisos: string[];
+  }>;
+  cerrar(): Promise<void>;
+}
+
+const pausa = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/** Serializa un texto para meterlo dentro de una expresión evaluada. */
+const comillas = (texto: string): string => JSON.stringify(texto);
+
+/**
+ * Centro visible de la última coincidencia de un texto, o de un selector.
+ * Corre en la página; devuelve `null` si no hay nada clickeable.
+ */
+function expresionDeBusqueda(objetivo: { texto?: string; selector?: string }): string {
+  if (objetivo.selector) {
+    return `(() => {
+      const el = document.querySelector(${comillas(objetivo.selector)});
+      if (!el) return null;
+      el.scrollIntoView({ block: "center" });
+      const r = el.getBoundingClientRect();
+      return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+    })()`;
+  }
+  return `(() => {
+    const aguja = ${comillas(objetivo.texto ?? "")};
+    const todos = [...document.querySelectorAll("button, a, [role=button], label, td, th, li, span, div, h1, h2, h3, p")];
+    const visibles = todos.filter((el) =>
+      el.offsetParent !== null &&
+      el.innerText && el.innerText.trim().includes(aguja) &&
+      el.getBoundingClientRect().height < 220);
+    const el = visibles.at(-1);
+    if (!el) return null;
+    el.scrollIntoView({ block: "center" });
+    const r = el.getBoundingClientRect();
+    return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+  })()`;
+}
+
+/**
+ * Abre un Chrome para grabar una aplicación en vivo.
+ *
+ * Es el mismo navegador del revelado con otra cámara: en vez de calcular el
+ * cuadro con las animaciones pausadas —imposible sobre una aplicación real,
+ * cuyo estado avanza con la red— se filma lo que pasa con `Page.startScreencast`,
+ * que entrega cada repintado con su instante. La sesión (login) vive en el
+ * perfil temporal, así que **un mismo navegador graba varios clips seguidos
+ * sin volver a iniciar sesión**: la preparación de un clip empieza donde quedó
+ * el anterior.
+ */
+export async function abrirGrabacion(
+  opciones: { chrome?: string; signal?: AbortSignal } = {},
+): Promise<Grabacion> {
+  const binario = buscarChrome(opciones.chrome);
+  if (!binario) {
+    throw new Error(
+      "No se encontró Google Chrome en esta máquina. La grabación de clips maneja el " +
+        "navegador ya instalado; instalá Chrome o poné su ruta en ORQ_CHROME.",
+    );
+  }
+
+  const perfil = await mkdtemp(join(tmpdir(), "orq-grabacion-"));
+  const proceso = spawn(
+    binario,
+    [
+      "--headless=new",
+      "--remote-debugging-port=0",
+      `--user-data-dir=${perfil}`,
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--disable-extensions",
+      "--disable-gpu",
+      "--hide-scrollbars",
+      "--force-color-profile=srgb",
+      `--window-size=${LIENZO.ancho},${LIENZO.alto}`,
+      "about:blank",
+    ],
+    { stdio: ["ignore", "pipe", "pipe"], detached: true },
+  );
+
+  const limpiar = crearLimpieza(proceso, perfil);
+
+  let cdp: Cdp;
+  try {
+    const puerto = await esperarPuerto(proceso);
+    cdp = await Cdp.conectar(await buscarPestaña(puerto));
+    await cdp.enviar("Page.enable");
+    await cdp.enviar("Runtime.enable");
+    await cdp.enviar("Emulation.setDeviceMetricsOverride", {
+      width: LIENZO.ancho,
+      height: LIENZO.alto,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
+  } catch (error) {
+    await limpiar();
+    throw error;
+  }
+
+  async function ejecutar(accion: AccionDeGrabacion): Promise<void> {
+    opciones.signal?.throwIfAborted();
+
+    if (accion.ir) {
+      const cargada = new Promise<void>((resolve) => {
+        cdp.al("Page.loadEventFired", () => resolve());
+        setTimeout(resolve, CORTE.carga);
+      });
+      await cdp.enviar("Page.navigate", { url: accion.ir });
+      await cargada;
+      await pausa(900);
+      return;
+    }
+
+    if (accion.esperar_texto) {
+      const busca = `document.body ? document.body.innerText.includes(${comillas(accion.esperar_texto)}) : false`;
+      const limite = Date.now() + 30_000;
+      for (;;) {
+        const visto = (await cdp.enviar("Runtime.evaluate", {
+          expression: busca,
+          returnByValue: true,
+        })) as { result?: { value?: boolean } };
+        if (visto.result?.value) {
+          // Estabilidad: un esqueleto que refetchea vuelve a borrar el texto.
+          await pausa(1200);
+          const sigue = (await cdp.enviar("Runtime.evaluate", {
+            expression: busca,
+            returnByValue: true,
+          })) as { result?: { value?: boolean } };
+          if (sigue.result?.value) return;
+        }
+        if (Date.now() > limite) {
+          throw new Error(`No apareció el texto "${accion.esperar_texto}" tras 30 segundos.`);
+        }
+        await pausa(400);
+      }
+    }
+
+    if (accion.clic || accion.clic_selector) {
+      // Espera implícita: la mitad de los fallos medidos fueron "tocar antes de
+      // que exista" — la pantalla venía en camino y el clic instantáneo pagaba
+      // el intento entero. Se reintenta hasta que el objetivo aparece, con el
+      // mismo espíritu que el pickVisible del pipeline que precedió a éste.
+      const expresion = expresionDeBusqueda(
+        accion.clic ? { texto: accion.clic } : { selector: accion.clic_selector! },
+      );
+      let punto: { x: number; y: number } | null = null;
+      const limite = Date.now() + 8_000;
+      for (;;) {
+        const centro = (await cdp.enviar("Runtime.evaluate", {
+          expression: expresion,
+          returnByValue: true,
+        })) as { result?: { value?: { x: number; y: number } | null } };
+        punto = centro.result?.value ?? null;
+        if (punto || Date.now() > limite) break;
+        await pausa(400);
+      }
+      if (!punto) {
+        throw new Error(
+          `No hay nada visible para el clic "${accion.clic ?? accion.clic_selector}" tras 8 segundos.`,
+        );
+      }
+      await pausa(350);
+      for (const type of ["mouseMoved", "mousePressed", "mouseReleased"] as const) {
+        await cdp.enviar("Input.dispatchMouseEvent", {
+          type,
+          x: punto.x,
+          y: punto.y,
+          button: type === "mouseMoved" ? "none" : "left",
+          clickCount: type === "mouseMoved" ? 0 : 1,
+        });
+      }
+      await pausa(700);
+      return;
+    }
+
+    if (accion.escribir) {
+      const enfocar = `(() => {
+        const el = document.querySelector(${comillas(accion.escribir.selector)});
+        if (!el) return false;
+        el.scrollIntoView({ block: "center" });
+        el.focus();
+        return true;
+      })()`;
+      let enfocado = false;
+      const limite = Date.now() + 8_000;
+      for (;;) {
+        const foco = (await cdp.enviar("Runtime.evaluate", {
+          expression: enfocar,
+          returnByValue: true,
+        })) as { result?: { value?: boolean } };
+        enfocado = foco.result?.value ?? false;
+        if (enfocado || Date.now() > limite) break;
+        await pausa(400);
+      }
+      if (!enfocado) {
+        throw new Error(`No existe el campo "${accion.escribir.selector}" tras 8 segundos.`);
+      }
+      await pausa(250);
+      // `insertText` dispara los eventos de entrada como un pegado: React y
+      // compañía lo toman como tipeo real.
+      await cdp.enviar("Input.insertText", { text: accion.escribir.texto });
+      await pausa(400);
+      return;
+    }
+
+    if (accion.subir_archivo) {
+      // `DOM.setFileInputFiles` funciona aunque el input esté oculto, que es lo
+      // habitual: el botón visible dispara un input escondido.
+      const selector = accion.subir_archivo.selector ?? "input[type=file]";
+      await cdp.enviar("DOM.enable").catch(() => undefined);
+      const doc = (await cdp.enviar("DOM.getDocument", { depth: 1 })) as {
+        root?: { nodeId?: number };
+      };
+      let nodeId = 0;
+      const limite = Date.now() + 8_000;
+      for (;;) {
+        const nodo = (await cdp
+          .enviar("DOM.querySelector", {
+            nodeId: doc.root?.nodeId ?? 0,
+            selector,
+          })
+          .catch(() => ({}))) as { nodeId?: number };
+        nodeId = nodo.nodeId ?? 0;
+        if (nodeId > 0 || Date.now() > limite) break;
+        await pausa(400);
+      }
+      if (nodeId === 0) {
+        throw new Error(`No hay ningún "${selector}" para subir el archivo tras 8 segundos.`);
+      }
+      await cdp.enviar("DOM.setFileInputFiles", {
+        files: [accion.subir_archivo.archivo],
+        nodeId,
+      });
+      await pausa(1500);
+      return;
+    }
+
+    if (accion.tecla) {
+      const codigo = accion.tecla === "Tab" ? 9 : 13;
+      const key = accion.tecla === "Tab" ? "Tab" : "Enter";
+      await cdp.enviar("Input.dispatchKeyEvent", {
+        type: "rawKeyDown",
+        windowsVirtualKeyCode: codigo,
+        key,
+      });
+      await cdp.enviar("Input.dispatchKeyEvent", {
+        type: "keyUp",
+        windowsVirtualKeyCode: codigo,
+        key,
+      });
+      await pausa(500);
+      return;
+    }
+
+    if (accion.esperar) await pausa(Math.min(accion.esperar, 20_000));
+  }
+
+  return {
+    async grabar(plan, destino, prefijo) {
+      const avisos: string[] = [];
+
+      for (const [i, accion] of plan.preparacion.entries()) {
+        try {
+          await ejecutar(accion);
+        } catch (error) {
+          const detalle = error instanceof Error ? error.message : String(error);
+          throw new Error(`En la preparación (paso ${i + 1}): ${detalle}`);
+        }
+      }
+
+      // La cámara: cada repintado llega como JPEG con su instante. Se confirma
+      // cada cuadro (`screencastFrameAck`) o Chrome deja de mandar.
+      const cuadros: Array<{ datos: Buffer; instante: number }> = [];
+      cdp.al("Page.screencastFrame", (params) => {
+        const cuadro = params as {
+          data?: string;
+          sessionId?: number;
+          metadata?: { timestamp?: number };
+        };
+        if (cuadro.data && cuadro.metadata?.timestamp) {
+          cuadros.push({
+            datos: Buffer.from(cuadro.data, "base64"),
+            instante: cuadro.metadata.timestamp,
+          });
+        }
+        void cdp
+          .enviar("Page.screencastFrameAck", { sessionId: cuadro.sessionId ?? 0 })
+          .catch(() => undefined);
+      });
+
+      const arranque = Date.now();
+      await cdp.enviar("Page.startScreencast", {
+        format: "jpeg",
+        quality: 85,
+        maxWidth: LIENZO.ancho,
+        maxHeight: LIENZO.alto,
+        everyNthFrame: 1,
+      });
+
+      try {
+        for (const [i, accion] of plan.acciones.entries()) {
+          try {
+            await ejecutar(accion);
+          } catch (error) {
+            const detalle = error instanceof Error ? error.message : String(error);
+            throw new Error(`En cámara (paso ${i + 1}): ${detalle}`);
+          }
+        }
+        await pausa(Math.max(0, plan.colchon * 1000));
+      } finally {
+        await cdp.enviar("Page.stopScreencast").catch(() => undefined);
+      }
+
+      const segundos = (Date.now() - arranque) / 1000;
+      if (cuadros.length === 0) {
+        throw new Error(
+          "La grabación no capturó ningún cuadro: la página no repintó nada. " +
+            "Meté una acción visible (un clic, un scroll) o navegá dentro de la escena.",
+        );
+      }
+
+      // Cada cuadro dura hasta el siguiente; el último sostiene el colchón.
+      const salida: CuadroDeClip[] = [];
+      for (const [i, cuadro] of cuadros.entries()) {
+        const proximo = cuadros[i + 1];
+        const duracion = proximo
+          ? Math.max(0.02, proximo.instante - cuadro.instante)
+          : Math.max(0.2, segundos - (cuadro.instante - cuadros[0]!.instante));
+        const ruta = join(destino, `${prefijo}-${String(i).padStart(4, "0")}.jpg`);
+        await writeFile(ruta, cuadro.datos);
+        salida.push({ ruta, duracion });
+      }
+
+      return { cuadros: salida, segundos, avisos };
     },
 
     async cerrar() {

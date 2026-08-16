@@ -71,6 +71,9 @@ export class ToolRegistry {
       mcpServerId: tool.mcpServerId ?? null,
       requiresApproval: tool.requiresApproval,
       readOnly: tool.readOnly,
+      // La composición vive en la fila persistida, no en el registro vivo: las
+      // compuestas se re-guardan desde donde se crean, nunca desde acá.
+      composicion: null,
     }));
   }
 }

@@ -20,13 +20,22 @@ const ETIQUETA: Record<AgentRequest["type"], string> = {
   create_role: "incorporar un rol",
   context: "consulta de negocio",
   tool_access: "acceso a herramientas",
+  mcp_server: "conectar un servidor MCP",
 };
 
 const ICONO: Record<AgentRequest["type"], string> = {
   create_role: "👤",
   context: "❓",
   tool_access: "🔑",
+  mcp_server: "🔌",
 };
+
+/** Cómo se conecta, en una línea legible: el comando o la URL. */
+function resumenTransporte(transport: AgentRequest["mcpProposal"][number]["transport"]): string {
+  return transport.type === "stdio"
+    ? [transport.command, ...transport.args].join(" ")
+    : transport.url;
+}
 
 export function Requests({ company }: { company: CompanyBundle }) {
   const companyId = company.company.id;
@@ -80,7 +89,8 @@ export function Requests({ company }: { company: CompanyBundle }) {
         {pendientes.length === 0 ? (
           <Empty>
             No hay solicitudes pendientes. Los agentes pueden pedirte incorporar un rol,
-            un dato del negocio o acceso a una herramienta mientras trabajan.
+            un dato del negocio, acceso a una herramienta o conectar un servidor MCP
+            mientras trabajan.
           </Empty>
         ) : (
           <ul className="divide-y divide-line/60">
@@ -122,7 +132,11 @@ export function Requests({ company }: { company: CompanyBundle }) {
                   />
                 </div>
                 <p className="mt-0.5 text-[11px] text-ink-faint">
-                  {item.roleProposal?.name ?? item.question ?? item.toolNames.join(", ")}
+                  {item.roleProposal?.name ??
+                    item.question ??
+                    (item.mcpProposal.length > 0
+                      ? item.mcpProposal.map((server) => server.name).join(", ")
+                      : item.toolNames.join(", "))}
                 </p>
                 <p className="text-[10px] text-ink-faint">
                   {nombreDe(item.requestedByRoleId)} ·{" "}
@@ -257,6 +271,30 @@ function RequestCard({
         </div>
       )}
 
+      {request.type === "mcp_server" && (
+        <div className="space-y-2 rounded border border-line bg-canvas p-2">
+          <div className="text-[10px] font-semibold tracking-wide text-ink-dim uppercase">
+            Servidores propuestos
+          </div>
+          {request.mcpProposal.map((server) => (
+            <div key={server.name} className="text-[11px]">
+              <span className="font-mono text-xs text-ink">{server.name}</span>
+              {server.description && (
+                <span className="ml-2 text-ink-dim">{server.description}</span>
+              )}
+              <p className="mt-0.5 font-mono text-[10px] text-ink-faint">
+                {resumenTransporte(server.transport)}
+              </p>
+            </div>
+          ))}
+          <p className="text-[10px] text-ink-faint">
+            La propuesta viene saneada: los secretos literales se descartaron al importar. Si el
+            servidor necesita una credencial, cargala en el .env por su nombre de variable. Al
+            aprobar se conecta de verdad y sus herramientas quedan asignadas a quien las pidió.
+          </p>
+        </div>
+      )}
+
       <Field
         label={request.type === "context" ? "Tu respuesta" : "Comentario (opcional)"}
         hint={
@@ -291,7 +329,9 @@ function RequestCard({
             ? "crear el rol"
             : request.type === "tool_access"
               ? "otorgar acceso"
-              : "responder"}
+              : request.type === "mcp_server"
+                ? "conectar el servidor"
+                : "responder"}
         </Button>
         <Button variant="danger" onClick={() => resolver.mutate("reject")} disabled={resolver.isPending}>
           rechazar

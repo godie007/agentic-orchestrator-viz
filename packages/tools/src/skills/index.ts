@@ -3,8 +3,14 @@ import { readFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { fail, ok, type RegisteredTool, type ToolContext, type ToolResult } from "../types.js";
-import { abrirRevelado, buscarChrome } from "./chrome.js";
+import { fail, ok, preview, type RegisteredTool, type ToolContext, type ToolResult } from "../types.js";
+import {
+  abrirRevelado,
+  abrirGrabacion,
+  buscarChrome,
+  type AccionDeGrabacion,
+} from "./chrome.js";
+import { armarClip, CARPETA_CLIPS, renderClips } from "./clips.js";
 import { renderEstudio } from "./estudio.js";
 import { CARPETA_ESCENAS, GUIA_ESTUDIO, PALETA, RUTA_GUIA, RUTA_TEMA, TEMA_CSS } from "./tema.js";
 import { describirFicha, inspeccionarMedio } from "./medios.js";
@@ -31,7 +37,10 @@ export type { OpcionesSlides, ResultadoSlides } from "./slides.js";
 export { renderEstudio, atarLaminas, planificar } from "./estudio.js";
 export type { OpcionesEstudio, ResultadoEstudio, Plano } from "./estudio.js";
 export { laminaDeEscena, TEMA_CSS, GUIA_ESTUDIO, CARPETA_ESCENAS } from "./tema.js";
-export { buscarChrome } from "./chrome.js";
+export { buscarChrome, abrirGrabacion, LIENZO } from "./chrome.js";
+export type { AccionDeGrabacion, PlanDeClip, Grabacion, CuadroDeClip } from "./chrome.js";
+export { renderClips, atarClips, planificarCortes, filtroDeEscena, armarClip, CARPETA_CLIPS } from "./clips.js";
+export type { OpcionesClips, ResultadoClips, Corte } from "./clips.js";
 export { construirSonido } from "./sonido.js";
 export { inspeccionarMedio, describirFicha, leerFicha, cuadrosPorSegundo } from "./medios.js";
 export type { FichaMedio } from "./medios.js";
@@ -1322,6 +1331,367 @@ function crearRevisarLamina(storage: SkillStorage): RegisteredTool {
   };
 }
 
+/** El esquema de una lista de acciones de grabación, para las dos fases. */
+const esquemaDeAcciones = (descripcion: string) => ({
+  type: "array",
+  description: descripcion,
+  items: {
+    type: "object",
+    properties: {
+      ir: { type: "string", description: "Navegar a una URL absoluta" },
+      esperar_texto: {
+        type: "string",
+        description:
+          "Esperar un texto visible y estable de la pantalla (la regla anti-loader: " +
+          "usalo antes de cada captura de contenido)",
+      },
+      clic: { type: "string", description: "Clic sobre un texto visible (última coincidencia)" },
+      clic_selector: { type: "string", description: "Clic sobre un selector CSS" },
+      escribir: {
+        type: "object",
+        properties: {
+          selector: { type: "string" },
+          texto: { type: "string" },
+        },
+        required: ["selector", "texto"],
+        description: "Escribir en un campo localizado por selector CSS",
+      },
+      subir_archivo: {
+        type: "object",
+        properties: {
+          archivo: {
+            type: "string",
+            description: 'Archivo del directorio de salida, como "salida://docs/declaracion.pdf"',
+          },
+          selector: { type: "string", description: "input[type=file] destino (default el primero)" },
+        },
+        required: ["archivo"],
+        description: "Subir un archivo a un input de archivos, aunque esté oculto",
+      },
+      tecla: { type: "string", description: '"Enter" o "Tab"' },
+      esperar: { type: "number", description: "Pausa en milisegundos" },
+    },
+    additionalProperties: false,
+  },
+});
+
+/**
+ * Grabar un clip real del navegador.
+ *
+ * La preparación corre **fuera de cámara** —login, navegación, esperas— y la
+ * grabación arranca recién sobre la pantalla lista: es lo que garantiza que un
+ * clip nunca muestre el formulario de acceso ni un loader de entrada.
+ */
+function crearGrabarClip(storage: SkillStorage): RegisteredTool {
+  return {
+    name: "grabar_clip",
+    origin: "skill",
+    readOnly: false,
+    requiresApproval: false,
+    description:
+      "Graba un clip MP4 real del navegador manejando una aplicación en vivo: navegar, " +
+      "hacer clic, escribir, esperar. Las acciones de 'preparacion' pasan FUERA de " +
+      "cámara (login, llegar a la pantalla, esperar que cargue) y las de 'acciones' " +
+      "se filman. Antes de arrancar a filmar y antes de cada momento importante usá " +
+      "esperar_texto con un texto real de la pantalla: es lo que evita grabar loaders. " +
+      `El clip queda en ${CARPETA_CLIPS}/<archivo>.mp4; nombralo con el número de su ` +
+      "escena (\"01-navegacion\") y después export_video_clips los empalma con la " +
+      "narración del guion. La portada del video se graba como \"00-portada\" filmando " +
+      "el HTML de la empresa con ir: \"salida://<ruta del html>\"; el empalme la antepone " +
+      "solo como apertura.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        archivo: {
+          type: "string",
+          description:
+            'Nombre del clip, sin ruta ni extensión, numerado por escena: "01-navegacion"',
+        },
+        preparacion: esquemaDeAcciones(
+          "Acciones fuera de cámara: login, navegación previa, esperas de carga.",
+        ),
+        acciones: esquemaDeAcciones("Lo que se filma, en orden."),
+        colchon_segundos: {
+          type: "number",
+          description: "Cuánto sostener la pantalla final (default 2.5).",
+        },
+      },
+      required: ["archivo", "acciones"],
+      additionalProperties: false,
+    },
+
+    async execute(args, ctx) {
+      const archivo = String(args.archivo ?? "")
+        .trim()
+        .replace(/\.(mp4|webm|mov)$/i, "");
+      if (!archivo || archivo.includes("/")) {
+        return fail('grabar_clip: "archivo" es un nombre sin ruta, por ejemplo "01-navegacion".');
+      }
+      // `ir: "salida://ruta"` navega a un archivo del directorio de salida —
+      // la portada HTML que la empresa produjo, por ejemplo— sin que el agente
+      // tenga que conocer rutas absolutas de la máquina.
+      const resolverSalida = async (lista: AccionDeGrabacion[]): Promise<string | null> => {
+        for (const accion of lista) {
+          if (accion.ir?.startsWith("salida://")) {
+            const absoluta = await storage.resolve(accion.ir.slice("salida://".length));
+            if (!absoluta) return accion.ir;
+            accion.ir = pathToFileURL(absoluta).href;
+          }
+          // El archivo a subir viaja como ruta del disco, no como URL: es lo
+          // que espera `DOM.setFileInputFiles`.
+          if (accion.subir_archivo?.archivo.startsWith("salida://")) {
+            const absoluta = await storage.resolve(
+              accion.subir_archivo.archivo.slice("salida://".length),
+            );
+            if (!absoluta) return accion.subir_archivo.archivo;
+            accion.subir_archivo.archivo = absoluta;
+          }
+        }
+        return null;
+      };
+      const preparacion = Array.isArray(args.preparacion)
+        ? (args.preparacion as AccionDeGrabacion[])
+        : [];
+      const acciones = Array.isArray(args.acciones) ? (args.acciones as AccionDeGrabacion[]) : [];
+      const rota = (await resolverSalida(preparacion)) ?? (await resolverSalida(acciones));
+      if (rota) {
+        return fail(`grabar_clip: no existe "${rota.slice("salida://".length)}" en el directorio de salida.`);
+      }
+      if (acciones.length === 0) {
+        return fail("grabar_clip: 'acciones' está vacío: no hay nada que filmar.");
+      }
+      const colchon = Number(args.colchon_segundos ?? 2.5);
+
+      const temporal = await mkdtemp(join(tmpdir(), "orq-grabar-"));
+      let grabacion = null as Awaited<ReturnType<typeof abrirGrabacion>> | null;
+      try {
+        grabacion = await abrirGrabacion({ ...(ctx.signal ? { signal: ctx.signal } : {}) });
+        const toma = await grabacion.grabar(
+          { preparacion, acciones, colchon: Number.isFinite(colchon) ? colchon : 2.5 },
+          temporal,
+          "cuadro",
+        );
+        const bytes = await armarClip(toma.cuadros, {
+          ...(ctx.signal ? { signal: ctx.signal } : {}),
+        });
+        const guardado = await storage.save({
+          filename: `${archivo}.mp4`,
+          folder: CARPETA_CLIPS,
+          bytes,
+        });
+        const problemas = toma.avisos.length > 0 ? ` Atención: ${toma.avisos.join(" ")}` : "";
+        return ok(
+          `Clip grabado en ${guardado.path}: ${toma.segundos.toFixed(1)} segundos, ` +
+            `${toma.cuadros.length} cuadros, ${Math.max(1, Math.round(guardado.sizeBytes / 1024))} KB. ` +
+            `Verificalo con inspeccionar_medio si es una escena clave.${problemas}`,
+          guardado.path,
+        );
+      } catch (error) {
+        const detalle = error instanceof Error ? error.message : String(error);
+        return fail(
+          `No se pudo grabar "${archivo}": ${detalle.split("\n")[0]} — revisá la acción que ` +
+            `nombra el error: un texto que no aparece suele ser un label mal copiado o una ` +
+            `pantalla que todavía no cargó (sumá esperar_texto o esperar).`,
+        );
+      } finally {
+        await grabacion?.cerrar().catch(() => undefined);
+        await rm(temporal, { recursive: true, force: true });
+      }
+    },
+  };
+}
+
+/**
+ * Extraer cuadros de un video para poder MIRARLO.
+ *
+ * `inspeccionar_medio` mide —duración, pistas, peso— pero no muestra: un rol de
+ * calidad que sólo puede medir aprueba videos que nunca vio, que es la clase de
+ * error que ya pagamos con la realizadora que informó una duración leída de un
+ * mensaje. Con los cuadros en `revision/`, un rol con herramientas de lectura
+ * de archivos (los roles con proveedor claude-code las tienen) los abre y los
+ * ve de verdad: es "un agente que produce algo visual tiene que poder verlo",
+ * aplicado a quien revisa.
+ */
+function crearExtraerCuadros(storage: SkillStorage): RegisteredTool {
+  return {
+    name: "extraer_cuadros",
+    origin: "skill",
+    readOnly: false,
+    requiresApproval: false,
+    description:
+      "Extrae cuadros PNG de un video del directorio de salida, repartidos a lo largo de " +
+      "su duración, y los deja en revision/. Es la única forma de MIRAR un video o un " +
+      "clip: abrí después cada PNG con tu herramienta de lectura de archivos y verificá " +
+      "que lo que se ve corresponde a lo que el guion dice en ese momento. Medir con " +
+      "inspeccionar_medio no reemplaza mirar.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: 'Ruta del video, por ejemplo "clips/03-formatos-modal.mp4"',
+        },
+        cantidad: {
+          type: "number",
+          description: "Cuántos cuadros extraer, repartidos parejo (default 6, máximo 12).",
+        },
+      },
+      required: ["path"],
+      additionalProperties: false,
+    },
+
+    async execute(args, ctx) {
+      const ruta = String(args.path ?? "").trim();
+      if (!ruta) return fail("extraer_cuadros: falta path.");
+      const absoluta = await storage.resolve(ruta);
+      if (!absoluta) return fail(`No existe "${ruta}" en el directorio de salida.`);
+
+      const ficha = await inspeccionarMedio(absoluta);
+      if (ficha.tipo !== "video" || !ficha.segundos) {
+        return fail(`"${ruta}" no es un video con duración medible: ${describirFicha(ficha)}`);
+      }
+
+      const cantidad = Math.max(1, Math.min(12, Math.round(Number(args.cantidad ?? 6))));
+      const base = (ruta.split("/").pop() ?? "video").replace(/\.[^.]+$/, "");
+      const { execFile } = await import("node:child_process");
+      const { promisify } = await import("node:util");
+      const correr = promisify(execFile);
+
+      const temporal = await mkdtemp(join(tmpdir(), "orq-cuadros-"));
+      try {
+        const rutas: string[] = [];
+        for (let i = 0; i < cantidad; i++) {
+          // Ni el segundo cero ni el último: el primero suele ser negro de
+          // entrada y el último ya es el colchón quieto.
+          const t = (ficha.segundos * (i + 0.5)) / cantidad;
+          const destino = join(temporal, `cuadro-${i}.png`);
+          await correr(
+            "ffmpeg",
+            ["-y", "-v", "error", "-ss", t.toFixed(2), "-i", absoluta, "-frames:v", "1", destino],
+            { ...(ctx.signal ? { signal: ctx.signal } : {}) },
+          );
+          const guardado = await storage.save({
+            filename: `${base}-${String(i + 1).padStart(2, "0")}-t${Math.round(t)}s.png`,
+            folder: "revision",
+            bytes: await readFile(destino),
+          });
+          rutas.push(guardado.path);
+        }
+        return ok(
+          `${cantidad} cuadro(s) de "${ruta}" (${ficha.segundos.toFixed(1)} s) en revision/:\n` +
+            rutas.map((r) => `- ${r}`).join("\n") +
+            `\n\nAhora ABRILOS con tu herramienta de lectura de archivos y compará cada uno ` +
+            `con lo que el guion narra en ese instante. El nombre trae el segundo (tNNs).`,
+          `🎞 ${cantidad} cuadros de ${preview(ruta, 50)}`,
+        );
+      } catch (error) {
+        const detalle = error instanceof Error ? error.message : String(error);
+        return fail(`No se pudieron extraer cuadros de "${ruta}": ${detalle.split("\n")[0]}`);
+      } finally {
+        await rm(temporal, { recursive: true, force: true });
+      }
+    },
+  };
+}
+
+/** Empalmar los clips grabados con la narración del guion. */
+function crearVideoClips(storage: SkillStorage, opciones: OpcionesHabilidades): RegisteredTool {
+  return {
+    name: "export_video_clips",
+    origin: "skill",
+    readOnly: false,
+    requiresApproval: false,
+    description:
+      "Produce un MP4 empalmando clips reales grabados con grabar_clip, a pantalla " +
+      "completa y con la narración del guion encima: la duración de cada escena la manda " +
+      "su narración, y el clip se recorta o sostiene su último cuadro para calzar exacto " +
+      "— la sincronía voz↔pantalla es por construcción. Primero guardá el guion con " +
+      `write_artifact, grabá un clip por escena en ${CARPETA_CLIPS}/ (numerado: ` +
+      '"01-….mp4" es la escena 1) y después pasá la clave del guion acá. La escena sin ' +
+      "clip sale como placa lisa y queda avisada.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        artifact_key: {
+          type: "string",
+          description: "Clave del guion, tal como la usaste en write_artifact",
+        },
+        folder: {
+          type: "string",
+          description: 'Carpeta del directorio de salida donde dejarlo, por ejemplo "dictamenes".',
+        },
+        musica: {
+          type: "string",
+          description:
+            'Clima o nombre de la pista de fondo. Sin esto se elige una neutra; "ninguna" = silencio.',
+        },
+      },
+      required: ["artifact_key"],
+      additionalProperties: false,
+    },
+
+    async execute(args, ctx) {
+      const entregable = await buscarEntregable(args, ctx);
+      if ("error" in entregable) return entregable.error;
+      const { artifact } = entregable;
+
+      const bloqueo = revisarCifras(artifact, ctx);
+      if (bloqueo) return bloqueo;
+
+      const carpeta = String(args.folder ?? "").trim();
+      const clips = (await storage.list())
+        .map((archivo) => archivo.path)
+        .filter((ruta) => ruta.startsWith(`${CARPETA_CLIPS}/`))
+        .sort();
+
+      let resultado;
+      try {
+        resultado = await renderClips(artifact.content, {
+          ...(ctx.signal ? { signal: ctx.signal } : {}),
+          unaSolaVoz: ctx.workspace.company.voz.unaSolaVoz,
+          lexico: ctx.workspace.company.voz.pronunciacion,
+          ...(opciones.musicaHome !== undefined ? { musicaHome: opciones.musicaHome } : {}),
+          ...(args.musica !== undefined ? { musica: String(args.musica) } : {}),
+          clips,
+          resolver: (ruta) => storage.resolve(ruta),
+        });
+      } catch (error) {
+        const detalle = error instanceof Error ? error.message : String(error);
+        return fail(
+          `No se pudo empalmar "${artifact.key}": ${detalle.split("\n")[0]}. Si el guion no ` +
+            `tiene escenas, revisá los "##". Si falla ffmpeg con un clip puntual, regrabalo ` +
+            `con grabar_clip.`,
+        );
+      }
+
+      const guardado = await storage.save({
+        filename: `${artifact.key}.mp4`,
+        ...(carpeta ? { folder: carpeta } : {}),
+        bytes: resultado.bytes,
+      });
+
+      const cobertura =
+        resultado.conClip === resultado.escenas
+          ? ` Las ${resultado.escenas} escenas con clip grabado.`
+          : ` ${resultado.conClip} de ${resultado.escenas} escenas con clip; el resto salió con placa lisa.`;
+      const apertura = resultado.portada
+        ? " Abre con la portada (00)."
+        : " SIN portada: grabá un clip 00-portada (salida://…) si el video la necesita.";
+      const cama = resultado.musica ? ` Música de fondo: ${resultado.musica}.` : "";
+      const problemas =
+        resultado.avisos.length > 0 ? ` Atención: ${resultado.avisos.join(" ")}` : "";
+      return ok(
+        `Video de clips generado en ${guardado.path}: "${artifact.title}", ` +
+          `${resultado.escenas} escenas, ${Math.round(resultado.segundos)} segundos, ` +
+          `${Math.max(1, Math.round(guardado.sizeBytes / 1024 / 1024))} MB.${cobertura}${apertura}${cama} ` +
+          `Verificalo con inspeccionar_medio y MIRALO con extraer_cuadros antes de darlo por bueno.` +
+          problemas,
+        guardado.path,
+      );
+    },
+  };
+}
+
 export function createSkillTools(
   storage: SkillStorage,
   opciones: OpcionesHabilidades = {},
@@ -1342,13 +1712,21 @@ export function createSkillTools(
     ...(Object.keys(FORMATOS) as Formato[]).map((formato) => crearSkill(formato, storage)),
     crearVideo(storage, { ...opciones, generadorImagenes: generador }),
     ...(hayNavegador
-      ? [crearVideoEstudio(storage, { ...opciones, generadorImagenes: generador }), crearRevisarLamina(storage)]
+      ? [
+          crearVideoEstudio(storage, { ...opciones, generadorImagenes: generador }),
+          crearRevisarLamina(storage),
+          // La grabación de clips maneja el mismo Chrome; sin navegador tampoco
+          // hay clips que empalmar, así que el par entero queda afuera.
+          crearGrabarClip(storage),
+          crearVideoClips(storage, { ...opciones, generadorImagenes: generador }),
+        ]
       : []),
     crearSlides(storage, { ...opciones, generadorImagenes: generador }),
     ...(generador ? [crearImagen(storage, generador)] : []),
     crearListado(storage),
     crearLectura(storage),
     crearInspeccion(storage),
+    crearExtraerCuadros(storage),
     crearEscritura(storage),
     crearBorrado(storage),
   ];

@@ -810,3 +810,87 @@ describe("convocar_especialista", () => {
     expect(resultado.content).toContain("coordinación");
   });
 });
+
+/**
+ * El pedido de un servidor MCP nuevo se sanea en la herramienta, no en quien lo
+ * aprueba: lo que llega a la bandeja ya no puede llevar un secreto adentro.
+ */
+describe("solicitar_servidor_mcp", () => {
+  const solicitar = tool("solicitar_servidor_mcp");
+
+  const capturadas: unknown[] = [];
+  const workspaceCon = (overrides: Partial<AgentWorkspace> = {}): AgentWorkspace =>
+    ({
+      roles: [],
+      departments: [],
+      mcpServers: [],
+      createRequest: (input: unknown) => {
+        capturadas.push(input);
+        return { id: "req_1" };
+      },
+      ...overrides,
+    }) as unknown as AgentWorkspace;
+
+  const con = (workspace: AgentWorkspace): ToolContext => ({ ...ctx, workspace }) as ToolContext;
+
+  const config = JSON.stringify({
+    mcpServers: {
+      github: {
+        command: "npx",
+        args: ["-y", "@modelcontextprotocol/server-github"],
+        env: { GITHUB_TOKEN: "GITHUB_TOKEN" },
+      },
+    },
+  });
+
+  it("un JSON inválido rebota con el motivo, sin abrir solicitud", async () => {
+    const antes = capturadas.length;
+    const resultado = await solicitar.execute(
+      { config: "esto no es json", reason: "necesito GitHub" },
+      con(workspaceCon()),
+    );
+    expect(resultado.ok).toBe(false);
+    expect(resultado.content).toContain("JSON");
+    expect(capturadas.length).toBe(antes);
+  });
+
+  it("un secreto literal se descarta y el aviso queda a la vista del agente", async () => {
+    const conToken = JSON.stringify({
+      mcpServers: { github: { command: "npx", env: { GITHUB_TOKEN: "ghp_1234secreto" } } },
+    });
+    const resultado = await solicitar.execute(
+      { config: conToken, reason: "necesito GitHub" },
+      con(workspaceCon()),
+    );
+    expect(resultado.ok).toBe(true);
+    expect(resultado.content).toContain("Avisos");
+    // La propuesta guardada no lleva el valor: la garantía de exportar una
+    // empresa sin credenciales no puede depender de lo que pegue un modelo.
+    expect(JSON.stringify(capturadas.at(-1))).not.toContain("ghp_1234secreto");
+  });
+
+  it("un servidor que la empresa ya tiene no abre solicitud: se piden sus tools", async () => {
+    const resultado = await solicitar.execute(
+      { config, reason: "necesito GitHub" },
+      con(workspaceCon({ mcpServers: [{ name: "github" }] as unknown as AgentWorkspace["mcpServers"] })),
+    );
+    expect(resultado.ok).toBe(false);
+    expect(resultado.content).toContain("request_tool_access");
+  });
+
+  it("abre la solicitud con la propuesta saneada y el nombre del servidor", async () => {
+    const resultado = await solicitar.execute(
+      { config, reason: "necesito abrir issues desde la corrida" },
+      con(workspaceCon()),
+    );
+    expect(resultado.ok).toBe(true);
+    expect(resultado.content).toContain("req_1");
+    const ultima = capturadas.at(-1) as {
+      type: string;
+      mcpProposal: Array<{ name: string; transport: { type: string } }>;
+    };
+    expect(ultima.type).toBe("mcp_server");
+    expect(ultima.mcpProposal[0]!.name).toBe("github");
+    expect(ultima.mcpProposal[0]!.transport.type).toBe("stdio");
+  });
+});

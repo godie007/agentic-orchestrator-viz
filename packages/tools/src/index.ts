@@ -12,3 +12,9 @@ export {
   type Adjunto,
 } from "./correo.js";
 export { McpBridge, type McpStatusListener, type SecretResolver } from "./mcp/bridge.js";
+export {
+  createCrearHerramienta,
+  crearToolCompuesta,
+  extraerParametros,
+  type ResolverTool,
+} from "./compuestas.js";

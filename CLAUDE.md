@@ -182,6 +182,43 @@ detrás. `Runtime.mcpHealth` filtra por lo que sigue configurado, y la UI hace l
 mismo con lo que llega por SSE, que conserva el último estado de algo que ya no
 existe.
 
+**Un agente puede pedir un servidor MCP nuevo; conectarlo lo decide una persona.**
+`solicitar_servidor_mcp` acepta el mismo bloque `{"mcpServers": …}` del Hub y lo
+sanea **en la herramienta**, no en quien aprueba: lo que llega a la bandeja ya no
+puede llevar un secreto adentro, y los avisos de lo descartado los ve el agente
+en el momento (así sabe que la credencial la carga la persona por su lado). Al
+aprobar (`Runtime.applyRequest`) se guarda la configuración, se conecta de
+verdad —el handshake se espera para poder decir qué herramientas aparecieron— y
+las descubiertas se le **otorgan al solicitante**: un servidor aprobado cuyas
+tools no le llegan a nadie deja al agente igual de bloqueado que antes. Como la
+corrida congela su catálogo al arrancar, las tools nuevas se le suman explícito
+con `incorporarHerramienta` + `updateRoleTools`, o el agente no las ve hasta la
+corrida siguiente. Un servidor que la empresa ya tiene no abre solicitud: la
+herramienta redirige a `request_tool_access`, que es lo que de verdad falta.
+
+**Un agente puede crearse herramientas, pero sólo componiendo las que ya puede
+ejecutar.** `crear_herramienta` (`packages/tools/src/compuestas.ts`) arma una
+tool **declarativa**: una secuencia de hasta 6 pasos de herramientas existentes,
+con argumentos fijos y huecos `{{parametro}}` que definen el esquema de entrada
+(cerrado con `additionalProperties: false`, para que el memo de lecturas
+funcione). No hay código del agente corriendo en el servidor, y por eso no
+necesita sandbox ni aprobación: no puede hacer nada que sus componentes no
+pudieran. Los frenos viven en el ejecutor, como siempre: la crea `executive` o
+`manager` —un ejecutor pide lo que le falta—, sólo compone lo que el creador
+tiene asignado (crear no escala permisos), sin compuestas de compuestas (dos que
+se llamen entre sí no terminan nunca) y sin pasos que requieran aprobación (la
+secuencia no puede quedar esperando a una persona por la mitad). La fila se
+persiste con `origin: "creada"` y su `composicion` adentro, sobrevive a la
+corrida como un especialista convocado, y `companyRuntime` la vuelve ejecutable
+al levantar. Dos trampas que ya están fijadas con tests: `persistMcpTools`
+**saltea** las creadas —`describe()` no lleva la composición, y re-guardarlas
+desde ahí las dejaba vacías: una herramienta que existe pero no ejecuta nada—, y
+el router las trata como a las habilidades: siempre expuestas, porque alguien la
+armó a propósito para ese trabajo y perderla en el ranking anula el motivo por
+el que existe. Una secuencia que falla **se corta en el paso que falló** y lo
+nombra: un pipeline que sigue después de un fallo produce basura con cara de
+éxito.
+
 **Un agente que produce algo visual tiene que poder verlo.** El motor le presta
 al proveedor el directorio de salida de la empresa (`TurnDeps.dirDeTrabajo`, que
 inyecta el servidor igual que la fecha) y `claude-code` lo usa como directorio de
@@ -226,6 +263,39 @@ placas de texto, no para esto.
 está en la máquina por CDP, con el `WebSocket` nativo de Node — cero dependencias
 nuevas, la misma regla que ffmpeg y Kokoro. Si no hay navegador, las dos
 habilidades **no se registran**, como cualquier otra que no se puede cumplir.
+
+**Hay un tercer motor de video: clips reales empalmados** (`skills/clips.ts` +
+`abrirGrabacion` en `chrome.ts`). Un tutorial de software se mira mejor viendo
+el software moverse: `grabar_clip` filma el Chrome instalado sobre una app viva
+con `Page.startScreencast` —cada repintado llega con su instante, así el clip
+dura lo que duró la interacción— y `export_video_clips` los empalma **a pantalla
+completa** con la narración encima. Tres decisiones que no son estéticas: la
+**preparación pasa fuera de cámara** (login, navegación, esperas) y la grabación
+arranca sobre la pantalla lista, por eso un clip no puede mostrar el formulario
+de acceso ni un loader de entrada; `esperar_texto` exige el texto visible **y
+estable** (sobrevive 1,2 s), que es la regla anti-loader de siempre; y la
+sincronía voz↔pantalla es **por construcción** — la duración de cada escena la
+manda su narración (`ubicarEscenas`, el mismo reloj de los otros dos motores) y
+el clip se estira clonando su último cuadro o se recorta a esa duración
+(`tpad` **antes** de `trim`: al revés un clip corto deja entrar el corte
+siguiente antes que su voz). Los clips se atan por número como las láminas
+(`01-….mp4` es la escena 1), la escena sin clip sale como placa lisa **con
+aviso**, y el pasaje es un corte, no un encadenado: en un tutorial el corte es
+el lenguaje. Sin navegador, el par entero no se registra.
+
+La **portada es el clip `00-…`** y es el visual de la escena del `#`; los clips
+numerados se atan al **ordinal de las escenas `##`, sin contar la portada** —
+numerarlas juntas fue un bug que corrió un video entero una escena—. La duración
+de la portada la da el reloj compartido (3,8 s de aire si no narra). Se filma
+con `grabar_clip` sobre el HTML que la empresa ya produjo, vía
+`ir: "salida://ruta"` (resuelto y saneado por el servidor). Ojo con el **texto
+suelto entre el `#` y la primera `##`** —"Personajes:", "Tono:"—: es narración
+de portada y la voz lo lee al abrir el video; el motor lo avisa fuerte en el
+resultado, porque lo pagamos con un video que arrancaba leyendo los metadatos. Y **quien revisa tiene que poder mirar**:
+`extraer_cuadros` saca PNG repartidos de cualquier video a `revision/` —el
+nombre trae el segundo— y un rol con proveedor `claude-code` los abre con sus
+herramientas de lectura. Medir con `inspeccionar_medio` no reemplaza mirar: es
+el mismo principio del diseñador de láminas, aplicado al control de calidad.
 
 **El cuadro se calcula, no se graba.** Se pausan todas las animaciones y se les
 fija el tiempo cuadro por cuadro (`Animation.currentTime`): el resultado es
@@ -694,6 +764,12 @@ orquestador vivo escribiendo eventos de algo que ya no existe.
   solicitud fue aprobada": el agente veía "Aprobación concedida" y el dato que
   había pedido quedaba escondido en el cuerpo. Lo medimos volviendo a preguntar
   lo mismo al ciclo siguiente.
+- **Una solicitud pendiente se hereda, y su respuesta tiene que encontrar a la
+  heredera.** Las corridas cargan las solicitudes pendientes de la empresa al
+  arrancar; si la corrida que la creó ya murió, `notifyRequester` busca la
+  corrida viva que la tenga pendiente y espeja ahí (y reanuda esa, no la del
+  `runId` original). Sin ese fallback, una corrida con todo el trabajo aprobado
+  quedaba en `awaiting_approval` para siempre por una solicitud ya resuelta.
 - **La corrida tiene su propia copia de las solicitudes.** Resolver una por la
   API toca la base; hay que reflejarla también en `RunState.resolverSolicitud`, o
   la corrida queda esperando para siempre una respuesta que ya está dada. Y

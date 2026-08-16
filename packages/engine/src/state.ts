@@ -73,6 +73,11 @@ export interface Persistence {
    * desaparecer con la que lo creó.
    */
   saveRole(role: Role, department?: Department): void;
+  /**
+   * Una herramienta compuesta creada durante la corrida. Ámbito empresa, como
+   * los roles convocados: lo que un agente supo armar queda para las próximas.
+   */
+  saveTool(tool: Tool): void;
 }
 
 /** Persistencia nula, para tests y para correr sin guardar nada. */
@@ -84,6 +89,7 @@ export const noPersistence: Persistence = {
   saveLearning: () => {},
   saveRequest: () => {},
   saveRole: () => {},
+  saveTool: () => {},
 };
 
 /**
@@ -161,6 +167,9 @@ export class RunState {
   get tools(): readonly Tool[] {
     return this.config.tools;
   }
+  get mcpServers(): readonly McpServer[] {
+    return this.config.mcpServers;
+  }
 
   getRole(roleId: string): Role | undefined {
     return this.config.roles.find((role) => role.id === roleId);
@@ -195,6 +204,9 @@ export class RunState {
         return state.roles;
       },
       tools: state.tools,
+      get mcpServers() {
+        return state.mcpServers;
+      },
       getRole: (roleId) => state.getRole(roleId),
       directReports: (roleId) => state.directReports(roleId),
       sendMessage: (input) => state.sendMessage(input, actorId),
@@ -216,6 +228,7 @@ export class RunState {
       createRequest: (input) => state.createRequest(input, actorId),
       incorporarRol: (input) => state.incorporarRol(input),
       especialistasConvocados: () => state.especialistasConvocados,
+      incorporarHerramienta: (tool) => state.incorporarHerramienta(tool, actorId),
       listRequests: () => state.requests,
       listActivity: () => state.activity,
     };
@@ -427,11 +440,12 @@ export class RunState {
    */
   async createRequest(
     input: {
-      type: "create_role" | "context" | "tool_access";
+      type: AgentRequest["type"];
       reason: string;
       roleProposal: AgentRequest["roleProposal"];
       question: string | null;
       toolNames: string[];
+      mcpProposal?: AgentRequest["mcpProposal"];
     },
     actorId: string | null = null,
   ): Promise<AgentRequest> {
@@ -440,6 +454,7 @@ export class RunState {
       roleProposal: AgentRequest["roleProposal"];
       question: string | null;
       toolNames: string[];
+      mcpProposal?: AgentRequest["mcpProposal"];
     }): string =>
       normalize(
         [
@@ -447,6 +462,10 @@ export class RunState {
           candidate.roleProposal?.name ?? "",
           candidate.question ?? "",
           [...candidate.toolNames].sort().join(","),
+          (candidate.mcpProposal ?? [])
+            .map((server) => server.name)
+            .sort()
+            .join(","),
         ].join("|"),
       );
 
@@ -465,6 +484,7 @@ export class RunState {
       roleProposal: input.roleProposal,
       question: input.question,
       toolNames: input.toolNames,
+      mcpProposal: input.mcpProposal ?? [],
       status: "pending",
       resolution: null,
       createdAt: Date.now(),
@@ -639,6 +659,29 @@ export class RunState {
 
     for (let i = this.requestList.length - 1; i >= 0; i--) {
       if (this.requestList[i]!.requestedByRoleId === roleId) this.requestList.splice(i, 1);
+    }
+  }
+
+  /**
+   * Incorpora al catálogo una herramienta compuesta creada por un agente y se
+   * la otorga a quien la creó.
+   *
+   * Es `incorporarRol` aplicado a herramientas: entra al catálogo vivo —así el
+   * creador la tiene en su próximo turno sin esperar otra corrida— y se
+   * persiste como herramienta de la empresa. Los frenos (autoridad, sin
+   * recursión, sin pasos que requieran aprobación) viven en `crear_herramienta`,
+   * que es quien decide si esto se llama.
+   */
+  incorporarHerramienta(tool: Tool, actorId: string | null): void {
+    if (!this.config.tools.some((existing) => existing.id === tool.id)) {
+      this.config.tools.push(tool);
+    }
+    this.persistence.saveTool(tool);
+
+    const creador = actorId ? this.config.roles.find((role) => role.id === actorId) : undefined;
+    if (creador && !creador.toolIds.includes(tool.id)) {
+      creador.toolIds = [...creador.toolIds, tool.id];
+      this.persistence.saveRole(creador);
     }
   }
 

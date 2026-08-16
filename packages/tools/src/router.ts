@@ -43,9 +43,13 @@ export interface RouterOptions {
  * lo que ese agente sabe producir. Rankearlas contra decenas de tools de MCP
  * hacía que un desarrollador al que se le pidió exportar un PDF no tuviera
  * `export_pdf` en su lista, y respondiera —con razón— que no la tenía.
+ *
+ * Las **creadas** por la misma razón que las habilidades: alguien las armó a
+ * propósito para un trabajo concreto, y perder justo esa frente a una tool de
+ * MCP cualquiera anularía el motivo por el que se crearon.
  */
 function isAlwaysExposed(tool: RegisteredTool): boolean {
-  return tool.origin === "coordination" || tool.origin === "skill";
+  return tool.origin === "coordination" || tool.origin === "skill" || tool.origin === "creada";
 }
 
 export function selectTools(

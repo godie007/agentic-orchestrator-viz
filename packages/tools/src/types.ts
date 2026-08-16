@@ -3,7 +3,9 @@ import type {
   Artifact,
   ApprovalRequest,
   Learning,
+  McpServer,
   RoleProposal,
+  ServidorMcpPropuesto,
   Company,
   Department,
   Message,
@@ -82,11 +84,13 @@ export interface RecordLessonInput {
 }
 
 export interface AgentRequestInput {
-  type: "create_role" | "context" | "tool_access";
+  type: "create_role" | "context" | "tool_access" | "mcp_server";
   reason: string;
   roleProposal: RoleProposal | null;
   question: string | null;
   toolNames: string[];
+  /** Servidores MCP propuestos, ya saneados (sin secretos literales). */
+  mcpProposal?: ServidorMcpPropuesto[];
 }
 
 export interface RequestApprovalInput {
@@ -121,6 +125,12 @@ export interface AgentWorkspace {
    */
   readonly tools: readonly Tool[];
 
+  /**
+   * Servidores MCP ya configurados. Sirve para que un pedido de conexión nuevo
+   * no proponga uno que la empresa ya tiene, no para hablar con ellos.
+   */
+  readonly mcpServers: readonly McpServer[];
+
   getRole(roleId: string): Role | undefined;
   /** Reportes directos de un rol, para validar a quién puede asignar trabajo. */
   directReports(roleId: string): Role[];
@@ -145,6 +155,14 @@ export interface AgentWorkspace {
 
   /** Cuántos especialistas van convocados en esta corrida, para el tope. */
   especialistasConvocados(): number;
+
+  /**
+   * Incorpora una herramienta creada por un agente al catálogo de la empresa y
+   * se la otorga a quien la creó. Queda persistida, así que sobrevive a la
+   * corrida; quién puede crearla y con qué límites lo decide la herramienta
+   * que la usa (`crear_herramienta`), igual que con `incorporarRol`.
+   */
+  incorporarHerramienta(tool: Tool): void;
 
   sendMessage(input: SendMessageInput): Promise<Message>;
   /**

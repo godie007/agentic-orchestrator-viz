@@ -262,6 +262,13 @@ export async function runAgentTurn(
           byName,
           ctx,
           ...(deps.dirDeTrabajo ? { dirDeTrabajo: deps.dirDeTrabajo } : {}),
+          // El CLI ejecuta por el puente, no por `tool_calls`: sin este aviso el
+          // contador del turno queda en cero, el scheduler lo toma por un rol
+          // que habla sin hacer nada y deja de convocarlo por sus tareas — una
+          // corrida con trabajo a medias "completaba" por bandejas vacías.
+          alEjecutar: () => {
+            herramientas += 1;
+          },
         })
       : null;
 
@@ -676,6 +683,7 @@ const COMUNICACION = new Set([
   "request_context",
   "request_new_role",
   "request_tool_access",
+  "solicitar_servidor_mcp",
 ]);
 
 async function executeCalls(
@@ -776,7 +784,7 @@ async function executeCalls(
  * argumentos se serializan con las claves ordenadas: al modelo le da igual el
  * orden y sin normalizar la misma llamada daría dos huellas distintas.
  */
-function huellaDeFallo(name: string, args: Record<string, unknown>): string {
+export function huellaDeFallo(name: string, args: Record<string, unknown>): string {
   const claves = Object.keys(args).sort();
   return `${name}(${claves.map((clave) => `${clave}=${JSON.stringify(args[clave])}`).join(",")})`;
 }
@@ -832,7 +840,7 @@ function huellaDeLectura(tool: RegisteredTool | undefined, call: ToolCall): stri
  * Medimos cuatro `write_artifact` seguidos fallando por lo mismo. Agrupar por
  * el motivo sí lo detecta.
  */
-function huellaDeMotivo(name: string, detalle: string): string {
+export function huellaDeMotivo(name: string, detalle: string): string {
   const motivo = detalle
     .replace(/"[^"]*"/g, "…")
     .replace(/\d+/g, "#")
@@ -1060,7 +1068,8 @@ function emitCoordinationEffect(
   if (
     tool.name === "request_new_role" ||
     tool.name === "request_context" ||
-    tool.name === "request_tool_access"
+    tool.name === "request_tool_access" ||
+    tool.name === "solicitar_servidor_mcp"
   ) {
     const request = state.requests.at(-1);
     if (!request) return;
@@ -1071,9 +1080,10 @@ function emitCoordinationEffect(
       requestedByRoleId: request.requestedByRoleId,
       requestType: request.type,
       reason: request.reason,
-      summary:
-        request.roleProposal
-          ? `${request.roleProposal.name} — ${request.roleProposal.title}`
+      summary: request.roleProposal
+        ? `${request.roleProposal.name} — ${request.roleProposal.title}`
+        : request.mcpProposal.length > 0
+          ? request.mcpProposal.map((server) => server.name).join(", ")
           : (request.question ?? request.toolNames.join(", ")),
     });
     return;
