@@ -138,13 +138,23 @@ export class ClaudeCodeProvider implements LlmProvider {
   async *chat(req: ChatRequest): AsyncIterable<ChatEvent> {
     const model = aliasOfSlug(req.model);
     const prompt = render(req.messages);
-    const text = await this.delegate(prompt, req.signal, model, req.orgTools);
+    const { texto, uso, costoUsd } = await this.delegate(prompt, req.signal, model, req.orgTools);
 
-    if (text) yield { type: "text_delta", text };
+    if (texto) yield { type: "text_delta", text: texto };
     yield {
       type: "done",
-      message: { role: "assistant", content: text },
-      usage: { inputTokens: 0, outputTokens: 0 },
+      message: { role: "assistant", content: texto },
+      // El consumo sale del CLI, que lo publica en su evento `result`. Antes
+      // iban ceros fijos: una corrida entera informaba cero tokens mientras se
+      // comía la ventana de uso, y no había forma de verlo hasta que el
+      // proveedor cortaba.
+      //
+      // El costo en dólares **no** se reporta a propósito, aunque el CLI lo
+      // calcula (`total_cost_usd`): es lo que habría salido por API, y acá no
+      // se paga por token sino con la suscripción. Informarlo dispararía
+      // `budgetUsd` y cortaría corridas que no cuestan dinero. Lo que sí es un
+      // recurso finito son los tokens, y ésos ahora se ven.
+      usage: uso,
       finishReason: "stop",
       modelSlug: `claude-code/${model}`,
     };
@@ -165,7 +175,7 @@ export class ClaudeCodeProvider implements LlmProvider {
     signal: AbortSignal | undefined,
     model: string,
     orgTools: OrgToolsBridge | undefined,
-  ): Promise<string> {
+  ): Promise<{ texto: string; uso: ResultadoCli["uso"]; costoUsd: number | null }> {
     const session = orgTools ? await orgTools.open() : null;
     const configPath = session ? mcpConfigPath(session) : null;
     const trabajo = session?.cwd ?? newDir(this.workspace);
@@ -182,7 +192,8 @@ export class ClaudeCodeProvider implements LlmProvider {
       ...(configPath ? { configPath } : {}),
     });
 
-    return new Promise<string>((resolve, reject) => {
+    return new Promise<{ texto: string; uso: ResultadoCli["uso"]; costoUsd: number | null }>(
+      (resolve, reject) => {
       const child = spawn(this.command, args, {
         cwd: trabajo,
         stdio: ["ignore", "pipe", "pipe"],
@@ -248,7 +259,11 @@ export class ClaudeCodeProvider implements LlmProvider {
         session?.close().catch(() => {});
         const resultEvt = lastResult(stdout);
         if (resultEvt && !resultEvt.is_error && resultEvt.result !== undefined) {
-          resolve(resultEvt.result);
+          resolve({
+            texto: resultEvt.result,
+            uso: resultEvt.uso,
+            costoUsd: resultEvt.costoUsd,
+          });
           return;
         }
         // El diagnóstico tiene que sobrevivir al fallo. Cuando el CLI muere sin
@@ -303,20 +318,62 @@ export function construirArgs(opciones: {
 export const HERRAMIENTAS_DE_LECTURA = ALLOWED_TOOLS_LECTURA;
 
 /** Último evento `result` de la salida `stream-json`. */
-function lastResult(
-  stdout: string,
-): { is_error: boolean; result?: string; error?: string } | null {
-  let last: { is_error: boolean; result?: string; error?: string } | null = null;
+/** Lo que el CLI informa al terminar: texto, consumo y cuánto salió. */
+export interface ResultadoCli {
+  is_error: boolean;
+  result?: string;
+  error?: string;
+  /** Consumo real del turno. El CLI lo publica; antes se tiraba. */
+  uso: { inputTokens: number; outputTokens: number; cachedInputTokens: number };
+  /** Costo que el propio CLI calculó, en USD. */
+  costoUsd: number | null;
+}
+
+/**
+ * El último evento `result` de la salida `stream-json`.
+ *
+ * De acá sale también **el consumo**, y no es un detalle: el adaptador
+ * devolvía `inputTokens: 0, outputTokens: 0` fijos, así que una corrida entera
+ * por la suscripción informaba cero tokens y cero gasto mientras se comía la
+ * ventana de uso. El CLI publica las cuatro cifras —entrada, salida, y las dos
+ * de caché— y hasta su propio `total_cost_usd`; tirarlas dejaba al operador sin
+ * forma de ver qué estaba consumiendo hasta que el proveedor cortaba.
+ */
+function lastResult(stdout: string): ResultadoCli | null {
+  let last: ResultadoCli | null = null;
   for (const line of stdout.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
     try {
-      const parsed = JSON.parse(trimmed);
+      const parsed = JSON.parse(trimmed) as {
+        type?: string;
+        is_error?: boolean;
+        result?: string;
+        error?: string;
+        total_cost_usd?: number;
+        usage?: {
+          input_tokens?: number;
+          output_tokens?: number;
+          cache_read_input_tokens?: number;
+          cache_creation_input_tokens?: number;
+        };
+      };
       if (parsed?.type === "result") {
+        const u = parsed.usage ?? {};
+        const cacheada = (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
         last = {
           is_error: parsed.is_error ?? false,
-          result: parsed.result,
-          error: parsed.error,
+          ...(parsed.result !== undefined ? { result: parsed.result } : {}),
+          ...(parsed.error !== undefined ? { error: parsed.error } : {}),
+          uso: {
+            // La entrada real incluye lo cacheado: es contexto que se envió,
+            // aunque se pague distinto. Sin sumarlo, un turno de 375k tokens
+            // se informa como si fueran 12.
+            inputTokens: (u.input_tokens ?? 0) + cacheada,
+            outputTokens: u.output_tokens ?? 0,
+            cachedInputTokens: cacheada,
+          },
+          costoUsd: parsed.total_cost_usd ?? null,
         };
       }
     } catch {
