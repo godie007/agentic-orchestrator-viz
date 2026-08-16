@@ -1,5 +1,15 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  FileText,
+  FileType2,
+  Film,
+  Folder,
+  FolderOpen,
+  ImageIcon,
+  Music,
+  File as FileIcon,
+} from "lucide-react";
 import { api, type CompanyBundle, type TreeFile, type TreeFolder } from "../api.js";
 import { Button, Empty, Panel, inputClass, peso } from "../lib/ui.js";
 
@@ -12,25 +22,27 @@ import { Button, Empty, Panel, inputClass, peso } from "../lib/ui.js";
  * documentos no le sirve a nadie.
  */
 
-const ICONO: Record<string, string> = {
-  pdf: "📕",
-  docx: "📘",
-  png: "🖼️",
-  jpg: "🖼️",
-  jpeg: "🖼️",
-  gif: "🖼️",
-  webp: "🖼️",
-  svg: "🖼️",
-  mp4: "🎬",
-  mov: "🎬",
-  webm: "🎬",
-  mp3: "🎵",
-  wav: "🎵",
-  m4a: "🎵",
+const ICONO: Record<string, typeof FileIcon> = {
+  pdf: FileText,
+  docx: FileType2,
+  png: ImageIcon,
+  jpg: ImageIcon,
+  jpeg: ImageIcon,
+  gif: ImageIcon,
+  webp: ImageIcon,
+  svg: ImageIcon,
+  mp4: Film,
+  mov: Film,
+  webm: Film,
+  mp3: Music,
+  wav: Music,
+  m4a: Music,
 };
 
-const iconoDe = (nombre: string): string =>
-  ICONO[nombre.slice(nombre.lastIndexOf(".") + 1).toLowerCase()] ?? "📄";
+function IconoDeArchivo({ nombre }: { nombre: string }) {
+  const Icono = ICONO[nombre.slice(nombre.lastIndexOf(".") + 1).toLowerCase()] ?? FileIcon;
+  return <Icono className="size-3.5 shrink-0 text-ink-faint" aria-hidden />;
+}
 
 export function Output({ company }: { company: CompanyBundle }) {
   const companyId = company.company.id;
@@ -188,7 +200,11 @@ function Nodo({
           className="flex w-full items-center gap-1.5 rounded py-1 text-left hover:bg-surface-2"
         >
           <span className="text-ink-faint">{abierta ? "▾" : "▸"}</span>
-          <span>📁</span>
+          {abierta ? (
+            <FolderOpen className="size-3.5 shrink-0 text-warn" aria-hidden />
+          ) : (
+            <Folder className="size-3.5 shrink-0 text-warn" aria-hidden />
+          )}
           <span className="text-ink">{nodo.name}</span>
           <span className="text-[10px] text-ink-faint">
             {cuenta === 0 ? "vacía" : `${cuenta} archivo${cuenta === 1 ? "" : "s"}`}
@@ -222,7 +238,7 @@ function Nodo({
       }`}
     >
       <span className="w-3" />
-      <span>{iconoDe(nodo.name)}</span>
+      <IconoDeArchivo nombre={nodo.name} />
       {/* El nombre abre la vista previa: mirar antes de bajar es lo que uno
           quiere hacer casi siempre. La descarga queda a un clic, al lado. */}
       <button

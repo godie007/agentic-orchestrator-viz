@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { HelpCircle, KeyRound, Plug, UserPlus } from "lucide-react";
 import type { AgentRequest, RoleProposal } from "@orq/shared";
 import { api, type CompanyBundle } from "../api.js";
 import { Button, Empty, Field, Panel, Status, inputClass, relativeTime } from "../lib/ui.js";
@@ -23,12 +24,17 @@ const ETIQUETA: Record<AgentRequest["type"], string> = {
   mcp_server: "conectar un servidor MCP",
 };
 
-const ICONO: Record<AgentRequest["type"], string> = {
-  create_role: "👤",
-  context: "❓",
-  tool_access: "🔑",
-  mcp_server: "🔌",
+const ICONO: Record<AgentRequest["type"], typeof UserPlus> = {
+  create_role: UserPlus,
+  context: HelpCircle,
+  tool_access: KeyRound,
+  mcp_server: Plug,
 };
+
+function IconoDeSolicitud({ tipo }: { tipo: AgentRequest["type"] }) {
+  const Icono = ICONO[tipo];
+  return <Icono className="inline size-3.5 align-[-2px]" aria-hidden />;
+}
 
 /** Cómo se conecta, en una línea legible: el comando o la URL. */
 function resumenTransporte(transport: AgentRequest["mcpProposal"][number]["transport"]): string {
@@ -121,7 +127,7 @@ export function Requests({ company }: { company: CompanyBundle }) {
               <li key={item.id} className="px-3 py-2 text-xs">
                 <div className="flex items-baseline justify-between gap-2">
                   <span className="text-ink-dim">
-                    {ICONO[item.type]} {ETIQUETA[item.type]}
+                    <IconoDeSolicitud tipo={item.type} /> {ETIQUETA[item.type]}
                   </span>
                   {/* Rechazar es una decisión tuya, no una falla del sistema:
                       pintarla de rojo con la palabra "error" hacía parecer que
@@ -180,7 +186,7 @@ function RequestCard({
       <div>
         <div className="flex items-baseline gap-2">
           <span className="text-xs text-accent">
-            {ICONO[request.type]} {ETIQUETA[request.type]}
+            <IconoDeSolicitud tipo={request.type} /> {ETIQUETA[request.type]}
           </span>
           <span className="text-[11px] text-ink-dim">pedido por {autor}</span>
           <span className="ml-auto text-[10px] text-ink-faint">
