@@ -94,12 +94,37 @@ export const vozSchema = z.object({
 });
 export type Voz = z.infer<typeof vozSchema>;
 
+/**
+ * Cómo se ve la marca cuando la empresa produce algo.
+ *
+ * Vive acá por la misma razón que la voz: es un dato de la marca y no una
+ * decisión de cada pieza. Un rótulo con el azul del kit sobre un video de una
+ * empresa que usa naranja se ve como una plantilla, que es exactamente lo que
+ * una pieza institucional no puede parecer. Los valores por defecto son los del
+ * kit, así que una empresa que no la configura sigue viéndose como antes.
+ */
+export const marcaSchema = z.object({
+  /** Color de realce: barras, subrayados, lo que hay que mirar primero. */
+  acento: z
+    .string()
+    .regex(/^#[0-9a-fA-F]{6}$/, "un color en formato #rrggbb")
+    .default("#40a0f8"),
+  /** Fondo de los paneles y rótulos sobre los que va texto claro. */
+  panel: z
+    .string()
+    .regex(/^#[0-9a-fA-F]{6}$/, "un color en formato #rrggbb")
+    .default("#232f4d"),
+});
+export type Marca = z.infer<typeof marcaSchema>;
+
 export const companySchema = z.object({
   id: idSchema,
   name: z.string().min(1).max(200),
   mission: z.string().max(4000).default(""),
   /** Reparto de voces y pronunciación para los videos que produce. */
   voz: vozSchema.default({ unaSolaVoz: false, pronunciacion: {} }),
+  /** Los colores con los que se rotula lo que produce. */
+  marca: marcaSchema.default({ acento: "#40a0f8", panel: "#232f4d" }),
   /** Contexto de negocio que todos los agentes reciben en su prompt. */
   context: z.string().max(20000).default(""),
   currency: z.string().length(3).default("USD"),

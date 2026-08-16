@@ -67,6 +67,7 @@ const company: Company = {
     unaSolaVoz: true,
     pronunciacion: { IA: "i a", API: "a pe i", LLM: "ele ele eme", GPU: "ge pe u" },
   },
+  marca: { acento: "#40a0f8", panel: "#232f4d" },
   context: `El Observatorio de IA es la unidad de análisis de Codytion. Publica piezas
 cortas que explican una noticia técnica y qué implica para quien construye software.
 

@@ -71,6 +71,7 @@ async function empresaVacia(): Promise<string> {
     name: "De prueba",
     mission: "",
     voz: { unaSolaVoz: false, pronunciacion: {} },
+    marca: { acento: "#40a0f8", panel: "#232f4d" },
     context: "",
     currency: "USD",
     budgetUsd: 1,

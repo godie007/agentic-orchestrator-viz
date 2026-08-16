@@ -82,8 +82,8 @@ const company: Company = {
   name: "INSPIA — Publicidad",
   mission:
     "Mostrar INSPIA funcionando: una pieza comercial de 2 a 3 minutos, filmada sobre la " +
-    "aplicación real, que le explique a un organismo de inspección eléctrica por qué le " +
-    "conviene dejar el papel.",
+    "aplicación real, que le explique a una empresa que inspecciona —de cualquier sector— " +
+    "por qué le conviene dejar el papel.",
   voz: {
     // Institucional: habla la marca, no un elenco. Varias voces en una pieza
     // comercial suenan a reparto de actores.
@@ -100,20 +100,46 @@ const company: Company = {
       kV: "kilovoltios",
     },
   },
-  context: `INSPIA es la plataforma de los organismos de inspección eléctrica en Colombia.
-Reemplaza el papel y el Excel del ciclo completo de una inspección: asignación,
-planificación, inspección en campo, no conformidades, cierre y dictamen oficial.
+  // Los colores de la marca, tomados del design system de la aplicación
+  // (`codlaInspiaColors.ts`): navy institucional y naranja de acción. Los
+  // rótulos del video salen con estos, no con los del kit.
+  marca: { acento: "#f85601", panel: "#082d52" },
+  context: `INSPIA es una PLATAFORMA DE INSPECCIÓN MULTISECTOR, producto de CODLA S.A.S.
+(Medellín, Colombia). Digitaliza el ciclo completo de una inspección: programación,
+ejecución en campo, evidencia e informe.
 
-QUÉ HACE, en concreto (esto es lo que se puede mostrar y decir):
-- Proyectos de inspección con su ciclo de vida y su equipo asignado.
-- Listas de verificación parametrizables por tipo de instalación.
-- No conformidades con evidencia fotográfica, responsable y seguimiento hasta el cierre.
-- Mediciones de campo, con histórico reutilizable entre visitas.
-- Actas dinámicas y dictámenes de los 7 formatos oficiales (5 RETIE + 2 RETILAP),
-  con consecutivo oficial y PDF archivado.
+⚠️ EL ERROR MÁS FÁCIL DE COMETER CON ESTE PRODUCTO:
+INSPIA **no** es "un software de inspecciones eléctricas". El copy aprobado de la marca
+dice textualmente: "No es un software por sector. Es un motor de inspección." Las
+inspecciones eléctricas (RETIE/RETILAP) son el vertical de origen y el mejor caso
+demostrable —es lo que se ve en el ambiente donde filmamos— pero NO son el alcance.
+Mostrar pantallas eléctricas está bien; DECIR que el producto es para inspecciones
+eléctricas está mal. La frase que ordena todo: "Si su proceso se puede describir con
+ítems verificables, se puede montar en Inspia."
+
+LOS CINCO SECTORES EN OPERACIÓN:
+- Industrial y manufactura (control de calidad, conformidad por lote, liberación de producto)
+- Petróleo, gas y energía (activos críticos, rutas de inspección, estándar HSE)
+- Construcción e infraestructura (obra, materiales, soldadura, actas de avance)
+- Comercio exterior (pre-shipment, control de carga, auditoría de proveedores)
+- Seguridad y salud en el trabajo (inspección planeada, acto y condición insegura)
+
+POR QUÉ ES MULTISECTOR DE VERDAD (verificado en el código, no es marketing):
+La normativa es texto libre, no una lista cerrada: RETIE, RETILAP, INVIMA o la que sea.
+El cliente importa sus propias listas de verificación por Excel, define sus actas, sus
+mediciones y su matriz de muestreo sin tocar código. "Nuevo tipo de inspección, nueva
+sede o nuevo cliente: se configura, no se desarrolla."
+
+QUÉ HACE, en concreto (lo que se puede mostrar en pantalla):
+- Listas de verificación configurables por sector, norma y operación.
+- No conformidades con evidencia fotográfica atada al ítem exacto, con fecha, hora y responsable.
+- Mediciones de campo con histórico reutilizable entre visitas.
+- Actas dinámicas y dictámenes oficiales con consecutivo y PDF archivado.
 - Equipos de medición con control de préstamo y vigencia de calibración.
-- EPP y matriz de muestreo.
-- Aplicación móvil para el campo y web para la oficina.
+- Calendario de asignación de inspectores y de revisión de equipos.
+- Funciona SIN CONEXIÓN y sincroniza solo al recuperar señal.
+- Informe generado al cerrar la inspección y enviado en sitio, sin transcribir nada.
+- Multi-inquilino, con marca blanca en los documentos que genera.
 
 QUIÉNES LO USAN (los perfiles que la pieza tiene que mostrar):
 - Administrador: configura la organización, da de alta usuarios y equipos, ve todo.
@@ -121,10 +147,27 @@ QUIÉNES LO USAN (los perfiles que la pieza tiene que mostrar):
 - Inspector: trabaja en campo — listas de verificación, evidencia, mediciones, dictamen.
 (Hay un cuarto perfil, super admin, que cruza organizaciones; no va en la pieza.)
 
-POR QUÉ AHORA (contexto de mercado, agosto 2026):
-La Resolución 40117/2024 y su modificatoria 40304/2025 rigen desde el 1 de enero de
-2026. Los organismos están bajo presión de trazabilidad y de vencimiento de
-certificados de inspector. El papel ya no da abasto.
+EL PROBLEMA QUE RESUELVE (copy aprobado, usarlo):
+"La inspección se hace bien. El registro es el problema." El criterio técnico del equipo
+no está en discusión; lo que falla es el papel, la foto perdida en un celular y el
+informe que se escribe tres días después. El costo real no es el tiempo del inspector:
+es la sanción que llega, el reproceso que se paga y el cliente que pide una evidencia
+que nadie puede entregar.
+
+FRASES APROBADAS DE MARCA (se pueden usar tal cual):
+- "Toda inspección, en un solo lugar."
+- "No es un software por sector. Es un motor de inspección."
+- "Inspia no vende inspecciones más rápidas. Vende una operación que se puede probar,
+  medir y defender."
+- "El informe deja de tomar días. Se genera y se envía antes de que el inspector salga
+  de la instalación."
+- "Traiga sus formatos. Se los mostramos en Inspia."
+- Cierre comercial: agendar una demostración en inspia.codla.co.
+
+IDENTIDAD VISUAL:
+Azul institucional #082d52 (navy) y naranja de acción #f85601. Fondo de marca:
+degradado de #082d52 a #04182d. El nombre se escribe INSPIA, con "INSP" en blanco e
+"IA" en naranja. Tipografía de comunicación: League Spartan (titulares) e Inter (texto).
 
 CÓMO HABLA LA MARCA:
 Castellano de Colombia, de usted y de ustedes. PROHIBIDO el voseo rioplatense: nunca
@@ -133,7 +176,9 @@ Castellano de Colombia, de usted y de ustedes. PROHIBIDO el voseo rioplatense: n
 vacíos ni promesas que no se puedan sostener con lo que se ve en pantalla.
 Nunca se prometen cifras de resultado (ahorros, porcentajes) que no estén verificadas.
 
-DÓNDE VIVE: el sitio es inspia.codla.co. El ambiente donde se filma es ${STAGING}.`,
+DÓNDE VIVE: el sitio es inspia.codla.co. El ambiente donde se filma es ${STAGING}
+(tenant demo Electrovatio S.A.S., que es un organismo de inspección eléctrica: el
+ejemplo visual es eléctrico, el mensaje es multisector).`,
   currency: "USD",
   budgetUsd: 5,
   defaultModel: model("cheap", "standard"),
