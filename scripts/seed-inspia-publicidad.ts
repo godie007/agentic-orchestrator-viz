@@ -176,7 +176,7 @@ FRASES APROBADAS DE MARCA (se pueden usar tal cual):
 - "El informe deja de tomar días. Se genera y se envía antes de que el inspector salga
   de la instalación."
 - "Traiga sus formatos. Se los mostramos en Inspia."
-- Cierre comercial: agendar una demostración en inspia.codla.co.
+- Cierre comercial: agendar una demostración en codla.co/inspia.
 
 IDENTIDAD VISUAL:
 Azul institucional #082d52 (navy) y naranja de acción #f85601. Fondo de marca:
@@ -190,7 +190,9 @@ Castellano de Colombia, de usted y de ustedes. PROHIBIDO el voseo rioplatense: n
 vacíos ni promesas que no se puedan sostener con lo que se ve en pantalla.
 Nunca se prometen cifras de resultado (ahorros, porcentajes) que no estén verificadas.
 
-DÓNDE VIVE: el sitio es inspia.codla.co. El ambiente donde se filma es ${STAGING}
+DÓNDE VIVE: la página del producto —y donde se agenda la demostración— es
+codla.co/inspia. OJO: el subdominio inspia.codla.co también responde, pero NO es
+la dirección que se comunica; en una pieza publicitaria se dice codla.co/inspia. El ambiente donde se filma es ${STAGING}
 (tenant demo Electrovatio S.A.S., que es un organismo de inspección eléctrica: el
 ejemplo visual es eléctrico, el mensaje es multisector).`,
   currency: "USD",
@@ -337,7 +339,7 @@ THING THE VIEWER WILL SEE ON SCREEN. Each scene is filmed as a real clip of the 
 a scene whose narration does not match a screen is a scene that cannot be filmed. Cover
 the three profiles in the order of a real workday: Administrador sets up, Director
 assigns and approves, Inspector works in the field. Close with a call to action naming
-inspia.codla.co.
+codla.co/inspia.
 
 TIMING: the voice-over IS the clock — the video lasts exactly as long as the narration,
 so the word count IS the running time. Do the arithmetic before you write: at roughly 160
@@ -361,7 +363,7 @@ second while showing the first:
 2. TURN — INSPIA as the answer to that pain, not as a feature list.
 3. PROOF — each screen is evidence the promise is real.
 4. SCOPE — in the last third: not a sector product, an inspection engine.
-5. CALL TO ACTION — ask for the meeting, name inspia.codla.co, and make it the last
+5. CALL TO ACTION — ask for the meeting, name codla.co/inspia, and make it the last
    thing the viewer hears.
 
 Write for the person who signs the cheque, not for the inspector: they buy
