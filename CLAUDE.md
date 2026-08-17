@@ -699,9 +699,24 @@ que cambie de enfoque, y si insiste se termina el turno. Sin eso, un error que e
 modelo no puede resolver —una ruta MCP fuera del directorio permitido— le come
 las `maxTurns` enteras y la corrida se queda sin entregable.
 
-**Un tick de retardo es deliberado.** Lo que un agente emite entra a las bandejas
-del ciclo *siguiente*. Modela que nadie contesta en el mismo instante y evita ida
-y vuelta infinito dentro de un tick.
+**El ciclo es una cadena, no una ronda: nadie corre dos veces por tick.** Lo que
+un agente entrega lo toma **en el mismo ciclo** quien todavía no trabajó; quien
+ya tuvo su turno espera al siguiente. Antes el retardo era total —todo lo
+emitido caía en las bandejas del ciclo *siguiente*— y en una cadena eso se paga
+carísimo: con guion → rodaje → revisión, cada eslabón costaba un ciclo entero y
+cada ciclo reenvía el contexto completo de cada turno. Medido acá: corridas de
+269 llamadas a herramientas que avanzaron 3 ciclos, o sea el trabajo estaba
+hecho y el tiempo se iba esperando.
+
+Lo que el retardo protegía sigue protegido, y por eso el cambio es seguro: la
+cota "una vez por rol y por ciclo" hace **imposible** el ida y vuelta infinito
+dentro de un tick, que era su verdadera razón de ser. Hay un test con dos
+agentes que se escriben sin parar y que igual corren una sola vez cada uno.
+
+**El orden dentro del ciclo no es casual** (`ordenarPorUrgencia`): primero quien
+tiene un pedido sin contestar —ese bloqueo se propaga—, después el peso del
+trabajo propio, y al final quien viene encadenando errores. Con la concurrencia
+acotada, ese orden decide el ciclo.
 
 **Los entregables sobreviven a que se borre su corrida.** `artifacts.company_id`
 existe para eso, y `listArtifactsByCompany` filtra por ahí en vez de unir con

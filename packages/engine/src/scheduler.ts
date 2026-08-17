@@ -190,7 +190,7 @@ export class Orchestrator {
       const before = this.state.messages.length;
       const costBefore = this.deps.ledger.spentUsd;
 
-      const { intentados, fallidos } = await this.runTurns(activeRoleIds);
+      const { intentados, fallidos } = await this.correrCadena(activeRoleIds);
 
       // Si ningún turno del ciclo terminó, el problema no es de un agente: el
       // proveedor está rechazando todo (sin crédito, caído, saturado). Sin este
@@ -362,6 +362,48 @@ export class Orchestrator {
   /** Ciclos consecutivos en los que ningún turno pudo completarse. */
   private ticksSinTurnosOk = 0;
   private ultimoErrorDeTurno: string | null = null;
+
+  /**
+   * El ciclo como **cadena de producción**: el trabajo fluye hasta donde llegue.
+   *
+   * El tick de retardo —lo que un agente emite entra a las bandejas del ciclo
+   * siguiente— existe para modelar que nadie contesta en el mismo instante y,
+   * sobre todo, para que dos agentes no se manden mensajes entre sí para
+   * siempre dentro de un tick. Pero aplicado a una **cadena** cuesta carísimo:
+   * con guion → rodaje → revisión, cada eslabón espera un ciclo entero, y cada
+   * ciclo vuelve a mandar el contexto completo de cada turno. Medido acá:
+   * corridas de 269 llamadas a herramientas que avanzaron 3 ciclos, o sea el
+   * trabajo estaba hecho y el tiempo se fue esperando.
+   *
+   * La regla que reemplaza al retardo conserva lo que importaba y tira lo que
+   * costaba: **cada rol corre a lo sumo una vez por ciclo**. Con eso el
+   * ping-pong infinito sigue siendo imposible —hay una cota dura por ciclo— y
+   * el trabajo recién entregado lo toma en el acto quien todavía no trabajó.
+   * Quien ya corrió, sí espera al ciclo siguiente: ahí el retardo sigue vivo.
+   */
+  private async correrCadena(
+    primeros: string[],
+  ): Promise<{ intentados: number; fallidos: number }> {
+    const yaCorrieron = new Set<string>();
+    let intentados = 0;
+    let fallidos = 0;
+    let tanda = primeros;
+
+    while (tanda.length > 0) {
+      for (const roleId of tanda) yaCorrieron.add(roleId);
+      const resultado = await this.runTurns(tanda);
+      intentados += resultado.intentados;
+      fallidos += resultado.fallidos;
+
+      // Quién quedó con trabajo nuevo por lo que acaba de pasar, sin haber
+      // tenido su turno todavía.
+      tanda = this.ordenarPorUrgencia(
+        this.state.rolesWithWork().filter((roleId) => !yaCorrieron.has(roleId)),
+      );
+    }
+
+    return { intentados, fallidos };
+  }
 
   /**
    * En qué orden se atiende a los que tienen trabajo.

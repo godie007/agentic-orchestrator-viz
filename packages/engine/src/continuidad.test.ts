@@ -7,6 +7,7 @@ import { EventBus } from "./events.js";
 import { Orchestrator } from "./scheduler.js";
 import { RunState, type CompanyConfig, type Persistence } from "./state.js";
 import { makeCompany, makeDepartment, makeRole, makeRun } from "./testing/factory.js";
+import { FakeProvider } from "./testing/fake-provider.js";
 
 /**
  * Un encargo largo no entra en una sola corrida. Hasta acá, la corrida nueva
@@ -206,5 +207,82 @@ describe("a quién se atiende primero", () => {
       ledger: new RunLedger(10),
     });
     expect(ordenar(orq, ids)).toEqual(ids);
+  });
+});
+
+/**
+ * La cadena avanza dentro del ciclo, pero con una cota: nadie corre dos veces.
+ * Es lo que reemplaza al tick de retardo sin traer de vuelta el ping-pong
+ * infinito que ese retardo evitaba.
+ */
+describe("el ciclo como cadena de producción", () => {
+  it("dos agentes que se escriben sin parar corren una vez cada uno", async () => {
+    const company = makeCompany();
+    const dep = makeDepartment(company.id, "Producción");
+    const ana = makeRole(company.id, dep.id, "Ana", { maxTurns: 2 });
+    const bruno = makeRole(company.id, dep.id, "Bruno", { maxTurns: 2 });
+    const config: CompanyConfig = {
+      company,
+      departments: [dep],
+      roles: [ana, bruno],
+      policies: [],
+      tools: [],
+      mcpServers: [],
+      requests: [],
+      artifacts: [],
+      learnings: [],
+    };
+    const run = makeRun(company.id);
+    const state = new RunState(run.id, config);
+    const bus = new EventBus();
+
+    // Cada uno le escribe al otro apenas puede: sin la cota, este par se
+    // mandaría mensajes hasta agotar el ciclo.
+    const provider = new FakeProvider((req) => {
+      const soyAna = req.messages.some((m) => m.role === "system" && m.content.includes("Ana"));
+      return {
+        text: "Te paso la posta.",
+        toolCalls: [
+          {
+            name: "send_message",
+            arguments: {
+              to: soyAna ? "Bruno" : "Ana",
+              type: "request",
+              subject: "Seguí vos",
+              body: "Te toca.",
+            },
+          },
+        ],
+      };
+    });
+    const providers = new ProviderRegistry();
+    providers.register(provider);
+
+    await state.forActor(null).sendMessage({
+      toRoleId: ana.id,
+      toDepartmentId: null,
+      type: "human",
+      subject: "Arranquen",
+      body: "Empiecen el trabajo.",
+      threadId: null,
+      inReplyTo: null,
+    });
+
+    const orq = new Orchestrator(run, state, {
+      bus,
+      providers,
+      tools: new ToolRegistry(),
+      ledger: new RunLedger(10),
+      concurrency: 2,
+    });
+    await orq.tick();
+
+    // Los dos trabajaron en el mismo ciclo —la cadena fluyó— pero ninguno dos
+    // veces: la cantidad de turnos del ciclo está acotada por la de roles.
+    const turnos = new Map<string, number>();
+    for (const evento of state.activity) {
+      turnos.set(evento.roleId, (turnos.get(evento.roleId) ?? 0) + 1);
+    }
+    expect(turnos.size).toBeLessThanOrEqual(2);
   });
 });

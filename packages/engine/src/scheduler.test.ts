@@ -53,7 +53,7 @@ function buildScenario() {
 }
 
 describe("Orchestrator", () => {
-  it("delega y cierra el hilo en dos ciclos", async () => {
+  it("la cadena completa avanza en un solo ciclo", async () => {
     const { ceo, analista, run, state, bus, events } = buildScenario();
 
     // El CEO delega en el primer turno; el analista responde cuando le llega.
@@ -111,13 +111,18 @@ describe("Orchestrator", () => {
       inReplyTo: null,
     });
 
-    // Ciclo 1: solo el CEO tiene bandeja; delega en Bruno.
+    // Un solo ciclo: el CEO delega y Bruno —que todavía no había corrido—
+    // atiende el pedido en la misma vuelta. Antes esto tomaba dos ciclos, y
+    // cada eslabón de más era un turno entero con todo el contexto encima.
+    // El límite que reemplaza al retardo es que nadie corre dos veces por
+    // ciclo, así que el ida y vuelta infinito sigue siendo imposible.
     await orchestrator.tick();
-    expect(state.inbox(analista.id)).toHaveLength(1);
-    expect(state.inbox(ceo.id)).toHaveLength(0);
+    // Bruno atendió el pedido en la misma vuelta: su bandeja quedó vacía.
+    expect(state.inbox(analista.id)).toHaveLength(0);
+    // Y su respuesta espera al CEO, que en este ciclo ya corrió. Ahí el
+    // retardo sigue vivo, y es lo que acota la vuelta: una por rol y ciclo.
+    expect(state.inbox(ceo.id)).toHaveLength(1);
 
-    // Ciclo 2: Bruno responde y el hilo del CEO se reabre con la respuesta.
-    await orchestrator.tick();
     const respuesta = state.messages.find((message) => message.type === "response");
     expect(respuesta).toBeDefined();
     expect(respuesta?.fromRoleId).toBe(analista.id);
