@@ -440,7 +440,12 @@ at least measured with inspeccionar_medio.`,
     "list_output",
     "delete_files",
   ),
-  authority: "executor",
+  // `manager` y no `executor` porque el productor tiene que poder dar de baja
+  // su propio material: un executor no borra nada, y la cadena se trababa en
+  // el primer clip que hubiera que reemplazar — pasó, con dos tomas de la
+  // misma escena que no se podían limpiar. Los entregables de la empresa
+  // siguen siendo intocables para él: eso es de un ejecutivo.
+  authority: "manager",
   reportsTo: directora.id,
   maxTurns: 16,
   spendApprovalThresholdUsd: null,
