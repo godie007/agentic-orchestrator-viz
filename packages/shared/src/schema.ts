@@ -114,6 +114,16 @@ export const marcaSchema = z.object({
     .string()
     .regex(/^#[0-9a-fA-F]{6}$/, "un color en formato #rrggbb")
     .default("#232f4d"),
+  /**
+   * Escribir el título de cada escena sobre el video.
+   *
+   * Apagado por defecto, y no es una preferencia estética menor: cuando lo que
+   * se filma es una aplicación, la pantalla ya trae sus propios títulos,
+   * encabezados y menús, y el rótulo compite con ellos en vez de ayudar. Sirve
+   * cuando el visual no se explica solo —una toma de cámara, un diagrama— y ahí
+   * se prende a propósito.
+   */
+  rotulos: z.boolean().default(false),
 });
 export type Marca = z.infer<typeof marcaSchema>;
 

@@ -117,7 +117,7 @@ const company: Company = {
   // Los colores de la marca, tomados del design system de la aplicación
   // (`codlaInspiaColors.ts`): navy institucional y naranja de acción. Los
   // rótulos del video salen con estos, no con los del kit.
-  marca: { acento: "#f85601", panel: "#082d52" },
+  marca: { acento: "#f85601", panel: "#082d52", rotulos: false },
   context: `INSPIA es una PLATAFORMA DE INSPECCIÓN MULTISECTOR, producto de CODLA S.A.S.
 (Medellín, Colombia). Digitaliza el ciclo completo de una inspección: programación,
 ejecución en campo, evidencia e informe.

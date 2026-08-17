@@ -22,7 +22,7 @@ export function makeCompany(overrides: Partial<Company> = {}): Company {
     name: "Empresa de prueba",
     mission: "Probar el motor",
     voz: { unaSolaVoz: false, pronunciacion: {} },
-    marca: { acento: "#40a0f8", panel: "#232f4d" },
+    marca: { acento: "#40a0f8", panel: "#232f4d", rotulos: false },
     context: "",
     currency: "USD",
     budgetUsd: 10,

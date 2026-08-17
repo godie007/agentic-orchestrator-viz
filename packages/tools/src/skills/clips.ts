@@ -291,6 +291,8 @@ export interface OpcionesClips {
   acento?: string;
   /** Fondo del panel del rótulo, en `#rrggbb`. Sin esto usa el panel del tema. */
   panel?: string;
+  /** Escribir el título de cada escena sobre el video. Default: no. */
+  rotulos?: boolean;
   /** Los clips que ya existen en el directorio de salida, con su ruta relativa. */
   clips: readonly string[];
   /** Ruta relativa del directorio de salida → ruta absoluta, o `null`. */
@@ -449,7 +451,7 @@ export async function renderClips(
       // título, y encimarle otro sería escribir dos veces lo mismo.
       const escena = escenas[i]?.escena;
       const rotulo =
-        escena && !escena.esPortada
+        opciones.rotulos === true && escena && !escena.esPortada
           ? {
               titulo: escena.titulo,
               fuente: fuenteDeRotulo(),

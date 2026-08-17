@@ -119,7 +119,7 @@ const company: Company = {
       software: "sóftwer",
     },
   },
-  marca: { acento: "#40a0f8", panel: "#232f4d" },
+  marca: { acento: "#40a0f8", panel: "#232f4d", rotulos: false },
   context: `Codytion construye software a medida, IoT y sistemas de IA para empresas.
 Lo que ofrecemos hoy, tal como está en codytion.com:
 - Aplicaciones web y móviles, integraciones y APIs, cloud y DevOps.

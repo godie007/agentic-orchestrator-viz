@@ -1707,7 +1707,10 @@ function crearVideoClips(storage: SkillStorage, opciones: OpcionesHabilidades): 
           ...(ctx.signal ? { signal: ctx.signal } : {}),
           unaSolaVoz: ctx.workspace.company.voz.unaSolaVoz,
           lexico: ctx.workspace.company.voz.pronunciacion,
-          // Los rótulos salen en los colores de la empresa, no en los del kit.
+          // Los rótulos salen en los colores de la empresa, no en los del kit
+          // — y sólo si la empresa los quiere: sobre una aplicación filmada,
+          // la pantalla ya trae sus propios títulos y el rótulo compite.
+          rotulos: ctx.workspace.company.marca.rotulos,
           acento: ctx.workspace.company.marca.acento,
           panel: ctx.workspace.company.marca.panel,
           ...(opciones.musicaHome !== undefined ? { musicaHome: opciones.musicaHome } : {}),

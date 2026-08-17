@@ -47,7 +47,7 @@ const company: Company = {
     "Diseñamos e implementamos software a medida para empresas medianas de Latinoamérica.",
   // La marca no se lee como se escribe: en los videos se dice "codishon".
   voz: { unaSolaVoz: true, pronunciacion: { Codytion: "códishon" } },
-  marca: { acento: "#40a0f8", panel: "#232f4d" },
+  marca: { acento: "#40a0f8", panel: "#232f4d", rotulos: false },
   context: `Somos una consultora de software de 40 personas con sede en Bogotá.
 Vendemos proyectos de entre US$30.000 y US$250.000, con ciclos de venta de 4 a 10 semanas.
 Nuestros clientes típicos son retail, logística y servicios financieros.
