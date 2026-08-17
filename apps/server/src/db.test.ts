@@ -651,3 +651,79 @@ describe("adoptar una tarea la mueve de corrida", () => {
     expect(store.listTasks(vieja)).toHaveLength(0);
   });
 });
+
+/**
+ * Al sacar un rol de la organización su trabajo abierto no puede quedar
+ * flotando: en el tablero aparecía sin dueño, contaba como pendiente y la
+ * corrida siguiente lo heredaba esperando a alguien que ya no existe.
+ */
+describe("borrar un rol cierra su trabajo abierto", () => {
+  const ahora = Date.now();
+  const tarea = (assigneeRoleId: string, status: string, title = "Grabar la escena 3") => ({
+    id: ids.task(),
+    runId: ids.run(),
+    title,
+    detail: "",
+    assigneeRoleId,
+    createdByRoleId: null,
+    status,
+    priority: "normal" as const,
+    dueTick: null,
+    result: null,
+    heredadaDeRunId: null,
+    createdAt: ahora,
+    updatedAt: ahora,
+  });
+
+  it("cancela lo abierto explicando por qué, y no toca lo terminado ni lo ajeno", () => {
+    const saliente = rol("Sofía");
+    const queda = rol("Diego");
+    store.saveRole(saliente);
+    store.saveRole(queda);
+
+    const abierta = tarea(saliente.id, "in_progress");
+    const terminada = tarea(saliente.id, "done", "Ya estaba hecha");
+    const ajena = tarea(queda.id, "pending", "De otro");
+    for (const t of [abierta, terminada, ajena]) store.saveTask(t as never);
+
+    store.deleteRole(saliente.id);
+
+    const porId = new Map(
+      [abierta, terminada, ajena].map((t) => [
+        t.id,
+        store.listTasks(t.runId).find((x) => x.id === t.id)!,
+      ]),
+    );
+    expect(porId.get(abierta.id)?.status).toBe("cancelled");
+    expect(porId.get(abierta.id)?.result).toContain("salió de la organización");
+    // Lo terminado es historia: no se reescribe.
+    expect(porId.get(terminada.id)?.status).toBe("done");
+    expect(porId.get(ajena.id)?.status).toBe("pending");
+  });
+
+  it("deja de contar como trabajo pendiente de la empresa", () => {
+    const saliente = rol("Camilo");
+    store.saveRole(saliente);
+    const run = {
+      id: ids.run(),
+      companyId,
+      objective: "x",
+      status: "completed",
+      mode: "manual" as const,
+      tick: 1,
+      maxTicks: 10,
+      budgetUsd: 1,
+      spentUsd: 0,
+      cronIntervalMs: 60_000,
+      stopReason: null,
+      startedAt: ahora,
+      endedAt: null,
+    };
+    store.saveRun(run as never);
+    store.saveTask({ ...tarea(saliente.id, "pending"), runId: run.id } as never);
+    expect(store.listTasksAbiertasByCompany(companyId)).toHaveLength(1);
+
+    store.deleteRole(saliente.id);
+    expect(store.listTasksAbiertasByCompany(companyId)).toHaveLength(0);
+  });
+});

@@ -449,12 +449,41 @@ export class Store {
    * borrado—. Va en el store y no en la ruta para que valga también para el
    * borrado en cascada de un departamento o de una empresa.
    */
+  /**
+   * Borrar un rol se lleva sus solicitudes y cierra su trabajo abierto.
+   *
+   * Las solicitudes se van porque nadie puede responderlas ya. Las tareas no se
+   * borran —son la historia de lo que se hizo— pero **se cancelan diciendo por
+   * qué**: si quedan abiertas, aparecen en el tablero sin dueño, cuentan como
+   * trabajo pendiente y la corrida siguiente las hereda esperando a alguien que
+   * no existe. Pasó al reorganizar un equipo en marcha: dos roles salieron y el
+   * tablero quedó con tareas fantasma marcadas con un "?".
+   */
   deleteRole(id: string): number {
     let solicitudes = 0;
     const tx = this.db.transaction(() => {
       solicitudes = this.db
         .prepare("DELETE FROM agent_requests WHERE json_extract(data, '$.requestedByRoleId') = ?")
         .run(id).changes;
+
+      const abiertas = this.many<Task>(
+        `SELECT data FROM tasks
+         WHERE json_extract(data, '$.assigneeRoleId') = ?
+           AND json_extract(data, '$.status') NOT IN ('done', 'cancelled')`,
+        id,
+      );
+      for (const tarea of abiertas) {
+        this.saveTask({
+          ...tarea,
+          status: "cancelled",
+          result:
+            (tarea.result ? `${tarea.result}\n\n` : "") +
+            "Cancelada: el rol que la tenía asignada salió de la organización. " +
+            "Si el trabajo sigue haciendo falta, reasignalo a alguien que exista.",
+          updatedAt: Date.now(),
+        });
+      }
+
       this.db.prepare("DELETE FROM roles WHERE id = ?").run(id);
     });
     tx();
