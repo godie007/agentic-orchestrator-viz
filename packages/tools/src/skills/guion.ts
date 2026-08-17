@@ -333,6 +333,53 @@ export interface EscenaUbicada {
  * Se aplica durante el recorrido y no después, porque estirar una escena corre
  * a todas las que siguen.
  */
+/**
+ * Cuánto va a durar un guion, sin sintetizar una sola palabra.
+ *
+ * Existe porque el equipo se equivocaba solo. Para saber si una pieza entraba
+ * en dos minutos, cada agente contaba las palabras a mano y las dividía por
+ * una tasa inventada: seis cálculos independientes, tres tasas distintas y
+ * cinco versiones del guion corrigiendo en la dirección equivocada. La
+ * duración la sabe el motor —es `ubicarEscenas` con las duraciones del audio—
+ * y hasta acá no había forma de preguntársela sin renderizar el video entero.
+ *
+ * Usa el **mismo parser y las mismas pausas** que el render, así que no puede
+ * divergir en lo estructural: qué se narra y qué no (los títulos no, las
+ * viñetas no, un párrafo que es sólo una marca de ícono tampoco), cuánto aire
+ * lleva una escena sin habla, y la cola final. Lo único estimado es la voz, con
+ * una tasa **medida** sobre el sintetizador real, no supuesta.
+ */
+export const PALABRAS_POR_SEGUNDO = 3.15;
+
+export interface DuracionEstimada {
+  segundos: number;
+  porEscena: Array<{ titulo: string; palabras: number; segundos: number }>;
+  palabras: number;
+}
+
+export function estimarDuracion(guion: Guion): DuracionEstimada {
+  const duraciones = guion.escenas.flatMap((escena) =>
+    escena.lineas.map((linea) => contarPalabras(linea.texto) / PALABRAS_POR_SEGUNDO),
+  );
+  const { escenas, total } = ubicarEscenas(guion, duraciones);
+  return {
+    segundos: total,
+    palabras: guion.escenas.reduce(
+      (suma, escena) => suma + escena.lineas.reduce((s, l) => s + contarPalabras(l.texto), 0),
+      0,
+    ),
+    porEscena: escenas.map((ubicada) => ({
+      titulo: ubicada.escena.titulo,
+      palabras: ubicada.escena.lineas.reduce((s, l) => s + contarPalabras(l.texto), 0),
+      segundos: ubicada.fin - ubicada.inicio,
+    })),
+  };
+}
+
+function contarPalabras(texto: string): number {
+  return texto.trim().split(/\s+/).filter(Boolean).length;
+}
+
 export function ubicarEscenas(
   guion: Guion,
   duraciones: readonly number[],

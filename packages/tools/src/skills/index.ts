@@ -18,6 +18,7 @@ import { renderDocx, renderPdf } from "./render.js";
 import { puedeBorrar } from "./permisos.js";
 import { ICONOS_DISPONIBLES } from "./iconos.js";
 import { crearGeneradorImagenes, type GeneradorImagenes } from "./imagenes.js";
+import { estimarDuracion, parseGuion } from "./guion.js";
 import type { ImagenGuion } from "./guion.js";
 import { renderSlides } from "./slides.js";
 import { renderVideo } from "./video.js";
@@ -1512,6 +1513,62 @@ function crearGrabarClip(storage: SkillStorage): RegisteredTool {
  * ve de verdad: es "un agente que produce algo visual tiene que poder verlo",
  * aplicado a quien revisa.
  */
+/**
+ * Cuánto va a durar el video de un guion, antes de gastar un render.
+ *
+ * Nace de un error caro y repetido: para saber si la pieza entraba en dos
+ * minutos, cada agente contaba las palabras a mano y las dividía por una tasa
+ * que se inventaba. Hubo seis cálculos independientes, tres tasas distintas y
+ * cinco versiones del guion corrigiendo hacia el lado equivocado — con un
+ * guion que, medido de verdad, ya cumplía. La duración la sabe el motor: acá
+ * se la puede preguntar.
+ */
+const estimarDuracionGuion: RegisteredTool = {
+  name: "estimar_duracion",
+  origin: "skill",
+  readOnly: true,
+  requiresApproval: false,
+  description:
+    "Cuánto va a durar el video de un guion, en segundos, con el desglose por escena. " +
+    "Usa el mismo reloj que el render, así que no hace falta contar palabras a mano ni " +
+    "estimar la velocidad de la voz: preguntá acá antes de alargar o acortar un guion.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      artifact_key: { type: "string", description: "Clave del guion, como en write_artifact." },
+    },
+    required: ["artifact_key"],
+    additionalProperties: false,
+  },
+  async execute(args, ctx) {
+    const encontrado = await buscarEntregable(args, ctx);
+    if ("error" in encontrado) return encontrado.error;
+
+    const guion = parseGuion(encontrado.artifact.content);
+    if (guion.escenas.length === 0) {
+      return fail(
+        "Ese entregable no tiene escenas: un guion es un título con `#` y una escena por " +
+          "cada `##` con lo que se dice debajo.",
+      );
+    }
+
+    const { segundos, palabras, porEscena } = estimarDuracion(guion);
+    const minutos = `${Math.floor(segundos / 60)}:${String(Math.round(segundos % 60)).padStart(2, "0")}`;
+    const detalle = porEscena
+      .map((e) => `  ${e.segundos.toFixed(1).padStart(5)}s · ${e.palabras.toString().padStart(3)} pal · ${e.titulo}`)
+      .join("\n");
+
+    return ok(
+      `El video va a durar unos ${Math.round(segundos)} segundos (${minutos}), con ` +
+        `${palabras} palabras narradas en ${porEscena.length} escenas:\n${detalle}\n` +
+        `Incluye las pausas entre escenas y la cola final, igual que el render. Para cambiar ` +
+        `la duración, la única palanca es cuánto se narra: el texto de los párrafos. Los ` +
+        `títulos y las viñetas no se dicen, así que no suman tiempo.`,
+      `${minutos} · ${palabras} palabras`,
+    );
+  },
+};
+
 function crearExtraerCuadros(storage: SkillStorage): RegisteredTool {
   return {
     name: "extraer_cuadros",
@@ -1730,6 +1787,7 @@ export function createSkillTools(
     crearLectura(storage),
     crearInspeccion(storage),
     crearExtraerCuadros(storage),
+    estimarDuracionGuion,
     crearEscritura(storage),
     crearBorrado(storage),
   ];
