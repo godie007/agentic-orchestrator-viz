@@ -2,6 +2,8 @@
   "name": "@orq/tools",
   "version": "0.1.0",
   "private": true,
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "author": "Diego Fernando Echevery <admin@codytion.com> (https://codytion.com/)",
   "type": "module",
   "description": "Registro de herramientas, tools de coordinación y capacidad, y puente MCP con telemetría.",
   "exports": {

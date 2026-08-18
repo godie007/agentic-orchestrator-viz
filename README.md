@@ -8,6 +8,10 @@ producen entregables — con el costo a la vista y un tope que corta solo.
 Corre local, un solo usuario, sin infraestructura externa más allá del proveedor
 LLM y los servidores MCP que conectes.
 
+El autor es **Diego Fernando Echevery**. El código se comparte para estudiar y
+usar sin fines de lucro; el uso comercial pide una licencia paga. Ver
+[Licencia](#licencia).
+
 ---
 
 ## Arranque rápido
@@ -275,3 +279,23 @@ En su lugar hay un agent loop propio detrás de `LlmProvider`, que además es lo
 permite instrumentar cada paso para la visualización. Si en algún momento querés
 un proveedor "suscripción Claude", es un archivo nuevo en `packages/llm/adapters/`
 y nada más.
+
+---
+
+## Licencia
+
+Copyright © 2026 [Diego Fernando Echevery](https://codytion.com/).
+
+Este repositorio se publica bajo la [PolyForm Noncommercial License 1.0.0](LICENSE):
+podés usarlo, estudiarlo, modificarlo y redistribuirlo **sin fines de lucro**
+(uso personal, hobby, investigación, educación y organizaciones sin ánimo de
+lucro).
+
+**El uso comercial no está incluido.** Si lo vas a usar para generar ingresos —
+ofrecerlo como producto o servicio, integrarlo en un negocio, vender trabajo
+hecho con él— tenés que acordar una licencia comercial con el autor y pagarla.
+Escribí a [admin@codytion.com](mailto:admin@codytion.com).
+
+Esta no es una licencia open source de la OSI: se comparte el código, no se
+regala el derecho a explotarlo comercialmente. El texto legal está en
+[`LICENSE`](LICENSE).

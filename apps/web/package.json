@@ -2,6 +2,8 @@
   "name": "@orq/web",
   "version": "0.1.0",
   "private": true,
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "author": "Diego Fernando Echevery <admin@codytion.com> (https://codytion.com/)",
   "type": "module",
   "description": "UI: MCP Hub, Live Process View y pantallas de configuración.",
   "scripts": {

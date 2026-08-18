@@ -2,6 +2,8 @@
   "name": "@orq/llm",
   "version": "0.1.0",
   "private": true,
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "author": "Diego Fernando Echevery <admin@codytion.com> (https://codytion.com/)",
   "type": "module",
   "description": "Interfaz LlmProvider y adaptadores intercambiables (OpenRouter, Anthropic, OpenAI, Ollama).",
   "exports": {

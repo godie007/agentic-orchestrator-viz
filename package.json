@@ -3,6 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "author": {
+    "name": "Diego Fernando Echevery",
+    "email": "admin@codytion.com",
+    "url": "https://codytion.com/"
+  },
   "description": "Plataforma para modelar y operar una empresa completa con agentes LLM, con MCP visible y proceso observable en vivo.",
   "engines": {
     "node": ">=22"

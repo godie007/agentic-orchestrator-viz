@@ -2,6 +2,8 @@
   "name": "@orq/shared",
   "version": "0.1.0",
   "private": true,
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "author": "Diego Fernando Echevery <admin@codytion.com> (https://codytion.com/)",
   "type": "module",
   "description": "Modelo de dominio y esquemas Zod compartidos entre servidor y web.",
   "exports": {

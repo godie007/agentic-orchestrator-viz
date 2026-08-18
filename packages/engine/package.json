@@ -2,6 +2,8 @@
   "name": "@orq/engine",
   "version": "0.1.0",
   "private": true,
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "author": "Diego Fernando Echevery <admin@codytion.com> (https://codytion.com/)",
   "type": "module",
   "description": "Agent loop, bus de mensajes, scheduler y bus de eventos. Sin HTTP ni base de datos.",
   "exports": {
