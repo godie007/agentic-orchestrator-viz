@@ -721,6 +721,27 @@ export class RunState {
   }
 
   /**
+   * Refleja en la corrida un rol que se editó desde la configuración.
+   *
+   * Es la contraparte de `removeRole` para el cambio, no el borrado: la
+   * configuración se lee al arrancar, así que sin esto lo que edita una persona
+   * —sus instrucciones, su modelo, las herramientas que le otorga— no llega
+   * hasta la corrida siguiente. Lo pagamos con un servidor MCP instalado y
+   * asignado a los tres roles mientras la corrida andaba: la base quedó bien,
+   * los agentes siguieron sin verlo y gastaron turnos en una herramienta que
+   * fallaba.
+   *
+   * La bandeja y el historial no se tocan: cambia quién es el rol, no lo que
+   * ya pasó.
+   */
+  actualizarRol(role: Role): boolean {
+    const index = this.config.roles.findIndex((candidate) => candidate.id === role.id);
+    if (index === -1) return false;
+    this.config.roles[index] = role;
+    return true;
+  }
+
+  /**
    * Incorpora al catálogo una herramienta compuesta creada por un agente y se
    * la otorga a quien la creó.
    *

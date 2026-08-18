@@ -14,6 +14,7 @@ const providerLabel: Record<(typeof providerIdSchema.options)[number], string> =
   nvidia: "NVIDIA (free)",
   "claude-sesion": "Claude (sesión)",
   "claude-code": "Claude Code (suscripción)",
+  opencode: "opencode (suscripción)",
 };
 
 /**

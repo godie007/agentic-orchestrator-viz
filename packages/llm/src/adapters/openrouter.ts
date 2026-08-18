@@ -12,7 +12,7 @@ import {
 import {
   ToolCallAccumulator,
   mapFinishReason,
-  toOpenAiMessages,
+  toOpenAiMessagesConCache,
   toOpenAiTools,
 } from "./openai-shared.js";
 
@@ -93,7 +93,7 @@ export class OpenRouterProvider implements LlmProvider {
       stream = (await this.client.chat.completions.create(
         {
           model: req.model,
-          messages: toOpenAiMessages(req.messages),
+          messages: toOpenAiMessagesConCache(req.messages),
           ...(req.tools?.length ? { tools: toOpenAiTools(req.tools) } : {}),
           ...(req.temperature != null ? { temperature: req.temperature } : {}),
           ...(req.maxOutputTokens ? { max_tokens: req.maxOutputTokens } : {}),

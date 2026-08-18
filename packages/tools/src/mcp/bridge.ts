@@ -63,6 +63,58 @@ export function crearFila(): Fila {
 const MAX_RECONNECT_DELAY_MS = 60_000;
 const BASE_RECONNECT_DELAY_MS = 1_000;
 
+/**
+ * Reintentos ante un límite de tasa del servicio de atrás, y cuánto se espera.
+ *
+ * La fila serializa las llamadas pero no las **espacia**: dos búsquedas de dos
+ * agentes salen una detrás de la otra y, si la primera contesta en medio
+ * segundo, las dos caen dentro del mismo segundo. Con Brave en plan Free —una
+ * consulta por segundo— eso es un 429 garantizado: lo medimos con dos llamadas
+ * estampadas en el mismo segundo, la primera con resultados y la segunda
+ * rechazada. Esperar dentro de la fila es lo correcto y no un efecto
+ * colateral: frena a los demás de **ese** servidor, que es justo lo que pide
+ * un límite por segundo, y no toca a los otros.
+ *
+ * Dos reintentos y no más: si el límite es de cuota diaria y no de tasa,
+ * insistir no lo arregla y lo único que hace es demorar el turno del resto.
+ */
+const REINTENTOS_POR_LIMITE = 2;
+const ESPERA_POR_LIMITE_MS = 1_100;
+const MAX_ESPERA_POR_LIMITE_MS = 15_000;
+
+/**
+ * Si el error de una llamada es un límite de tasa.
+ *
+ * Se mira el **texto** porque un servidor MCP no tiene forma de devolver un
+ * código: lo que llega es el mensaje que el servidor armó con la respuesta de
+ * su API. Por eso se buscan las tres formas en que aparece, y no una sola.
+ */
+export function esLimiteDeTasa(texto: string): boolean {
+  return /\b429\b/.test(texto) || /rate.?limit/i.test(texto) || /too many requests/i.test(texto);
+}
+
+/**
+ * Cuánto esperar antes de reintentar, en milisegundos.
+ *
+ * Si el servicio dijo cuánto —`retry-after: 3`, `"retryAfter": 3`— se le hace
+ * caso: nadie sabe mejor que él cuándo vuelve a atender. El valor se toma en
+ * segundos, que es como lo publica HTTP, y se acota para que un `retry-after`
+ * enorme (o disparatado) no deje la fila del servidor congelada.
+ */
+export function esperaDeReintento(texto: string, intento: number): number {
+  const declarado = /retry[-_ ]?after"?\s*[:=]\s*"?(\d+)/i.exec(texto);
+  if (declarado?.[1]) {
+    return Math.min(Number(declarado[1]) * 1000, MAX_ESPERA_POR_LIMITE_MS);
+  }
+  return Math.min(ESPERA_POR_LIMITE_MS * intento, MAX_ESPERA_POR_LIMITE_MS);
+}
+
+const dormir = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
+
 export class McpBridge {
   private connections = new Map<string, Connection>();
 
@@ -283,7 +335,20 @@ export class McpBridge {
       );
     }
 
-    return conn.fila(() => this.llamar(conn, toolName, qualifiedName, args, signal));
+    // El reintento va **dentro** de la fila: si esperara afuera, otra llamada
+    // entraría en el hueco y volvería a chocar contra el mismo límite.
+    return conn.fila(async () => {
+      let ultimo = await this.llamar(conn, toolName, qualifiedName, args, signal);
+
+      for (let intento = 1; intento <= REINTENTOS_POR_LIMITE; intento++) {
+        if (ultimo.ok || !esLimiteDeTasa(ultimo.content)) break;
+        if (signal?.aborted) break;
+        await dormir(esperaDeReintento(ultimo.content, intento));
+        ultimo = await this.llamar(conn, toolName, qualifiedName, args, signal);
+      }
+
+      return ultimo;
+    });
   }
 
   private async llamar(

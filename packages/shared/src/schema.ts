@@ -32,6 +32,12 @@ export const providerIdSchema = z.enum([
   // suscripción de claude.ai (no factura uso/año). Es un id aparte porque el
   // agente no se autentica por variables: el CLI usa el login de la máquina.
   "claude-code",
+  // CLI de opencode: mismo trato que el anterior —el turno se delega entero al
+  // binario de la máquina— pero la credencial es la de `opencode auth login`,
+  // que puede ser el plan de OpenCode Zen, una sesión de Anthropic o Copilot.
+  // Va aparte porque un rol elige proveedor por id: así conviven las dos
+  // suscripciones y le podés dar una a un agente sin tocar a los demás.
+  "opencode",
 ]);
 export type ProviderId = z.infer<typeof providerIdSchema>;
 
@@ -447,6 +453,26 @@ export const runStatusSchema = z.enum([
   "failed",
 ]);
 export type RunStatus = z.infer<typeof runStatusSchema>;
+
+/**
+ * Los estados de los que una corrida ya no vuelve.
+ *
+ * Vive acá y no en el motor porque la pregunta "¿esto se puede continuar?" se
+ * hace en los tres lados —el scheduler para cortar el bucle, el servidor para
+ * no borrar trabajo vivo, la UI para decidir qué botón ofrecer— y cada copia
+ * de la lista se desincronizó: la UI trataba `awaiting_approval` como
+ * terminada y ofrecía borrar una corrida que sólo esperaba una respuesta.
+ */
+export const ESTADOS_TERMINALES = [
+  "completed",
+  "stopped",
+  "budget_exceeded",
+  "failed",
+] as const satisfies readonly RunStatus[];
+
+export function esCorridaTerminal(status: RunStatus): boolean {
+  return (ESTADOS_TERMINALES as readonly RunStatus[]).includes(status);
+}
 
 export const runModeSchema = z.enum(["manual", "continuous", "cron"]);
 export type RunMode = z.infer<typeof runModeSchema>;

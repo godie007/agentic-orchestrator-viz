@@ -73,6 +73,69 @@ export function bloques(contenido: string): Array<{ titulo: string; texto: strin
   return salida;
 }
 
+/**
+ * Corta un documento por sus encabezados **reales**, sin partir ni renombrar.
+ *
+ * Es la contracara de `bloques`, y la diferencia no es de estilo. `bloques`
+ * existe para **buscar**: parte los tramos largos y se queda con el texto del
+ * encabezado sin sus `#`, porque para puntuar un fragmento eso alcanza y
+ * sobra. Usarla para mostrarle el documento a un agente miente de dos formas
+ * que ya costaron caro:
+ *
+ * 1. Una sección de más de 1.200 caracteres sale partida en varios tramos que
+ *    **repiten el mismo título**, así que el índice muestra "Resumen
+ *    ejecutivo" dos veces en un documento que lo tiene una sola. Lo medimos:
+ *    un informe de 18 encabezados anunciado como 23 secciones, y dos agentes
+ *    gastando nueve llamadas y una reescritura entera del documento en
+ *    desduplicar cinco encabezados que no estaban duplicados.
+ * 2. Al volver a armar el texto hay que reponer los `#`, y reponerlos a mano
+ *    inventa un encabezado en cada costura: en el medio de un párrafo aparece
+ *    un `## Resumen ejecutivo` que el documento no tiene. El agente lo copia
+ *    —hace bien: es lo que le mostramos— y después `edit_artifact` no lo
+ *    encuentra, porque no existe.
+ *
+ * Acá el encabezado viaja **con sus `#`** y el texto es un recorte literal del
+ * documento, así que lo que el agente lee se puede copiar tal cual a un
+ * `buscar`.
+ */
+export interface Seccion {
+  /** El encabezado completo, con sus `#`, tal cual está escrito. */
+  encabezado: string;
+  /** El título sin los `#`, para el índice. */
+  titulo: string;
+  /** Encabezado + cuerpo, recortado literal del documento. */
+  texto: string;
+}
+
+export function secciones(contenido: string): Seccion[] {
+  const lineas = contenido.split("\n");
+  const salida: Seccion[] = [];
+  let actual: { encabezado: string; titulo: string; cuerpo: string[] } | null = null;
+
+  const cerrar = (): void => {
+    if (!actual) return;
+    salida.push({
+      encabezado: actual.encabezado,
+      titulo: actual.titulo,
+      texto: [actual.encabezado, ...actual.cuerpo].join("\n").trimEnd(),
+    });
+    actual = null;
+  };
+
+  for (const linea of lineas) {
+    if (/^#{1,4}\s/.test(linea)) {
+      cerrar();
+      actual = { encabezado: linea.trimEnd(), titulo: linea.replace(/^#+\s*/, "").trim(), cuerpo: [] };
+      continue;
+    }
+    // Lo que va antes del primer encabezado no pertenece a ninguna sección: es
+    // el preámbulo, y se lo lleva quien pida el documento entero.
+    if (actual) actual.cuerpo.push(linea);
+  }
+  cerrar();
+  return salida;
+}
+
 export function puntuar(bloque: string, titulo: string, consulta: string[]): number {
   const enBloque = normalizar(`${titulo}\n${bloque}`);
   let puntos = 0;

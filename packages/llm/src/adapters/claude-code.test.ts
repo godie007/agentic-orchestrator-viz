@@ -4,6 +4,7 @@ import {
   claudeCodeCatalog,
   construirArgs,
   HERRAMIENTAS_DE_LECTURA,
+  ultimoTextoDeAsistente,
 } from "./claude-code.js";
 
 describe("claudeCodeCatalog", () => {
@@ -157,3 +158,38 @@ async function collectStream(events: DoneLike[]): Promise<DoneLike> {
 // `lastResult` se prueba indirectamente vía healthCheck del registro; el parseo
 // real de stream-json queda cubierto por los tests de integración que requieren
 // el CLI instalado (ver scripts/check-llm.ts).
+describe("un turno que el CLI cierra mal no tira el trabajo", () => {
+  const linea = (o: unknown): string => JSON.stringify(o);
+
+  it("rescata el último texto del agente", () => {
+    // Medido: un verificador hizo 27 llamadas, escribió su entregable y movió
+    // su tarea; falló su última llamada, el CLI cortó a las 33 vueltas y el
+    // turno entero se registró como fallido y sin resumen.
+    const stdout = [
+      linea({ type: "assistant", message: { model: "claude-sonnet-5", content: [{ type: "text", text: "arranco" }] } }),
+      linea({ type: "assistant", message: { model: "claude-sonnet-5", content: [{ type: "text", text: "verificación escrita en verificacion-guion" }] } }),
+      linea({ type: "assistant", message: { model: "<synthetic>", content: [{ type: "text", text: "" }] } }),
+      linea({ type: "result", is_error: true }),
+    ].join("\n");
+    expect(ultimoTextoDeAsistente(stdout)).toBe("verificación escrita en verificacion-guion");
+  });
+
+  it("ignora los mensajes sintéticos, que los fabrica el CLI al cortar", () => {
+    const stdout = linea({
+      type: "assistant",
+      message: { model: "<synthetic>", content: [{ type: "text", text: "corté por límite" }] },
+    });
+    expect(ultimoTextoDeAsistente(stdout)).toBeNull();
+  });
+
+  it("sin una sola palabra del agente no hay nada que rescatar", () => {
+    // Ahí el fallo sí es un fallo y tiene que informarse como tal.
+    expect(ultimoTextoDeAsistente(linea({ type: "result", is_error: true }))).toBeNull();
+    expect(ultimoTextoDeAsistente("")).toBeNull();
+  });
+
+  it("aguanta líneas que no son JSON", () => {
+    const stdout = ["ruido", linea({ type: "assistant", message: { content: [{ type: "text", text: "ok" }] } })].join("\n");
+    expect(ultimoTextoDeAsistente(stdout)).toBe("ok");
+  });
+});

@@ -68,6 +68,14 @@ export interface TurnDeps {
    * El motor no sabe dónde vive: lo inyecta el servidor, igual que la fecha.
    */
   dirDeTrabajo?: string;
+  /**
+   * Mapa del árbol de contexto de la empresa, ya armado.
+   *
+   * Es una función y no un string porque el árbol cambia **dentro** de la
+   * corrida: un agente escribe una nota en el ciclo 2 y el resto tiene que
+   * verla en el 3. Se resuelve por turno, como la fecha.
+   */
+  mapaDeContexto?: () => Promise<string>;
   signal?: AbortSignal;
 }
 
@@ -195,6 +203,10 @@ export async function runAgentTurn(
 
   const byName = new Map(selection.tools.map((tool) => [tool.name, tool]));
 
+  // El mapa se pide una vez por turno: es una lectura de disco, no puede ir
+  // adentro del armado del prompt que corre en cada iteración.
+  const mapa = deps.mapaDeContexto ? await deps.mapaDeContexto() : undefined;
+
   const conversation: ChatMessage[] = interrumpido
     ? [
         ...interrumpido.conversation,
@@ -210,7 +222,7 @@ export async function runAgentTurn(
         },
       ]
     : [
-        { role: "system", content: buildSystemPrompt(state, role, deps.objective) },
+        { role: "system", content: buildSystemPrompt(state, role, deps.objective, mapa) },
         {
           role: "user",
           content: buildTurnPrompt(
@@ -292,11 +304,12 @@ export async function runAgentTurn(
     ...(deps.signal ? { signal: deps.signal } : {}),
   };
 
-  // Puente MCP hacia las herramientas del org, solo para Claude Code: el CLI
-  // corre su propio loop y no puede devolver `tool_calls`, así que le expone
-  // las herramientas de coordinación como un servidor MCP que vive acá mismo.
+  // Puente MCP hacia las herramientas del org, para los proveedores que delegan
+  // el turno a un CLI (Claude Code, opencode): corren su propio loop y no
+  // pueden devolver `tool_calls`, así que se les expone las herramientas de
+  // coordinación como un servidor MCP que vive acá mismo.
   const orgBridge =
-    provider.id === "claude-code"
+    provider.delegaElTurno
       ? createClaudeMcpBridge({
           bus,
           state,
@@ -847,7 +860,7 @@ export function huellaDeFallo(name: string, args: Record<string, unknown>): stri
  * `false`), el argumento extra sí puede cambiar el resultado y la huella se
  * calcula completa.
  */
-function huellaDeLectura(tool: RegisteredTool | undefined, call: ToolCall): string {
+export function huellaDeLectura(tool: RegisteredTool | undefined, call: ToolCall): string {
   // Si la herramienta declara cuáles de sus argumentos determinan el resultado,
   // manda eso: el resto es decoración y no puede hacer parecer nueva una
   // llamada repetida.

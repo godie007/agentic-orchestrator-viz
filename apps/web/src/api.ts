@@ -342,6 +342,14 @@ export const api = {
       body: JSON.stringify({ toolName, args }),
     }),
 
+  /** El pulso del proyecto para el shell: corrida actual, ciclo y última señal. */
+  progreso: (companyId: string) =>
+    request<{
+      run: Run | null;
+      viva: boolean;
+      progreso: { eventos: number; acciones: number; ultimaSenalAt: number | null } | null;
+    }>(`/companies/${companyId}/progreso`),
+
   runs: (companyId?: string) =>
     request<Run[]>(`/runs${companyId ? `?companyId=${companyId}` : ""}`),
   run: (id: string) => request<RunBundle>(`/runs/${id}`),

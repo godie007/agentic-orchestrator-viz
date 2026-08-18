@@ -1,4 +1,4 @@
-import type { Run, RunStatus } from "@orq/shared";
+import { esCorridaTerminal, type Run, type RunStatus } from "@orq/shared";
 import { BudgetExceededError, type ProviderRegistry, type RunLedger } from "@orq/llm";
 import type { ToolRegistry } from "@orq/tools";
 import type { EventBus } from "./events.js";
@@ -36,6 +36,8 @@ export interface OrchestratorDeps {
    * durante una corrida, a diferencia de la fecha.
    */
   dirDeTrabajo?: string;
+  /** Mapa del árbol de contexto de la empresa. Ver `TurnDeps.mapaDeContexto`. */
+  mapaDeContexto?: () => Promise<string>;
   onRunUpdate?: (run: Run) => void;
 }
 
@@ -66,6 +68,10 @@ export class Orchestrator {
   /** Ejecuta un solo ciclo. Es el modo manual y la unidad de los otros modos. */
   async tick(): Promise<{ advanced: boolean; reason: string }> {
     if (this.running) return { advanced: false, reason: "ya hay un ciclo en curso" };
+
+    // Avanzar es la contraorden de pausar: sin esto, una pausa vieja frenaba el
+    // ciclo siguiente que alguien pidió a propósito.
+    this.pauseRequested = false;
 
     const blocked = this.checkBlockers();
     if (blocked) return { advanced: false, reason: blocked };
@@ -256,10 +262,22 @@ export class Orchestrator {
     if (this.status === "awaiting_approval" && !this.esperaAlgo()) {
       this.setStatus("paused");
     }
+    // Continuar es la contraorden de pausar. Sin esto, una pausa vieja hacía
+    // que "seguir sin parar" cortara en el primer ciclo sin explicar por qué.
+    this.pauseRequested = false;
 
     while (!isTerminal(this.status) && this.status !== "awaiting_approval") {
       if (this.stopRequested) {
         this.finish("stopped", "Detenida por la persona a cargo.");
+        break;
+      }
+      // La pausa se mira acá y no sólo en `pause()`: el bucle vuelve a llamar a
+      // `tick()`, que pone `running` de nuevo, así que pausar en modo continuo
+      // era un no-op —el estado parpadeaba a `paused` y volvía solo a
+      // `running`— y no había forma de frenar salvo terminar la corrida.
+      if (this.pauseRequested) {
+        this.pauseRequested = false;
+        this.setStatus("paused", "Pausada por la persona a cargo.");
         break;
       }
       const { advanced } = await this.tick();
@@ -283,6 +301,8 @@ export class Orchestrator {
   }
 
   private stopRequested = false;
+  /** Pausa pedida por una persona, pendiente de hacerse efectiva. */
+  private pauseRequested = false;
 
   /** Corta la corrida. Un turno en vuelo se aborta por señal. */
   stop(reason = "Detenida por la persona a cargo."): void {
@@ -292,9 +312,25 @@ export class Orchestrator {
     if (!isTerminal(this.status)) this.finish("stopped", reason);
   }
 
+  /**
+   * Frena al terminar el ciclo en curso; se retoma donde quedó.
+   *
+   * El pedido se recuerda en `pauseRequested` porque el estado no alcanza: en
+   * modo continuo, entre ciclo y ciclo el estado ya es `paused` y el bucle
+   * arranca el siguiente igual. Un turno en vuelo no se aborta —lo que ya se
+   * pagó se termina de cobrar— y por eso la pausa se hace efectiva recién al
+   * cerrar el ciclo.
+   */
   pause(): void {
     this.stopCron();
-    if (this.status === "running") this.setStatus("paused");
+    this.pauseRequested = true;
+    if (isTerminal(this.status)) return;
+    // `awaiting_approval` no se pisa: esa espera ya frena la corrida y su
+    // motivo es lo único que explica por qué no avanza.
+    if (this.status === "awaiting_approval") return;
+    // Si no hay ciclo en vuelo, la pausa es inmediata; si lo hay, el estado lo
+    // fija el cierre del ciclo y `runContinuous` corta antes del siguiente.
+    if (!this.running) this.setStatus("paused", "Pausada por la persona a cargo.");
   }
 
   /**
@@ -486,6 +522,7 @@ export class Orchestrator {
             maxTicks: this.run.maxTicks,
             ...(this.deps.fechaHoy ? { fechaHoy: this.deps.fechaHoy() } : {}),
             ...(this.deps.dirDeTrabajo ? { dirDeTrabajo: this.deps.dirDeTrabajo } : {}),
+            ...(this.deps.mapaDeContexto ? { mapaDeContexto: this.deps.mapaDeContexto } : {}),
             ...(this.abort ? { signal: this.abort.signal } : {}),
           });
           // El contador se reinicia en cuanto hace algo: lo que se persigue es
@@ -599,11 +636,7 @@ const TICKS_FALLIDOS_TOLERADOS = 3;
  */
 const TURNOS_VACIOS_TOLERADOS = 2;
 
+/** La lista vive en `@orq/shared`: la comparten el motor, el servidor y la UI. */
 function isTerminal(status: RunStatus): boolean {
-  return (
-    status === "completed" ||
-    status === "stopped" ||
-    status === "budget_exceeded" ||
-    status === "failed"
-  );
+  return esCorridaTerminal(status);
 }

@@ -31,7 +31,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -45,7 +45,12 @@ import { join } from "node:path";
  * (grupo de procesos propio) y acá se firma la partida del grupo entero, con
  * SIGKILL de respaldo por si alguno ignora el aviso.
  */
-function crearLimpieza(proceso: ChildProcess, perfil: string): () => Promise<void> {
+function crearLimpieza(
+  proceso: ChildProcess,
+  perfil: string,
+  /** `false` cuando el perfil sobrevive al navegador: ahí vive la sesión. */
+  borrarPerfil = true,
+): () => Promise<void> {
   return async () => {
     const pid = proceso.pid;
     if (pid) {
@@ -63,7 +68,7 @@ function crearLimpieza(proceso: ChildProcess, perfil: string): () => Promise<voi
       }, 2000);
       remate.unref();
     }
-    await rm(perfil, { recursive: true, force: true });
+    if (borrarPerfil) await rm(perfil, { recursive: true, force: true });
   };
 }
 
@@ -501,8 +506,35 @@ export interface Grabacion {
     segundos: number;
     avisos: string[];
   }>;
+  /**
+   * Recorre la aplicación **sin filmar** y describe lo que hay en pantalla.
+   *
+   * Es el reconocimiento previo al rodaje, hecho en el mismo navegador que
+   * graba: el mismo perfil —o sea la misma sesión iniciada—, el mismo lienzo de
+   * 1920×1080 y el mismo motor de acciones. Explorar en otro navegador es lo que
+   * hacía que un texto verificado no apareciera después en la toma.
+   *
+   * Devuelve **texto acotado**, no el volcado del árbol de accesibilidad: en un
+   * turno delegado cada resultado se reenvía en todas las vueltas que le
+   * siguen, así que lo que entra gordo se paga muchas veces.
+   */
+  explorar(acciones: AccionDeGrabacion[], buscar?: string[]): Promise<Exploracion>;
   cerrar(): Promise<void>;
 }
+
+export interface Exploracion {
+  url: string;
+  titulo: string;
+  /** Cada texto preguntado: si está, y si sigue estando 1,2 s después. */
+  encontrados: Array<{ texto: string; visible: boolean; estable: boolean }>;
+  /** Lo clickeable a la vista, tal como lo nombraría la acción `clic`. */
+  clickeables: string[];
+  /** El texto de la pantalla, recortado. */
+  pantalla: string;
+}
+
+/** Cuánto texto de pantalla vuelve. Un volcado entero infla el turno delegado. */
+const TOPE_PANTALLA = 4_000;
 
 const pausa = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -545,12 +577,19 @@ function expresionDeBusqueda(objetivo: { texto?: string; selector?: string }): s
  * cuadro con las animaciones pausadas —imposible sobre una aplicación real,
  * cuyo estado avanza con la red— se filma lo que pasa con `Page.startScreencast`,
  * que entrega cada repintado con su instante. La sesión (login) vive en el
- * perfil temporal, así que **un mismo navegador graba varios clips seguidos
- * sin volver a iniciar sesión**: la preparación de un clip empieza donde quedó
- * el anterior.
+ * perfil, así que **un mismo navegador graba varios clips seguidos sin volver a
+ * iniciar sesión**: la preparación de un clip empieza donde quedó el anterior.
+ *
+ * Con `perfil`, esa sesión sobrevive también **entre llamadas**. No es una
+ * optimización de más: medido en una corrida real, once tomas de la misma
+ * escena repitieron los mismos seis pasos de login —casi seis minutos de reloj—
+ * porque cada grabación abría un perfil nuevo. Ningún modelo, por bueno que
+ * sea, se ahorra ese trabajo: no es una decisión, es estado que se tiraba.
+ *
+ * El perfil que se pasa **no se borra** al cerrar; el temporal sí, como siempre.
  */
 export async function abrirGrabacion(
-  opciones: { chrome?: string; signal?: AbortSignal } = {},
+  opciones: { chrome?: string; signal?: AbortSignal; perfil?: string } = {},
 ): Promise<Grabacion> {
   const binario = buscarChrome(opciones.chrome);
   if (!binario) {
@@ -560,7 +599,10 @@ export async function abrirGrabacion(
     );
   }
 
-  const perfil = await mkdtemp(join(tmpdir(), "orq-grabacion-"));
+  // Un perfil propio se crea si no existe y sobrevive al cierre: adentro está
+  // la sesión que evita repetir el login en la toma siguiente.
+  const perfil = opciones.perfil ?? (await mkdtemp(join(tmpdir(), "orq-grabacion-")));
+  if (opciones.perfil) await mkdir(opciones.perfil, { recursive: true });
   const proceso = spawn(
     binario,
     [
@@ -579,7 +621,7 @@ export async function abrirGrabacion(
     { stdio: ["ignore", "pipe", "pipe"], detached: true },
   );
 
-  const limpiar = crearLimpieza(proceso, perfil);
+  const limpiar = crearLimpieza(proceso, perfil, !opciones.perfil);
 
   let cdp: Cdp;
   try {
@@ -833,6 +875,66 @@ export async function abrirGrabacion(
       }
 
       return { cuadros: salida, segundos, avisos };
+    },
+
+    async explorar(acciones, buscar = []) {
+      for (const [i, accion] of acciones.entries()) {
+        try {
+          await ejecutar(accion);
+        } catch (error) {
+          const detalle = error instanceof Error ? error.message : String(error);
+          throw new Error(`En el paso ${i + 1}: ${detalle}`);
+        }
+      }
+
+      const leer = async <T>(expresion: string): Promise<T | null> => {
+        const r = (await cdp.enviar("Runtime.evaluate", {
+          expression: expresion,
+          returnByValue: true,
+        })) as { result?: { value?: T } };
+        return r.result?.value ?? null;
+      };
+
+      const encontrados: Exploracion["encontrados"] = [];
+      for (const texto of buscar) {
+        const hay = `document.body ? document.body.innerText.includes(${comillas(texto)}) : false`;
+        const visible = (await leer<boolean>(hay)) ?? false;
+        // La estabilidad es la regla anti-loader de siempre: un esqueleto que
+        // refetchea muestra el texto y lo borra. Un texto visible pero no
+        // estable no sirve como ancla de `esperar_texto`, y descubrirlo acá
+        // cuesta un segundo — descubrirlo filmando cuesta la toma entera.
+        let estable = false;
+        if (visible) {
+          await pausa(1200);
+          estable = (await leer<boolean>(hay)) ?? false;
+        }
+        encontrados.push({ texto, visible, estable });
+      }
+
+      // Ojo con las barras adentro de este template: viaja como código a
+      // Runtime.evaluate, así que una barra sin escapar se la come el template
+      // literal. Con la regex de espacios escrita sin escapar llegaba /s+/g y
+      // le comía las eses a cada palabra: "Orquestador" volvía "Orque tador".
+      // Y nada de backticks acá adentro, que cierran el template.
+      const clickeables =
+        (await leer<string[]>(`(() => {
+          const els = [...document.querySelectorAll("button, a, [role=button], label, th, li")];
+          const textos = els
+            .filter((el) => el.offsetParent !== null && el.innerText && el.innerText.trim())
+            .map((el) => el.innerText.trim().replace(/\\s+/g, " "))
+            .filter((t) => t.length > 0 && t.length < 60);
+          return [...new Set(textos)].slice(0, 60);
+        })()`)) ?? [];
+
+      const pantalla = (await leer<string>("document.body ? document.body.innerText : ''")) ?? "";
+
+      return {
+        url: (await leer<string>("location.href")) ?? "",
+        titulo: (await leer<string>("document.title")) ?? "",
+        encontrados,
+        clickeables,
+        pantalla: pantalla.replace(/\n{3,}/g, "\n\n").slice(0, TOPE_PANTALLA),
+      };
     },
 
     async cerrar() {

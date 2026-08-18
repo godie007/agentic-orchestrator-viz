@@ -12,6 +12,21 @@ import type { TaskStatus, TraceEvent } from "@orq/shared";
 export interface RoleActivity {
   thinking: boolean;
   modelSlug: string | null;
+  /**
+   * Con qué proveedor y por qué corrió el último turno.
+   *
+   * Una empresa puede mezclar suscripciones y, con el escalado por dificultad,
+   * el modelo cambia de un turno a otro: sin esto en la traza derivada, el
+   * organigrama no puede mostrar qué está corriendo cada agente y un turno caro
+   * no se distingue de uno barato hasta que llega la factura.
+   */
+  providerId: string | null;
+  /** Tier que resolvió, o `null` si el rol fijó un slug exacto. */
+  tier: string | null;
+  /** `true` cuando el tier lo eligió el medidor de dificultad. */
+  escaladoPorDificultad: boolean;
+  /** La explicación del motor, para el tooltip. */
+  motivoModelo: string | null;
   /** Herramienta que está ejecutando ahora mismo, si hay alguna. */
   runningTool: string | null;
   turns: number;
@@ -116,6 +131,10 @@ function emptyRole(): RoleActivity {
   return {
     thinking: false,
     modelSlug: null,
+    providerId: null,
+    tier: null,
+    escaladoPorDificultad: false,
+    motivoModelo: null,
     runningTool: null,
     turns: 0,
     costUsd: 0,
@@ -170,6 +189,19 @@ export function derive(events: TraceEvent[], upTo = events.length): DerivedState
         const role = roleOf(event.roleId);
         role.thinking = true;
         role.modelSlug = event.modelSlug;
+        break;
+      }
+
+      // Llega **antes** que `agent.thinking` y trae lo que ése no tiene: el
+      // proveedor, el tier y por qué se eligió. Se emite en todo turno, con o
+      // sin escalado.
+      case "model.selected": {
+        const role = roleOf(event.roleId);
+        role.modelSlug = event.modelSlug;
+        role.providerId = event.providerId;
+        role.tier = event.tier;
+        role.escaladoPorDificultad = event.escalado;
+        role.motivoModelo = event.motivo;
         break;
       }
 

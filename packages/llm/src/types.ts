@@ -175,6 +175,16 @@ export interface LlmProvider {
    * configura una empresa no tiene por qué saber cuánto tarda cada backend.
    */
   readonly timeoutMs?: number;
+  /**
+   * El proveedor corre su **propio** agent loop y no devuelve `tool_calls`.
+   *
+   * Son los que delegan al CLI de una suscripción (`claude-code`, `opencode`).
+   * El motor lo mira para prestarles el puente MCP con las herramientas del
+   * org: sin eso, el agente delegado no puede coordinar con nadie. Es una
+   * propiedad del proveedor y no una lista de ids en el motor a propósito —
+   * agregar un CLI más no puede obligar a tocar `loop.ts`.
+   */
+  readonly delegaElTurno?: boolean;
   /** Catálogo de modelos con precios. Se cachea; `refresh` fuerza recarga. */
   listModels(refresh?: boolean): Promise<ModelInfo[]>;
   /** Verifica credenciales y conectividad sin gastar tokens de generación. */

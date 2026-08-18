@@ -14,5 +14,6 @@ export {
   ClaudeCodeProvider,
   type ClaudeCodeConfig,
 } from "./adapters/claude-code.js";
+export { OpenCodeProvider, type OpenCodeConfig } from "./adapters/opencode.js";
 export { OllamaProvider, type OllamaConfig } from "./adapters/ollama.js";
 export { NvidiaProvider, type NvidiaConfig } from "./adapters/nvidia.js";

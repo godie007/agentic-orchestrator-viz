@@ -1008,3 +1008,80 @@ describe("estado_del_proceso", () => {
     expect(resultado.content).toContain("reasignale la tarea");
   });
 });
+
+/**
+ * Cuánto cuesta leer un entregable.
+ *
+ * En un turno delegado cada llamada cuesta una vuelta entera —el prefijo de la
+ * conversación se reenvía completo, 20.000 a 28.000 tokens— así que el número
+ * de llamadas pesa más que el tamaño de cada resultado. Medido sobre una
+ * corrida real: un informe de 18 secciones leído de a una, en cinco turnos, dio
+ * 90 lecturas del mismo documento.
+ */
+describe("read_artifact: costo de leer", () => {
+  const leer = coordinationTools.find((t) => t.name === "read_artifact")!;
+
+  /** Un contexto mínimo: sólo `readArtifact` responde, el resto no se toca. */
+  const conEntregable = (content: string): ToolContext => ({
+    ...ctx,
+    workspace: {
+      ...strictWorkspace,
+      readArtifact: async () => ({
+        id: "art_1",
+        runId: "run_test",
+        key: "informe",
+        title: "Informe",
+        version: 1,
+        contentType: "markdown" as const,
+        content,
+        authorRoleId: "rol_1",
+        tick: 1,
+        createdAt: 0,
+      }),
+    } as unknown as AgentWorkspace,
+  });
+
+  const DOC = (secciones: number, porSeccion: number): string =>
+    Array.from(
+      { length: secciones },
+      (_, i) => `## Sección ${i + 1}\n\n${"x".repeat(porSeccion)}`,
+    ).join("\n\n");
+
+  it("un entregable de trabajo llega entero en una sola llamada", async () => {
+    // Con el tope viejo de 4.000 caracteres esto caía en el índice y se leía de
+    // a secciones: una vuelta por cada una.
+    const doc = DOC(10, 800); // ~8.000 caracteres
+    const r = await leer.execute({ key: "informe" }, conEntregable(doc));
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("Sección 1");
+    expect(r.content).toContain("Sección 10");
+    expect(r.content).not.toContain("va su índice");
+  });
+
+  it("uno realmente grande sigue devolviendo el índice, y lo dice", async () => {
+    // Traer más de lo que `acotar.ts` deja pasar (16.000) sería mandar algo que
+    // llega cortado: ahí el índice sigue siendo lo correcto.
+    const doc = DOC(20, 1_500); // ~30.000 caracteres
+    const r = await leer.execute({ key: "informe" }, conEntregable(doc));
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("va su índice");
+    // Y no truncar en silencio: el recorte se anuncia.
+    expect(r.content).toContain("caracteres");
+  });
+
+  it("varias secciones se piden en una sola llamada", async () => {
+    const doc = DOC(20, 1_500);
+    const r = await leer.execute(
+      { key: "informe", seccion: "Sección 3, Sección 7, Sección 11" },
+      conEntregable(doc),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("Sección 3");
+    expect(r.content).toContain("Sección 7");
+    expect(r.content).toContain("Sección 11");
+    // Y avisa que vienen pegadas: en el documento no van seguidas, así que
+    // copiarlas juntas a un `buscar` de edit_artifact describe un texto que no
+    // existe.
+    expect(r.content).toContain("no van necesariamente seguidas");
+  });
+});

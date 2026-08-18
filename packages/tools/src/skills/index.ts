@@ -9,6 +9,7 @@ import {
   abrirGrabacion,
   buscarChrome,
   type AccionDeGrabacion,
+  type Exploracion,
 } from "./chrome.js";
 import { armarClip, CARPETA_CLIPS, renderClips } from "./clips.js";
 import { renderEstudio } from "./estudio.js";
@@ -1377,11 +1378,190 @@ const esquemaDeAcciones = (descripcion: string) => ({
 });
 
 /**
+ * Reconocer una pantalla **antes** de filmarla, en el mismo navegador que graba.
+ *
+ * Es la herramienta que corrige una duplicación cara: hasta acá el
+ * reconocimiento se hacía con el MCP de navegador —otro Chrome, otra sesión,
+ * otro tamaño de ventana— y lo que se verificaba no era lo que veía la cámara.
+ * Con `sesion`, esto explora exactamente el navegador que después filma: mismo
+ * login, mismo lienzo de 1920×1080, mismo motor de acciones.
+ *
+ * Y devuelve texto acotado en vez del árbol de accesibilidad completo, porque
+ * en un turno delegado cada resultado se reenvía en todas las vueltas que le
+ * siguen: lo que entra gordo se paga muchas veces.
+ */
+function crearExplorarPantalla(storage: SkillStorage): RegisteredTool {
+  return {
+    name: "explorar_pantalla",
+    origin: "skill",
+    readOnly: true,
+    requiresApproval: false,
+    description:
+      "Mira una pantalla de una aplicación web sin filmarla, para escribir después la " +
+      "preparación de grabar_clip con textos que existen de verdad. Devuelve la URL, el " +
+      "título, lo clickeable a la vista y —lo más importante— si cada texto que preguntes " +
+      "está visible Y ES ESTABLE: un texto que aparece y se borra es un loader y no sirve " +
+      "como ancla de esperar_texto. Usá la MISMA 'sesion' que vas a usar para grabar: así " +
+      "explorás el mismo navegador que filma, con el mismo login, y no tenés que loguearte " +
+      "dos veces.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        pasos: esquemaDeAcciones("Cómo llegar a la pantalla: navegar, clic, escribir, esperar."),
+        buscar: {
+          type: "array",
+          items: { type: "string" },
+          description: "Textos a verificar en la pantalla, tal como los usarías en esperar_texto.",
+        },
+        sesion: {
+          type: "string",
+          description:
+            'Sesión de navegador que se comparte con grabar_clip, por ejemplo "inspector".',
+        },
+      },
+      required: ["pasos"],
+      additionalProperties: false,
+    },
+
+    async execute(args, ctx) {
+      const pasos = Array.isArray(args.pasos) ? (args.pasos as AccionDeGrabacion[]) : [];
+      if (pasos.length === 0) {
+        return fail("explorar_pantalla: 'pasos' está vacío: no hay a dónde ir.");
+      }
+      // Misma resolución de `salida://` que grabar_clip: una lámina de la
+      // empresa se explora igual que una pantalla de la aplicación.
+      for (const paso of pasos) {
+        if (paso.ir?.startsWith("salida://")) {
+          const absoluta = await storage.resolve(paso.ir.slice("salida://".length));
+          if (!absoluta) {
+            return fail(
+              `explorar_pantalla: no existe "${paso.ir.slice("salida://".length)}" en el ` +
+                `directorio de salida.`,
+            );
+          }
+          paso.ir = pathToFileURL(absoluta).href;
+        }
+      }
+      const buscar = Array.isArray(args.buscar) ? (args.buscar as string[]).map(String) : [];
+      const sesion = tomarSesion(args.sesion);
+
+      let grabacion = null as Awaited<ReturnType<typeof abrirGrabacion>> | null;
+      try {
+        grabacion = await abrirGrabacion({
+          ...(ctx.signal ? { signal: ctx.signal } : {}),
+          ...(sesion.perfil ? { perfil: sesion.perfil } : {}),
+        });
+        const vista = await grabacion.explorar(pasos, buscar);
+        return ok(informeDeExploracion(vista, sesion.avisos));
+      } catch (error) {
+        const detalle = error instanceof Error ? error.message : String(error);
+        return fail(
+          `explorar_pantalla: ${detalle.split("\n")[0]} — revisá el paso que nombra el error: ` +
+            `un texto que no aparece suele ser un label mal copiado o una pantalla que todavía ` +
+            `no cargó.`,
+        );
+      } finally {
+        await grabacion?.cerrar().catch(() => undefined);
+        sesion.soltar();
+      }
+    },
+  };
+}
+
+/**
+ * El informe de la exploración, escrito para que se pueda actuar sobre él.
+ *
+ * Lo que más importa va primero y con nombre propio: un texto **visible pero no
+ * estable** es la trampa que hace perder una toma entera, así que se avisa
+ * fuerte en vez de listarlo como un dato más.
+ */
+export function informeDeExploracion(
+  vista: Exploracion,
+  avisos: string[] = [],
+): string {
+  const lineas = [`Pantalla: ${vista.titulo || "(sin título)"}`, `URL: ${vista.url}`];
+
+  const inestables = vista.encontrados.filter((e) => e.visible && !e.estable);
+  const ausentes = vista.encontrados.filter((e) => !e.visible);
+  const anclas = vista.encontrados.filter((e) => e.estable);
+
+  if (anclas.length > 0) {
+    lineas.push(
+      "",
+      `✅ Sirven como ancla de esperar_texto: ${anclas.map((e) => `"${e.texto}"`).join(", ")}`,
+    );
+  }
+  if (inestables.length > 0) {
+    lineas.push(
+      "",
+      `⚠️ APARECEN Y SE BORRAN (es un loader, NO los uses como ancla): ` +
+        `${inestables.map((e) => `"${e.texto}"`).join(", ")}`,
+    );
+  }
+  if (ausentes.length > 0) {
+    lineas.push("", `❌ No están en esta pantalla: ${ausentes.map((e) => `"${e.texto}"`).join(", ")}`);
+  }
+  if (vista.clickeables.length > 0) {
+    lineas.push("", `Clickeable a la vista: ${vista.clickeables.join(" · ")}`);
+  }
+  lineas.push("", "Texto de la pantalla:", vista.pantalla);
+  if (avisos.length > 0) lineas.push("", `Atención: ${avisos.join(" ")}`);
+  return lineas.join("\n");
+}
+
+/**
+ * Sesiones de navegador que están grabando ahora mismo.
+ *
+ * Dos Chrome sobre el mismo `--user-data-dir` no conviven: el segundo se niega
+ * a arrancar o corrompe el perfil. Con el candado, la toma que llega segunda
+ * graba igual —con un perfil temporal y su login completo— y lo **dice** en el
+ * resultado. Fallar sería peor: el clip es lo que importa, la sesión reusada
+ * era sólo el atajo.
+ */
+const sesionesEnUso = new Set<string>();
+
+/** Sanea el nombre de sesión y toma el candado. Sin nombre, no hay sesión. */
+export function tomarSesion(crudo: unknown): {
+  perfil: string | null;
+  avisos: string[];
+  soltar: () => void;
+} {
+  const nombre = String(crudo ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40);
+  if (!nombre) return { perfil: null, avisos: [], soltar: () => {} };
+
+  const perfil = join(tmpdir(), "orq-sesiones", nombre);
+  if (sesionesEnUso.has(nombre)) {
+    return {
+      perfil: null,
+      avisos: [
+        `La sesión "${nombre}" ya está grabando otra toma, así que ésta usó un navegador ` +
+          `nuevo: si tu preparación salteaba el login, esta toma pudo salir en la pantalla ` +
+          `de acceso. Grabá de a una por sesión.`,
+      ],
+      soltar: () => {},
+    };
+  }
+  sesionesEnUso.add(nombre);
+  return { perfil, avisos: [], soltar: () => sesionesEnUso.delete(nombre) };
+}
+
+/**
  * Grabar un clip real del navegador.
  *
  * La preparación corre **fuera de cámara** —login, navegación, esperas— y la
  * grabación arranca recién sobre la pantalla lista: es lo que garantiza que un
  * clip nunca muestre el formulario de acceso ni un loader de entrada.
+ *
+ * Con `sesion`, el perfil del navegador **sobrevive entre llamadas** y el login
+ * deja de repetirse toma tras toma. Medido en una corrida real: once tomas de
+ * la misma escena repitieron los mismos seis pasos de acceso, casi seis minutos
+ * de reloj gastados en volver al mismo lugar. Eso no lo arregla un modelo más
+ * capaz —no es una decisión, es estado que se tiraba—; lo arregla no tirarlo.
  */
 function crearGrabarClip(storage: SkillStorage): RegisteredTool {
   return {
@@ -1399,7 +1579,9 @@ function crearGrabarClip(storage: SkillStorage): RegisteredTool {
       "escena (\"01-navegacion\") y después export_video_clips los empalma con la " +
       "narración del guion. La portada del video se graba como \"00-portada\" filmando " +
       "el HTML de la empresa con ir: \"salida://<ruta del html>\"; el empalme la antepone " +
-      "solo como apertura.",
+      "solo como apertura. Si vas a grabar varias tomas de la misma aplicación, pasá " +
+      "'sesion': el navegador conserva el login entre clips y te ahorrás repetir el acceso " +
+      "en cada preparación.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1415,6 +1597,14 @@ function crearGrabarClip(storage: SkillStorage): RegisteredTool {
         colchon_segundos: {
           type: "number",
           description: "Cuánto sostener la pantalla final (default 2.5).",
+        },
+        sesion: {
+          type: "string",
+          description:
+            'Nombre de una sesión de navegador que se reusa entre clips, por ejemplo "inspector". ' +
+            "En la PRIMERA toma incluí el login en la preparación; en las siguientes, con la misma " +
+            "sesión, arrancá directo en la pantalla que te interesa y salteate el login. Si la " +
+            "sesión venció, la toma falla en el primer paso: volvé a incluir el login una vez.",
         },
       },
       required: ["archivo", "acciones"],
@@ -1462,11 +1652,15 @@ function crearGrabarClip(storage: SkillStorage): RegisteredTool {
         return fail("grabar_clip: 'acciones' está vacío: no hay nada que filmar.");
       }
       const colchon = Number(args.colchon_segundos ?? 2.5);
+      const sesion = tomarSesion(args.sesion);
 
       const temporal = await mkdtemp(join(tmpdir(), "orq-grabar-"));
       let grabacion = null as Awaited<ReturnType<typeof abrirGrabacion>> | null;
       try {
-        grabacion = await abrirGrabacion({ ...(ctx.signal ? { signal: ctx.signal } : {}) });
+        grabacion = await abrirGrabacion({
+          ...(ctx.signal ? { signal: ctx.signal } : {}),
+          ...(sesion.perfil ? { perfil: sesion.perfil } : {}),
+        });
         const toma = await grabacion.grabar(
           { preparacion, acciones, colchon: Number.isFinite(colchon) ? colchon : 2.5 },
           temporal,
@@ -1480,7 +1674,8 @@ function crearGrabarClip(storage: SkillStorage): RegisteredTool {
           folder: CARPETA_CLIPS,
           bytes,
         });
-        const problemas = toma.avisos.length > 0 ? ` Atención: ${toma.avisos.join(" ")}` : "";
+        const avisos = [...toma.avisos, ...sesion.avisos];
+        const problemas = avisos.length > 0 ? ` Atención: ${avisos.join(" ")}` : "";
         return ok(
           `Clip grabado en ${guardado.path}: ${toma.segundos.toFixed(1)} segundos, ` +
             `${toma.cuadros.length} cuadros, ${Math.max(1, Math.round(guardado.sizeBytes / 1024))} KB. ` +
@@ -1497,6 +1692,7 @@ function crearGrabarClip(storage: SkillStorage): RegisteredTool {
       } finally {
         await grabacion?.cerrar().catch(() => undefined);
         await rm(temporal, { recursive: true, force: true });
+        sesion.soltar();
       }
     },
   };
@@ -1781,6 +1977,8 @@ export function createSkillTools(
           // La grabación de clips maneja el mismo Chrome; sin navegador tampoco
           // hay clips que empalmar, así que el par entero queda afuera.
           crearGrabarClip(storage),
+          // Reconocer y filmar en el mismo navegador: van juntas o no van.
+          crearExplorarPantalla(storage),
           crearVideoClips(storage, { ...opciones, generadorImagenes: generador }),
         ]
       : []),

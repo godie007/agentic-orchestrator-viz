@@ -106,6 +106,8 @@ export class ClaudeCodeProvider implements LlmProvider {
   readonly id: ProviderId = "claude-code";
   readonly label = "Claude Code (suscripción)";
   readonly timeoutMs = CORTE_MS;
+  /** Corre su propio agent loop: el motor le presta el puente MCP del org. */
+  readonly delegaElTurno = true;
 
   private readonly command: string;
   private readonly workspace: string;
@@ -266,6 +268,22 @@ export class ClaudeCodeProvider implements LlmProvider {
           });
           return;
         }
+
+        // El CLI cerró con error, pero el agente pudo haber trabajado igual.
+        // Medido: un verificador hizo 27 llamadas, escribió su entregable y
+        // movió su tarea; falló su última llamada, el CLI cortó a las 33 vueltas
+        // y el turno entero se registró como fallido y sin resumen. Peor: ese
+        // fallo alimenta el medidor de dificultad, así que el turno siguiente
+        // escalaba a un modelo más caro por un fracaso que no ocurrió.
+        const rescatado = ultimoTextoDeAsistente(stdout);
+        if (rescatado) {
+          resolve({
+            texto: `${rescatado}\n\n${AVISO_DE_CIERRE_FORZADO}`,
+            uso: resultEvt?.uso ?? { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 },
+            costoUsd: resultEvt?.costoUsd ?? null,
+          });
+          return;
+        }
         // El diagnóstico tiene que sobrevivir al fallo. Cuando el CLI muere sin
         // emitir un `result` —MCP que no levanta, modelo no disponible, límite
         // de uso— el código de salida solo no dice nada, y una corrida entera
@@ -383,6 +401,50 @@ function lastResult(stdout: string): ResultadoCli | null {
   return last;
 }
 
+/**
+ * Lo que el agente alcanzó a decir, aunque el CLI haya terminado mal.
+ *
+ * El stream trae un evento por mensaje; los del asistente llevan su texto
+ * adentro de `message.content`. Se busca el último con contenido real porque es
+ * el resumen del turno: lo que el agente le iba a contar a la organización.
+ */
+export function ultimoTextoDeAsistente(stdout: string): string | null {
+  let ultimo: string | null = null;
+  for (const linea of stdout.split("\n")) {
+    const cruda = linea.trim();
+    if (!cruda) continue;
+    try {
+      const evento = JSON.parse(cruda) as {
+        type?: string;
+        message?: { model?: string; content?: Array<{ type?: string; text?: string }> };
+      };
+      if (evento.type !== "assistant") continue;
+      // Los `<synthetic>` los fabrica el propio CLI al cortar: no son del agente.
+      if (evento.message?.model === "<synthetic>") continue;
+      const texto = (evento.message?.content ?? [])
+        .filter((parte) => parte.type === "text" && parte.text?.trim())
+        .map((parte) => parte.text!.trim())
+        .join("\n\n");
+      if (texto) ultimo = texto;
+    } catch {
+      continue;
+    }
+  }
+  return ultimo;
+}
+
+/**
+ * Lo que se le agrega al texto de un turno que el CLI cerró con error.
+ *
+ * Va pegado al texto porque es lo único que la organización lee: un resumen a
+ * medias sin aviso se lee como trabajo terminado, y el que sigue en la cadena
+ * arranca sobre algo incompleto.
+ */
+const AVISO_DE_CIERRE_FORZADO =
+  "⚠️ EL CLI CERRÓ ESTE TURNO ANTES DE TIEMPO (agotó sus vueltas internas o falló su última " +
+  "llamada). Lo de arriba es lo que alcancé a hacer, no necesariamente el trabajo completo: " +
+  "revisá qué quedó a medias y retomo en el ciclo siguiente.";
+
 /** Render de la conversación a un prompt plano para el CLI. */
 function render(messages: ChatMessage[]): string {
   const parts: string[] = [];
@@ -469,7 +531,7 @@ function cap(value: string): string {
  * últimas líneas y cada una a lo suyo, porque esto va a un mensaje de error
  * que alguien tiene que poder leer.
  */
-function ultimoAliento(stdout: string): string {
+export function ultimoAliento(stdout: string): string {
   const lineas = stdout
     .split("\n")
     .map((linea) => linea.trim())

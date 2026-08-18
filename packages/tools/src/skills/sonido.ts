@@ -20,8 +20,23 @@
  * deja una inaudible y la otra encima de la voz. Se normaliza a una sonoridad
  * objetivo y recién ahí se la acuesta bajo la narración: así **cualquier** pista
  * que dejes en la biblioteca suena igual de presente.
+ *
+ * Y el número es el resultado de medir dos veces y errarle a las dos.
+ *
+ * Con −26 y ducking `ratio=10` la cama quedaba en −40 dB: inaudible, y el video
+ * parecía sin música. Corregir el ducking y subir a −20 la puso **encima de la
+ * narración**: medido sobre el video terminado, los pasajes de música sola
+ * quedaban a −24 dB contra picos de voz a −20, o sea apenas 4-5 dB de
+ * diferencia. Una cama de fondo tiene que estar 10-12 dB por debajo de la voz;
+ * a 4-5 no acompaña, compite.
+ *
+ * El número correcto sale de esa cuenta, no del gusto: con el ducking ya
+ * arreglado (`ratio=4`), −26 deja los pasajes instrumentales alrededor de −30 y
+ * la cama bajo la voz cerca de −34. Se escucha cuando la voz calla y no pelea
+ * cuando habla. **Verificalo midiendo el valle entre dos frases**, nunca el
+ * promedio del video ni la cola, que trae el fade y siempre da bajo.
  */
-export const MUSICA = { lufs: -20, entrada: 2.5, salida: 3.5 } as const;
+export const MUSICA = { lufs: -26, entrada: 2.5, salida: 3.5 } as const;
 
 /**
  * Cuánto se aparta la cama cuando alguien habla.

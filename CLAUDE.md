@@ -283,6 +283,19 @@ siguiente antes que su voz). Los clips se atan por número como las láminas
 aviso**, y el pasaje es un corte, no un encadenado: en un tutorial el corte es
 el lenguaje. Sin navegador, el par entero no se registra.
 
+**El login no se repite: la sesión del navegador se reusa.** `grabar_clip` acepta
+`sesion` y con ese nombre el perfil de Chrome **sobrevive entre llamadas**
+(`abrirGrabacion({perfil})`, que además no lo borra al cerrar). Sin eso, cada
+toma abría un perfil nuevo y volvía a iniciar sesión: medido en una corrida
+real, once tomas de la misma escena repitieron los mismos seis pasos de acceso,
+casi seis minutos de reloj. Es la clase de costo que un modelo más capaz **no**
+baja —no es una decisión, es estado que se tiraba—. Dos cuidados: dos Chrome
+sobre el mismo `--user-data-dir` no conviven, así que hay un candado por nombre
+y la toma que llega segunda graba con un perfil temporal **y lo dice** (fallar
+sería peor: el clip es lo que importa, la sesión era el atajo); y una sesión
+vencida hace fallar la toma en el primer paso, que es la señal de volver a poner
+el login una vez.
+
 La **portada es el clip `00-…`** y es el visual de la escena del `#`; los clips
 numerados se atan al **ordinal de las escenas `##`, sin contar la portada** —
 numerarlas juntas fue un bug que corrió un video entero una escena—. La duración
@@ -393,6 +406,59 @@ costado. Y cuando muevas una figura, acordate de mover los props: el teléfono y
 la vincha del auricular están en coordenadas absolutas de la caja, así que una
 persona que se corre seis unidades deja el teléfono flotando en el aire.
 
+**Lo que entra a un turno delegado se acota en la puerta, porque después no se
+puede.** El motor ya se defiende del contexto cuadrático con
+`compactarConversacion`, pero esa defensa actúa sobre **su** conversación, y los
+proveedores que delegan (`claude-code`, `opencode`) no tienen una: corren su
+propio loop y el motor ve una sola iteración. La regla se invierte al cruzar esa
+frontera — en el loop propio se compacta *después*, cuando el resultado ya se
+consumió; en el delegado no hay un después, así que `acotar.ts` corta al entrar.
+Tres frenos, todos en `claude-mcp.ts`, medidos sobre corridas reales de seis
+agentes que gastaron 21,1M de tokens de entrada para 132k de salida (160:1, con
+96-100% servido desde caché — el caché abarata pero **no exime**: bajo
+suscripción esos tokens consumen la ventana igual):
+
+1. **Memo de lecturas.** El del loop no llegaba acá. Una relectura idéntica
+   devuelve un puntero: el contenido sigue más arriba en la conversación del CLI.
+2. **Tope de tamaño** (`TOPE_RESULTADO`, 16.000 caracteres). El número sale de
+   los datos y no del gusto: el entregable más grande de la empresa medida son
+   11.127 caracteres y la mediana 3.881, así que ninguna lectura de trabajo se
+   toca y sí se cortan listados, volcados de navegador y documentos patológicos.
+   El aviso de recorte **ofrece sólo argumentos que la herramienta declara**
+   (leídos de su esquema): sugerir `start` o `page` es lo que ya costó 534k
+   tokens de entrada para 2k de salida.
+3. **Freno por largo de delegación** (aviso a las 50 llamadas, tope a las 80), y
+   es el que más pega. El costo de un turno delegado es **cuadrático en su
+   largo**; medimos turnos de 145, 112 y 108 llamadas contra una mediana de 21.
+   Pasado el tope se niegan las **lecturas** y se dejan pasar las escrituras: lo
+   que alarga un turno es explorar y lo que lo cierra es entregar, así que negar
+   todo le sacaría al agente la posibilidad de guardar lo que ya averiguó.
+   Proyectado sobre los 16 turnos reales: 35,7% menos caracteres reenviados,
+   **sin tocar 13 de ellos** — sólo corta la cola patológica.
+
+Los dos primeros no ahorraron nada en las corridas medidas y eso está bien: son
+seguros contra una patología documentada que hoy no ocurre porque los agentes
+leen por secciones y los entregables son chicos. Un seguro que no se cobra
+todavía no es un seguro que sobra.
+
+**Reconocer y filmar tienen que pasar en el mismo navegador.** `explorar_pantalla`
+(`skills/index.ts`, sólo con Chrome presente) recorre una pantalla sin filmarla
+usando la **misma `sesion`** que `grabar_clip`: mismo perfil, o sea el mismo
+login, mismo lienzo de 1920×1080 y el mismo motor de acciones. Antes el
+reconocimiento iba por el MCP de navegador —otro Chrome, otra sesión, otro
+tamaño— y lo verificado no era lo que veía la cámara; encima cada `browser_find`
+devolvía media página al contexto. Esto devuelve texto acotado (4.000 caracteres)
+y, sobre todo, dice de cada texto si es **estable**: uno que aparece y se borra
+es un loader y no sirve como ancla de `esperar_texto`. Descubrirlo acá cuesta un
+segundo; descubrirlo filmando cuesta la toma. Playwright queda para lo que el
+motor de clips no hace: **crear los datos de demo** y leer consola y red.
+
+Una trampa que costó una hora: el código que se evalúa en la página viaja adentro
+de un template literal, así que **una barra sin escapar se la come el template** —
+la regex de espacios llegaba como `/s+/g` y le comía las eses a cada palabra
+("Orquestador" volvía "Orque tador")— y un backtick ahí adentro cierra el
+template y rompe el archivo. Los comentarios sobre ese código van **afuera**.
+
 **El logo va chico y quieto**, en `marca/logo.png` dentro del directorio de la
 empresa —una ruta fija, no una opción de configuración: se sube por la misma
 pestaña que todo lo demás—. Grande en la portada, discreto en la esquina del
@@ -470,6 +536,18 @@ con un pico de música encima) y `release=300` para que la cama vuelva **entre
 frase y frase**, que es cuando una cama se tiene que oír. Verificalo midiendo
 el hueco entre dos frases, no el promedio del video ni la cola (ahí está el
 fade out y siempre da bajo).
+
+**Le erramos dos veces al nivel de la cama, en direcciones opuestas.** Primero
+−26 LUFS con ducking `ratio=10` la dejó en −40 dB: inaudible. Corregido el
+ducking, subirla a −20 la puso a 4-5 dB de la voz, o sea compitiendo. El número
+sale de una cuenta y no del gusto: **una cama va 10-12 dB por debajo de la
+narración**, y con `ratio=4` eso es −26 LUFS. Medido sobre el video terminado,
+renderizando el mismo guion con y sin música: bajo la voz la cama aporta entre
++0,1 y +0,5 dB —o sea nada— y en los huecos entre frases, +3 a +5 dB, que es
+justo donde una cama tiene que oírse. Bajar más no la hace más sutil, la hace
+desaparecer: a −30 el aporte se vuelve indistinguible del ruido de la mezcla.
+**La prueba que vale es renderizar dos veces, con y sin música, y restar**; medir
+sólo el video mezclado no distingue una cama alta de una voz alta.
 
 **La cama se mide en sonoridad, no en volumen.** Un `volume` fijo no significa
 nada: una pista comprada llega a −14 LUFS y una sintetizada a −24, así que el
@@ -690,6 +768,19 @@ hace polling. "Ver en vivo" y "retroceder en el timeline" son la misma operació
 Un paso que no emite evento es un paso invisible: agregá la variante en
 `packages/shared/src/events.ts`.
 
+**Un CLI que cierra mal no significa que el agente no haya trabajado.** Los dos
+proveedores que delegan rescatan lo que alcanzaron a producir: `opencode` cuando
+se corta por tiempo (`hayTexto`) y `claude-code` cuando el CLI termina con
+`is_error` (`ultimoTextoDeAsistente`). Sin eso el turno se registra como fallido
+y **sin resumen** aunque el trabajo esté hecho: medido, un verificador hizo 27
+llamadas, escribió su entregable y movió su tarea; falló su última llamada, el
+CLI cortó a las 33 vueltas y se perdió el turno entero. El costo no es sólo el
+resumen — un fallo alimenta `fallosConsecutivos`, así que el medidor de
+dificultad escala el turno siguiente a un modelo más caro por un fracaso que no
+ocurrió. Los mensajes `<synthetic>` se saltean: los fabrica el propio CLI al
+cortar, no son del agente. Y el texto rescatado va con su aviso pegado, porque
+un resumen a medias sin aviso se lee como trabajo terminado.
+
 **Emití `agent.turn_end` en `finally`.** Si un turno falla y no lo emite, el nodo
 del organigrama queda "pensando…" para siempre.
 
@@ -717,6 +808,57 @@ agentes que se escriben sin parar y que igual corren una sola vez cada uno.
 tiene un pedido sin contestar —ese bloqueo se propaga—, después el peso del
 trabajo propio, y al final quien viene encadenando errores. Con la concurrencia
 acotada, ese orden decide el ciclo.
+
+**Lo que la empresa sabe vive en dos lugares, y la línea la fija la aritmética.**
+La memoria corta —una lección de un párrafo— sigue en la base y viaja en el
+prompt de cada turno; lo largo vive en un **vault de Obsidian** por empresa
+(`ContextoStore`, `CONTEXTO_DIR`, una rama por empresa) y se abre con
+`leer_contexto` sólo cuando hace falta. No es gusto: medido acá, una llamada a
+herramienta dentro de un turno delegado cuesta **una iteración entera**, o sea
+20.000 a 28.000 tokens de prefijo reenviado, así que por debajo de ~800
+caracteres sale más barato **mandar** que ir a buscar, y por encima, al revés.
+El **mapa** del árbol viaja en el prompt y el contenido no: medido en la empresa
+del video, 465 tokens de mapa apuntan a 59.743 caracteres de conocimiento — 32 a
+1. El mapa se acota por tamaño y no sólo por cantidad, misma lección que la
+memoria.
+
+**Una nota tiene que ser legible *desde Obsidian*, no sólo desde un `cat`.**
+Tres cosas que no son cosméticas: **línea en blanco antes de cada `##`** —sin
+ella markdown no lo toma como encabezado y la nota sale como un bloque de texto
+plano—, **frontmatter** con empresa, tema, cantidad y fecha, que es lo que
+Obsidian muestra como propiedades y lo que hace el vault filtrable, y
+**enlaces**. Sin `[[…]]` entre notas el grafo es una estrella desde el índice y
+no dice nada: las notas se enlazan con las de su misma familia —la primera
+palabra del tema, así `inspia:escena-8` encuentra a `inspia:escena-9`— y todas
+vuelven al índice. Medido al arreglarlo: de 20 enlaces a 258, y de 0 notas con
+propiedades a 24. La fecha entra formateada desde el llamador, como en el render
+de documentos: el renderizador no tiene reloj.
+
+**La memoria nueva llega sola al árbol.** `record_lesson` de un agente y el alta
+por API de una persona **espejan las dos** (`Runtime.espejarAprendizajes`): si
+sólo espejara la primera, lo que carga una persona no aparecería en Obsidian y
+el vault mentiría por omisión. Se reescribe la nota del tema entera, no se
+agrega al final, así la nota se lee como un documento y no como un log.
+
+**El vault NO pasa por el plugin de Obsidian, y eso es la decisión.** Un vault es
+una carpeta con markdown: escribirlo por el filesystem evita una segunda
+instancia de Obsidian, un segundo puerto y un segundo token — y sobre todo evita
+que el contexto **dependa de que una aplicación de escritorio esté abierta**,
+que ya nos falló media tarde. Es la regla de ffmpeg, Kokoro y Chrome: usar lo que
+hay y degradar con aviso. Obsidian queda como visor y editor, que es donde
+aporta: el grafo, la búsqueda y poder **corregir a mano** lo que el sistema
+aprendió mal. `escribir_contexto` reemplaza la nota entera, así que quien
+escribe último decide; lo que edita una persona se lee tal cual hasta que un
+agente lo reescriba.
+
+Dos cuidados: la ruta que propone un modelo se sanea segmento por segmento
+(`ExportStore.safePath`) y se le fuerza `.md`, porque un `.txt` en el medio no se
+indexa, no entra en el grafo y rompe los enlaces `[[…]]`; y `buscar_contexto`
+devuelve **dónde** apareció, no el párrafo, por la misma razón que todo lo
+demás — lo que entra a un turno delegado se reenvía en cada vuelta.
+`npx tsx scripts/vault-contexto.ts <companyId>` vuelca la memoria de la base al
+árbol: en la empresa medida había 58 lecciones y entraban unas diez, así que 48
+existían sin que ningún agente pudiera verlas ni pedirlas.
 
 **Los entregables sobreviven a que se borre su corrida.** `artifacts.company_id`
 existe para eso, y `listArtifactsByCompany` filtra por ahí en vez de unir con
@@ -783,6 +925,57 @@ Cuando sale un modelo nuevo, se agrega una fila a `PRECIOS_CLAUDE` y listo. En
 `claude-code` el costo sigue en 0 a propósito: la suscripción no factura por
 token.
 
+**`opencode` es la segunda suscripción, y se integra como la primera.**
+`packages/llm/src/adapters/opencode.ts` delega el turno entero al CLI de
+opencode, igual que `claude-code`: el motor ve cero `tool_calls` y corta en la
+primera iteración. Qué credencial usa lo decide `opencode auth login` —el plan
+de Zen, una sesión de Anthropic, Copilot, una API key propia—, así que **el
+catálogo depende de la máquina**: sale de `opencode models` (428 slugs acá) y no
+de una tabla. Tres cosas que no se ven leyendo el archivo. Los slugs **ya vienen
+namespaceados** (`opencode/claude-sonnet-5`, `zai/glm-5`) y se guardan tal cual:
+volver a prefijarlos con el id del proveedor daba `opencode/opencode/…`, que el
+CLI no conoce. Los tiers salen del mapa curado de `modelos-claude.ts` con listas
+que **cruzan proveedores** (Zen → Anthropic → Copilot, gana el primero que
+exista), porque sin precios las bandas no resuelven ni uno; `free` va a los que
+Zen marca con sufijo `-free` (`opencode/deepseek-v4-flash-free`), que es el
+único tier afirmable sin saber en qué plan está la cuenta — y el que deja probar
+una empresa entera con la credencial sin saldo. Y el costo
+que informa el CLI **no** se reporta por default (`ORQ_OPENCODE_COSTO=1` lo
+prende): bajo un plan dispararía `budgetUsd` cortando corridas que no cuestan
+dinero, pero con créditos por uso el gasto es real y ahí conviene contarlo.
+
+**Un turno delegado que se corta por tiempo no puede tirar el trabajo.** La
+salida del CLI llega **recién al final**, así que un corte a mitad de camino se
+lleva el turno entero: lo medimos con un agente que hizo 31 llamadas útiles
+—leer entregables, loguearse, navegar hasta la no conformidad, sacar la captura—
+y murió a los diez minutos sin dejar ni un resumen. Ahora, si alcanzó a emitir
+texto, ese texto vuelve como resultado con `AVISO_DE_CORTE` pegado (va en el
+texto y no en un campo aparte porque es lo único que la organización lee: un
+resumen a medias sin aviso se lee como trabajo terminado). Y el corte de
+`opencode` es de **veinte** minutos, no los diez de Claude Code: los modelos
+gratuitos van en cola y son lentos, así que copiar aquel número era garantizar la
+muerte por tiempo. Se ajusta con `OPENCODE_TIMEOUT_MS`.
+
+**La configuración de opencode se fusiona, no se reemplaza.** El turno escribe
+su propio `OPENCODE_CONFIG`, pero la del usuario (`~/.config/opencode/`) sigue
+en pie: sus servidores MCP globales también le llegarían al agente, y con ellos
+una vía de escribir que el org no ve. Por eso el agente del turno arranca con
+`"*": false` y habilita sólo lo suyo — las de lectura, y las del org, que
+opencode nombra `<servidor>_<tool>` y se toman con `orq*`. La regla de sólo
+lectura sobre el directorio de la empresa es la misma que en Claude Code y por
+los mismos tres motivos, con un cuidado extra: se corre con `--auto` porque un
+pedido de permiso interactivo deja el proceso esperando para siempre —la falla
+de "un proveedor que no contesta cuelga la corrida"—, así que lo que no se
+quiere que pase se **niega** explícito (`edit`, `bash`) en vez de dejarse en
+"preguntar". `configDelTurno` y `construirArgs` están exportadas justo para
+poder fijarlo con tests.
+
+**Qué proveedores delegan es una propiedad del proveedor, no una lista en el
+motor.** `LlmProvider.delegaElTurno` es lo que hace que `loop.ts` les preste el
+puente MCP del org (`claude-mcp.ts`, que es agnóstico del CLI: lo único que
+cambia es cómo cada uno declara el servidor). Antes era `provider.id ===
+"claude-code"`, y con eso sumar un CLI obligaba a tocar el motor.
+
 **Una empresa creada por la API tiene que sembrar sus herramientas**
 (`Runtime.sembrarHerramientas`, en `POST /api/companies`). Es el mismo problema
 que el seed: sin filas en `tools`, `role.toolIds` no puede apuntar a nada y el
@@ -830,11 +1023,137 @@ hace y su `title` explica cuándo conviene. Solo una corrida `running` no se pue
 borrar, y al borrarla hay que soltarla del runtime (`olvidarCorrida`) o queda un
 orquestador vivo escribiendo eventos de algo que ya no existe.
 
+**En un turno delegado, la cantidad de llamadas pesa más que el tamaño de cada
+resultado.** El costo de un loop de agente es cuadrático en su largo —cada
+vuelta reenvía el prefijo entero, 20.000 a 28.000 tokens—, así que devolver un
+índice para que el agente pida 18 secciones cuesta **dos órdenes de magnitud
+más** que mandar el documento de una vez: 18 vueltas contra ~5.000 tokens.
+Medido acá: 132 lecturas sobre 298 llamadas de un ciclo, con un informe leído
+entero, sección por sección, una vez por turno — 90 lecturas del mismo
+documento en cinco turnos. Por eso `TOPE_ENTERO` pasó de 4.000 a **15.000**
+caracteres (la default es el documento entero, el recorte es la excepción — el
+mismo criterio que la herramienta `Read` de un agente de código) y `seccion`
+acepta **varias separadas por coma**. El techo no es libre: lo que entra a un
+turno delegado se acota a `TOPE_RESULTADO` (16.000) en `acotar.ts`, así que
+mandar más sería mandar algo que llega cortado. **Los dos números están
+acoplados**; si movés uno, mirá el otro.
+
+Lo que **no** hay que hacer es memoizar la relectura *entre* turnos. El memo por
+turno ya existe (`claude-mcp.ts`) y funciona; entre turnos la conversación del
+CLI se reinicia, así que releer es legítimo y devolver un puntero ahí le sacaría
+al agente un documento que ya no tiene. La relectura no es el problema: el
+problema era que cada lectura costaba 18 viajes.
+
+**Para buscar se parte el documento; para mostrarlo, no.** `bloques()`
+(`busqueda.ts`) corta los tramos de más de 1.200 caracteres y **repite el
+título en cada uno** —para puntuar un fragmento alcanza y sobra— pero usarla
+para el índice de `read_artifact` miente dos veces, y las dos las pagamos en la
+misma corrida. Un informe de **18 encabezados se anunciaba como 23 secciones**,
+con cinco títulos apareciendo dos veces; dos agentes leyeron eso como
+encabezados duplicados y gastaron nueve llamadas fallidas más una reescritura
+entera del documento en corregir un archivo que estaba sano. Y al rearmar el
+texto de una sección había que reponer los `#` a mano, con `##` fijo: en la
+costura entre dos tramos aparecía un `## Resumen ejecutivo` **que el documento
+no tiene**, el agente lo copiaba a un `buscar` —hacía bien: es lo que le
+mostramos— y `edit_artifact` no lo encontraba nunca. `secciones()` corta por
+encabezados reales, conserva el nivel (`###` sigue siendo `###`) y devuelve un
+**recorte literal**, que es lo único que se puede copiar a un `buscar`. Cuando
+la lectura muestra varias secciones seguidas lo **avisa**: en el documento no
+van necesariamente juntas, y pegarlas describe un texto que no existe.
+
+El corolario vale para cualquier herramienta: **si un agente concluye que una
+herramienta está rota, sospechá primero de lo que la herramienta le mostró.**
+Acá la lección quedó grabada en la memoria de la empresa —"`edit_artifact` no
+sirve para multilínea, reescribí el documento entero"— y de ahí en más iba a
+inducir el gasto en todas las corridas siguientes. Un falso positivo persistido
+es peor que el error que lo causó.
+
+**Borrar una lección también se espeja al vault.** El alta llamaba a
+`espejarAprendizajes` y la baja no, así que Obsidian conservaba entera una
+lección ya borrada de la base — el vault mentía por comisión, que es peor que
+por omisión: nadie sospecha de una nota que está ahí. Y un tema que se queda
+sin lecciones se **borra**: reescribir la nota no alcanza cuando no queda nada
+que escribir.
+
+**La fila de un servidor MCP serializa, pero no espacia.** Son cosas distintas
+y el límite de tasa pide la segunda: dos agentes del mismo ciclo salen uno
+detrás del otro y, si el primero contesta en medio segundo, las dos llamadas
+caen dentro del mismo segundo. Con Brave en plan Free —una consulta por
+segundo— eso es un 429 garantizado, y lo medimos con dos búsquedas estampadas
+en el mismo segundo: la primera con resultados, la segunda rechazada. El
+reintento va **dentro** de la fila (`bridge.ts`): esperar afuera dejaría entrar
+otra llamada en el hueco, contra el mismo límite. Se reconoce por el **texto**
+—un servidor MCP no devuelve códigos, devuelve el mensaje que armó con la
+respuesta de su API— y se le hace caso al `retry-after` cuando viene, acotado
+para que uno disparatado no congele la fila. Dos reintentos y no más: si el
+límite es de cuota diaria y no de tasa, insistir no lo arregla y sólo demora el
+turno del resto.
+
+**Lo que editás en la configuración tiene que llegar a la corrida que está
+andando.** Para el borrado ya estaba resuelto (`removeRoleFromLiveRuns`); para
+la edición no, y ahí el síntoma es peor porque **nada falla**:
+`Runtime.actualizarRolEnCorridasVivas` (enganchado al guardado de roles) refleja
+el rol editado en cada corrida viva e **incorpora al catálogo de la corrida** las
+herramientas nuevas antes de otorgarlas —un `toolIds` que apunta a algo que la
+corrida no tiene en catálogo no le agrega nada al agente; lo ejecutable ya está,
+porque el `ToolRegistry` es el de la empresa y lo comparten—. Lo medimos con
+Brave instalado desde la tienda, conectado y `ready`, con sus dos tools
+otorgadas a los tres roles: la base impecable, cero invocaciones, y una corrida
+entera insistiendo con `web_search` —que su proveedor no soporta— teniendo al
+lado el servidor que sí podía buscar. Ojo con el otro lado del mismo hueco: la
+tienda instala **sin otorgarle a nadie**, así que después de instalar hay que
+asignar las herramientas a un rol o no las usa nadie.
+
+**Qué corrida se puede continuar es una sola pregunta, y tenía tres respuestas
+distintas.** `esCorridaTerminal` (`packages/shared/src/schema.ts`) es la única
+lista de estados de los que una corrida no vuelve; la usan el motor, el servidor
+y la UI. Antes cada lado la escribía por su cuenta y en negativo —"todo lo que no
+sea `running`, `paused` o `idle`"— y así `awaiting_approval` caía entre las
+terminadas: la pantalla decía "terminada" y ofrecía **borrar** una corrida que
+sólo esperaba una respuesta. Por lo mismo el freno de borrado usa
+`Runtime.sePuedeContinuar` (en memoria y no terminal) y no `estaViva` (sólo
+`running`): con `estaViva`, "limpiar terminadas" se llevaba puestas las
+pausadas.
+
+**Pausar es un pedido, no un estado.** En modo continuo el estado no alcanza:
+entre ciclo y ciclo ya es `paused`, y el bucle arrancaba el siguiente igual —el
+botón parpadeaba y la corrida seguía, así que la única forma de frenar era
+terminarla, que no se puede continuar—. `Orchestrator.pause` deja
+`pauseRequested` y `runContinuous` lo mira antes de cada ciclo; `tick()` y
+`runContinuous()` lo limpian al entrar, porque avanzar es la contraorden de
+pausar y una pausa vieja no puede frenar el ciclo que alguien pidió después. El
+turno en vuelo no se aborta: la pausa se hace efectiva al cerrar el ciclo, que
+es lo que promete el botón. `awaiting_approval` no se pisa con `paused`: esa
+espera ya frena la corrida y su motivo es lo único que explica por qué no
+avanza. Y `Runtime.pause` **persiste** el snapshot como `stop`, o la fila queda
+en `running` y una caída la deja informando que avanzaba.
+
+**Contestar reanuda, apruebes o respondas.** `reanudarSiEsperaba` corre también
+desde `paused` y mira las dos cosas pendientes —solicitudes y aprobaciones—,
+porque resolver la última aprobación deja la corrida en `paused`: sin eso,
+aprobar no hacía nada visible y había que apretar "continuar" a mano, que es
+justo lo que esa función existe para evitar.
+
 ## Trampas conocidas
 
 - **`active.run` queda viejo.** El estado autoritativo de una corrida es
   `orchestrator.snapshot`; `active.run` no se actualiza al pausar o detener, y
   leerlo hacía que una corrida ya detenida dijera "está en curso".
+- **Una promesa sin dueño mata el servidor entero.** `POST /runs/:id/resume`
+  contesta sin esperar —retomar dura minutos— y hacía `void runtime.resume(id)`:
+  al pedirlo sobre una corrida que no sobrevivió a un reinicio, el `throw` salía
+  por una promesa rechazada sin manejar y **Node se cae**, llevándose puestas
+  las corridas que sí estaban trabajando. Lo pagamos dos veces en la misma
+  tarde. Ahora se valida antes con `Runtime.estaEnMemoria` (que no es
+  `estaViva`: una pausada no corre y sí se puede continuar) y el `void` lleva su
+  `.catch`. Cualquier otro fire-and-forget del servidor necesita las dos cosas.
+- **Los entregables no tienen `updatedAt`.** Sólo `createdAt` y `version`.
+  Ordenar por `updatedAt` para encontrar "el último" deja todos los valores en
+  `undefined`, el orden queda como salió de SQLite y se trabaja sobre una
+  versión vieja sin que nada falle. Lo pagamos renderizando un guion viejo
+  encima del entregable bueno: el video salió de 1m32s en vez de 2m54s y el
+  único síntoma fue la duración. Se ordena por `version` y, a igual versión, por
+  `createdAt`.
 - **Las corridas no sobreviven a un reinicio del servidor.** El estado vivo está
   en memoria; la traza queda persistida, así que podés reproducir una corrida
   vieja pero no continuarla.

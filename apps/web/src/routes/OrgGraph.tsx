@@ -13,6 +13,7 @@ import {
 } from "@xyflow/react";
 import type { Department, Role } from "@orq/shared";
 import { MESSAGE_COLOR, type DerivedState } from "../lib/derive.js";
+import { ModeloBadge } from "../ui/index.js";
 
 /**
  * El organigrama como escenario vivo.
@@ -122,15 +123,27 @@ function AgentNode({ data }: NodeProps<Node<AgentNodeData>>) {
           style={{ background: color }}
           title={department?.name ?? "sin área"}
         />
-        {thinking ? (
-          <span className="truncate text-[10px] font-medium text-accent">
-            {tool ? `⚙ ${tool.replace(/^mcp__/, "")}` : "pensando…"}
-          </span>
-        ) : (
-          <span className="truncate font-mono text-[10px] text-ink-faint">
-            {activity?.modelSlug?.split("/").pop() ?? role.model.tier}
-          </span>
-        )}
+        <span className="min-w-0 flex-1 truncate text-[10px] font-medium">
+          {thinking ? (
+            <span className="text-accent">
+              {tool ? `⚙ ${tool.replace(/^mcp__/, "")}` : "pensando…"}
+            </span>
+          ) : (
+            <span className="text-ink-faint">{activity?.turns ? "en espera" : "sin correr"}</span>
+          )}
+        </span>
+        {/* El modelo se muestra **siempre**, también mientras piensa: es justo
+            cuando importa saber si el turno lo está corriendo Opus o el modelo
+            gratis. Antes competía con la herramienta por el mismo renglón y
+            desaparecía durante todo el trabajo. Sin traza todavía, se muestra
+            lo que el rol tiene configurado. */}
+        <ModeloBadge
+          slug={activity?.modelSlug ?? role.model.modelSlug}
+          providerId={activity?.providerId ?? role.model.providerId}
+          tier={activity?.tier ?? role.model.tier}
+          escalado={activity?.escaladoPorDificultad ?? false}
+          motivo={activity?.motivoModelo ?? null}
+        />
       </div>
 
       <Handle

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { TraceEvent } from "@orq/shared";
+import { esCorridaTerminal, type RunStatus, type TraceEvent } from "@orq/shared";
 import { api, type CompanyBundle } from "../api.js";
 import { useRunStream } from "../lib/stream.js";
 import { derive, MESSAGE_COLOR, MESSAGE_LABEL, porcentajeCache, recentFlows } from "../lib/derive.js";
@@ -128,9 +128,7 @@ export function LiveProcess({ company }: { company: CompanyBundle }) {
   });
 
   /** Corridas que ya no van a avanzar: son las que se pueden limpiar. */
-  const terminadas = (runs.data ?? []).filter(
-    (item) => !["running", "idle", "paused"].includes(item.status),
-  ).length;
+  const terminadas = (runs.data ?? []).filter((item) => esCorridaTerminal(item.status)).length;
 
   const trasBorrar = (): void => {
     setRunId(null);
@@ -1526,9 +1524,13 @@ function Controles({
   const [confirmando, setConfirmando] = useState<"una" | "todas" | null>(null);
 
   const corriendo = estado === "running";
-  const detenible = corriendo || estado === "paused" || estado === "idle";
   // Una corrida terminada no vuelve: lo único que queda es leerla o sacarla.
-  const finalizada = estado != null && !detenible;
+  // La lista sale de `@orq/shared` porque acá estaba escrita al revés —todo lo
+  // que no fuera `running`, `paused` o `idle`— y eso metía `awaiting_approval`
+  // entre las terminadas: una corrida que sólo esperaba una respuesta decía
+  // "terminada" y ofrecía borrarla en vez de continuarla.
+  const finalizada = estado != null && esCorridaTerminal(estado as RunStatus);
+  const continuable = estado != null && !finalizada;
 
   if (confirmando) {
     const todas = confirmando === "todas";
@@ -1557,7 +1559,7 @@ function Controles({
 
   return (
     <div className="ml-auto flex flex-wrap items-center gap-1.5">
-      {!corriendo && detenible && (
+      {!corriendo && continuable && (
         <>
           <Button
             onClick={() => onAccion("tick")}

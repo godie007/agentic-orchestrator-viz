@@ -1,4 +1,4 @@
-import { bloques, buscarEnEntregables } from "./busqueda.js";
+import { buscarEnEntregables, secciones } from "./busqueda.js";
 import { calcular, verificarCifras } from "./calculo.js";
 import { parsearConfigMcp, type Role } from "@orq/shared";
 import { fail, ok, preview, type AgentWorkspace, type RegisteredTool } from "./types.js";
@@ -680,10 +680,18 @@ const editArtifact: RegisteredTool = {
       }
 
       if (veces === 0) {
+        // El consejo importa tanto como el error. Decir sólo "copialo tal cual
+        // de read_artifact" es impossible de cumplir para quien leyó el
+        // documento **por secciones**: dos secciones que la lectura muestra
+        // seguidas pueden estar lejos en el archivo, y un `buscar` que las une
+        // describe un texto que no existe. Es el caso que medimos, y ahí el
+        // agente concluyó que la herramienta estaba rota.
         return fail(
           `edit_artifact: el cambio ${i + 1} no encontró su texto en "${artifact.key}" v${artifact.version}. ` +
-            `Buscabas: "${preview(buscar, 120)}". Copialo tal cual sale de read_artifact —los ` +
-            `espacios y saltos de línea cuentan— o reescribí el documento con write_artifact. ` +
+            `Buscabas: "${preview(buscar, 120)}". Si lo armaste juntando lo que leíste en ` +
+            `secciones distintas, ese texto no existe seguido en el documento: apuntá a **una ` +
+            `sola línea** que sí esté ahí, o releé la sección con ` +
+            `read_artifact(key: "${artifact.key}", seccion: "…") y copiá de ahí. ` +
             `Los cambios anteriores no se aplicaron: nada quedó a medias.`,
         );
       }
@@ -767,16 +775,19 @@ const readArtifact: RegisteredTool = {
   readOnly: true,
   requiresApproval: false,
   description:
-    "Lee un entregable guardado. Si es largo te devuelve su índice en vez del " +
-    "texto completo: pedí después la sección que necesites con `seccion`, o " +
-    "buscá el dato con buscar_en_entregables. Traerte veinte mil caracteres para " +
-    "mirar una cifra te gasta el turno y el contexto.",
+    "Lee un entregable guardado. Si es muy largo te devuelve su índice en vez " +
+    "del texto completo: pedí entonces las secciones que necesites con " +
+    "`seccion` —podés pedir **varias de una vez**, separadas por coma— o buscá " +
+    "el dato puntual con buscar_en_entregables. Pedirlas de a una cuesta una " +
+    "vuelta entera por sección.",
   inputSchema: {
     type: "object",
     properties: {
       key: stringProp("Identificador del entregable"),
       seccion: stringProp(
-        "Opcional: el encabezado que querés, tal como figura en el índice. Parcial alcanza.",
+        "Opcional: el encabezado que querés, tal como figura en el índice. Parcial " +
+          "alcanza. Para varias, separalas con coma: pedirlas en una sola llamada " +
+          "cuesta una vuelta en vez de una por sección.",
       ),
     },
     required: ["key"],
@@ -793,12 +804,27 @@ const readArtifact: RegisteredTool = {
     }
 
     const encabezado = `# ${artifact.title} (v${artifact.version})`;
-    const partes = bloques(artifact.content);
+    // Por encabezados reales y no por `bloques`: ésa parte las secciones largas
+    // y repite su título en cada tramo, así que el índice inventaba secciones
+    // duplicadas y los agentes salían a corregir un documento que estaba bien.
+    const partes = secciones(artifact.content);
 
     // Una sección concreta: es lo que el modelo venía inventando con `start=`.
+    //
+    // Acepta **varias separadas por coma**, y no es una comodidad: en un turno
+    // delegado cada llamada cuesta una vuelta entera —el prefijo de la
+    // conversación se reenvía completo—, así que leer un informe de 18
+    // secciones de a una cuesta 18 vueltas. Lo medimos sobre una corrida real:
+    // 90 lecturas del mismo documento en cinco turnos, contra las 5 que
+    // hubieran alcanzado.
     if (args.seccion) {
-      const buscada = String(args.seccion).toLowerCase();
-      const elegidas = partes.filter((p) => p.titulo.toLowerCase().includes(buscada));
+      const pedidas = String(args.seccion)
+        .split(",")
+        .map((parte) => parte.trim().toLowerCase())
+        .filter(Boolean);
+      const elegidas = partes.filter((p) =>
+        pedidas.some((buscada) => p.titulo.toLowerCase().includes(buscada)),
+      );
       if (elegidas.length === 0) {
         const indice = partes.map((p) => p.titulo).filter(Boolean);
         return fail(
@@ -806,8 +832,22 @@ const readArtifact: RegisteredTool = {
             `${indice.join(" · ") || "ninguna, es un documento sin encabezados"}.`,
         );
       }
-      const texto = elegidas.map((p) => `## ${p.titulo}\n${p.texto}`).join("\n\n");
-      return ok(`${encabezado}\n\n${texto}`, `📖 ${artifact.title} › ${args.seccion}`);
+      // El texto va **literal**, con su encabezado y su nivel: es lo que hace
+      // que se pueda copiar a un `buscar` de edit_artifact y encontrarlo. Y se
+      // avisa que es un recorte, porque dos secciones que acá salen pegadas
+      // pueden estar lejos en el documento — pegarlas en un `buscar` describe
+      // un texto que no existe.
+      const texto = elegidas.map((p) => p.texto).join("\n\n");
+      const aviso =
+        elegidas.length > 1
+          ? `\n\n(Son ${elegidas.length} secciones que coinciden con "${args.seccion}", ` +
+            `mostradas una tras otra: en el documento no van necesariamente seguidas.)`
+          : "";
+      return ok(
+        `${encabezado}\n\nRecorte del entregable — ${elegidas.length === 1 ? "esta sección" : "estas secciones"}, ` +
+          `tal cual está escrita en el documento:\n\n${texto}${aviso}`,
+        `📖 ${artifact.title} › ${args.seccion}`,
+      );
     }
 
     // Un documento largo se devuelve como índice.
@@ -817,7 +857,22 @@ const readArtifact: RegisteredTool = {
     // la conversación se reinicia— y quedarse sin iteraciones antes de
     // verificar nada. Traer el índice cuesta cien veces menos y le dice qué
     // pedir después.
-    const TOPE_ENTERO = 4_000;
+    // Cuánto se manda entero antes de pasar al índice.
+    //
+    // Estaban 4.000 caracteres (~1.000 tokens), y con eso cualquier entregable
+    // de trabajo caía en el índice y se leía de a secciones: una vuelta por
+    // cada una. En un turno delegado eso se paga carísimo —el prefijo entero se
+    // reenvía en cada vuelta, 20.000 a 28.000 tokens— así que traer 15.000
+    // caracteres de una vez sale dos órdenes de magnitud más barato que
+    // pedirlos en 18 viajes. Es el mismo criterio que usa la herramienta `Read`
+    // de un agente de código: el archivo entero por defecto, el recorte como
+    // excepción.
+    //
+    // El techo no es arbitrario: lo que entra a un turno delegado se acota a
+    // `TOPE_RESULTADO` (16.000) en `acotar.ts`, así que mandar más sería mandar
+    // algo que llega cortado. Los dos números están acoplados — si movés uno,
+    // mirá el otro.
+    const TOPE_ENTERO = 15_000;
     const indice = partes.map((p) => p.titulo).filter(Boolean);
     if (artifact.content.length > TOPE_ENTERO && indice.length > 1) {
       return ok(
@@ -825,9 +880,10 @@ const readArtifact: RegisteredTool = {
           `Este entregable tiene ${artifact.content.length} caracteres, así que va su índice ` +
           `en vez del texto completo:\n\n` +
           indice.map((t) => `- ${t}`).join("\n") +
-          `\n\nPedí la que necesites con read_artifact(key: "${artifact.key}", seccion: "…"), ` +
-          `o si buscás un dato puntual usá buscar_en_entregables, que mira en todos los ` +
-          `entregables a la vez.`,
+          `\n\nPedí las que necesites con read_artifact(key: "${artifact.key}", seccion: "…"), ` +
+          `**varias separadas por coma en una sola llamada** —de a una cuesta una vuelta ` +
+          `entera por sección—, o si buscás un dato puntual usá buscar_en_entregables, que ` +
+          `mira en todos los entregables a la vez.`,
         `📖 ${artifact.title} v${artifact.version} — índice (${indice.length} secciones)`,
       );
     }

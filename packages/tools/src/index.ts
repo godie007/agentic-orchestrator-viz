@@ -2,6 +2,11 @@ export * from "./types.js";
 export * from "./registry.js";
 export * from "./router.js";
 export { coordinationTools } from "./coordination.js";
+export {
+  crearHerramientasDeContexto,
+  mapaDeContextoEnPrompt,
+  type ContextoStorage,
+} from "./contexto.js";
 export { capabilityTools, WEB_SEARCH_TOOL_NAME } from "./capability.js";
 export { createSkillTools, renderDocx, renderPdf, type SkillStorage } from "./skills/index.js";
 export {

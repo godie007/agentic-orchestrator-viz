@@ -346,6 +346,79 @@ describe("Orchestrator", () => {
   });
 
   /**
+   * Pausar tiene que frenar de verdad el modo continuo.
+   *
+   * `pause()` sólo cambiaba el estado, y el bucle de `runContinuous` no lo
+   * miraba: el ciclo siguiente volvía a poner `running` y la corrida seguía
+   * como si nada. Desde afuera el botón "pausar" parpadeaba y no hacía nada, y
+   * la única forma de frenar era terminar la corrida —que no se puede
+   * continuar—. Después de pausar, se retoma donde quedó.
+   */
+  it("pausar frena el modo continuo y después se puede continuar", async () => {
+    const { ceo, analista, run, state, bus } = buildScenario();
+
+    // Dos roles que se escriben sin parar: sin la pausa, esto corre hasta el
+    // límite de ciclos.
+    const provider = new FakeProvider((req) => {
+      if (alreadyActed(req)) return { text: "Listo." };
+      const actor = actorOf(req);
+      return {
+        text: "Sigo la cadena.",
+        toolCalls: [
+          {
+            name: "send_message",
+            arguments: {
+              to: actor === "Ana" ? "Bruno" : "Ana",
+              type: "request",
+              subject: "Seguimos",
+              body: "Devolveme esto para seguir.",
+            },
+          },
+        ],
+      };
+    });
+    const providers = new ProviderRegistry();
+    providers.register(provider);
+    const tools = new ToolRegistry();
+    for (const herramienta of coordinationTools) tools.register(herramienta);
+
+    const orchestrator = new Orchestrator(run, state, {
+      bus,
+      providers,
+      tools,
+      ledger: new RunLedger(run.budgetUsd),
+    });
+
+    await state.forActor(null).sendMessage({
+      toRoleId: ceo.id,
+      toDepartmentId: null,
+      type: "human",
+      subject: "Encargo",
+      body: "Arrancá la cadena.",
+      threadId: null,
+      inReplyTo: null,
+    });
+
+    // La pausa llega mientras el primer ciclo está en vuelo, que es como llega
+    // de verdad: alguien aprieta el botón con la corrida andando.
+    const corriendo = orchestrator.runContinuous();
+    orchestrator.pause();
+    await corriendo;
+
+    expect(orchestrator.snapshot.status).toBe("paused");
+    // Frenó al cerrar el ciclo en curso, no al final de los diez.
+    expect(orchestrator.snapshot.tick).toBeLessThan(run.maxTicks);
+    const cicloPausado = orchestrator.snapshot.tick;
+
+    // Y continuar sigue donde quedó: la pausa vieja no puede frenar el ciclo
+    // que alguien pidió después.
+    const avance = await orchestrator.tick();
+    expect(avance.advanced).toBe(true);
+    expect(orchestrator.snapshot.tick).toBe(cicloPausado + 1);
+    expect(analista.name).toBe("Bruno");
+  });
+
+  /**
    * El caso medido: un agente con una tarea abierta que no toca. Como la tarea
    * lo mantiene "con trabajo", tomaba turno cada ciclo, hablaba, no ejecutaba
    * nada y terminaba. Catorce ciclos seguidos así, hasta morir por límite de

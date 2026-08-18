@@ -6,6 +6,7 @@ import { resolverTierEstatico } from "./modelos-claude.js";
 import { OpenRouterProvider } from "./adapters/openrouter.js";
 import { AnthropicProvider, ClaudeSesionProvider } from "./adapters/anthropic.js";
 import { ClaudeCodeProvider } from "./adapters/claude-code.js";
+import { OpenCodeProvider } from "./adapters/opencode.js";
 import { OpenAiProvider } from "./adapters/openai.js";
 import { OllamaProvider } from "./adapters/ollama.js";
 import { NvidiaProvider } from "./adapters/nvidia.js";
@@ -123,6 +124,24 @@ export interface ProviderEnv {
   CLAUDE_CODE_MODEL?: string;
   /** Carpeta de trabajo de los agentes de Claude Code. */
   CLAUDE_CODE_WORKDIR?: string;
+  /**
+   * Habilita el proveedor "opencode (suscripción)": delega al CLI de opencode,
+   * que corre con la credencial de esta máquina (`opencode auth login`).
+   * Requiere el binario `opencode` instalado y autenticado.
+   */
+  ORQ_OPENCODE?: string;
+  /** Modelo por defecto del CLI, en formato `proveedor/modelo`. */
+  OPENCODE_MODEL?: string;
+  /** Carpeta de trabajo de los agentes de opencode. */
+  OPENCODE_WORKDIR?: string;
+  /** Binario, si no está en el PATH como `opencode`. */
+  OPENCODE_COMMAND?: string;
+  /**
+   * Reporta al ledger el costo que informa el CLI. Apagado por default: bajo un
+   * plan el turno no factura por token y prenderlo cortaría corridas por
+   * `budgetUsd` sin que hubiera gasto. Con créditos por uso, prendelo.
+   */
+  ORQ_OPENCODE_COSTO?: string;
   APP_URL?: string;
   APP_TITLE?: string;
 }
@@ -175,6 +194,17 @@ export function buildRegistry(env: ProviderEnv): ProviderRegistry {
       new ClaudeCodeProvider({
         ...(env.CLAUDE_CODE_MODEL ? { model: env.CLAUDE_CODE_MODEL } : {}),
         ...(env.CLAUDE_CODE_WORKDIR ? { workspaceDir: env.CLAUDE_CODE_WORKDIR } : {}),
+      }),
+    );
+  }
+
+  if (esVerdadero(env.ORQ_OPENCODE)) {
+    registry.register(
+      new OpenCodeProvider({
+        ...(env.OPENCODE_COMMAND ? { command: env.OPENCODE_COMMAND } : {}),
+        ...(env.OPENCODE_MODEL ? { model: env.OPENCODE_MODEL } : {}),
+        ...(env.OPENCODE_WORKDIR ? { workspaceDir: env.OPENCODE_WORKDIR } : {}),
+        reportarCosto: esVerdadero(env.ORQ_OPENCODE_COSTO),
       }),
     );
   }

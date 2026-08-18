@@ -97,6 +97,41 @@ const TIERS_ESTATICOS: Partial<Record<ProviderId, Partial<Record<ModelTier, stri
     standard: ["claude-code/sonnet"],
     smart: ["claude-code/opus"],
   },
+  // opencode no publica precios de ningún modelo (bajo un plan no los hay), así
+  // que las bandas de `tiers.ts` lo dejarían sin resolver un solo tier. La lista
+  // va en orden de preferencia y **cruza proveedores** a propósito: el catálogo
+  // depende de con qué credencial se haya logueado la máquina, así que después
+  // de los modelos del plan de Zen van los equivalentes de una sesión de
+  // Anthropic y los de Copilot. Gana el primero que exista de verdad.
+  opencode: {
+    // Zen publica modelos que no descuentan saldo y los marca con el sufijo
+    // `-free`. Es el único tier de este proveedor que se puede afirmar sin
+    // saber en qué plan está la cuenta, y el que deja probar una empresa entera
+    // con la credencial vacía.
+    free: [
+      "opencode/deepseek-v4-flash-free",
+      "opencode/nemotron-3-ultra-free",
+      "opencode/mimo-v2.5-free",
+    ],
+    cheap: [
+      "opencode/claude-haiku-4-5",
+      "anthropic/claude-haiku-4-5",
+      "github-copilot/claude-haiku-4-5",
+      "opencode/gemini-3-flash",
+    ],
+    standard: [
+      "opencode/claude-sonnet-5",
+      "anthropic/claude-sonnet-5",
+      "github-copilot/claude-sonnet-5",
+      "opencode/claude-sonnet-4-6",
+    ],
+    smart: [
+      "opencode/claude-opus-5",
+      "anthropic/claude-opus-5",
+      "github-copilot/claude-opus-5",
+      "opencode/claude-opus-4-8",
+    ],
+  },
 };
 
 /**
@@ -113,7 +148,7 @@ export function resolverTierEstatico(
   const prefijos = TIERS_ESTATICOS[providerId]?.[tier];
   if (!prefijos) return null;
 
-  return resolverPorPrefijos(prefijos, models);
+  return resolverPorPrefijos(prefijos, models, providerId);
 }
 
 /**
@@ -135,7 +170,11 @@ export function resolverTodosLosTiers(
   };
 }
 
-function resolverPorPrefijos(prefijos: string[], models: ModelInfo[]): TierResolution | null {
+function resolverPorPrefijos(
+  prefijos: string[],
+  models: ModelInfo[],
+  providerId: ProviderId,
+): TierResolution | null {
   for (const prefijo of prefijos) {
     const candidatos = models.filter((model) => model.slug.startsWith(prefijo));
     if (candidatos.length === 0) continue;
@@ -151,8 +190,8 @@ function resolverPorPrefijos(prefijos: string[], models: ModelInfo[]): TierResol
       blendedPriceUsdPerMTok: blended,
       reason:
         entrada != null && salida != null
-          ? `Mapa curado para Claude: ${model.name} (US$${entrada}/US$${salida} por MTok).`
-          : `Mapa curado para Claude: ${model.name} (la suscripción no factura por token).`,
+          ? `Mapa curado de ${providerId}: ${model.name} (US$${entrada}/US$${salida} por MTok).`
+          : `Mapa curado de ${providerId}: ${model.name} (sin precio por token publicado).`,
     };
   }
   return null;

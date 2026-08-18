@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { crearFila } from "./bridge.js";
+import { crearFila, esLimiteDeTasa, esperaDeReintento } from "./bridge.js";
 
 /**
  * La fila de un servidor MCP.
@@ -87,5 +87,56 @@ describe("crearFila", () => {
     await rapida;
     expect(terminoLaRapida).toBe(true);
     await lenta;
+  });
+});
+
+/**
+ * El límite de tasa del servicio que está detrás del servidor MCP.
+ *
+ * La fila serializa pero no espacia: dos búsquedas de dos agentes salen una
+ * detrás de la otra y, si la primera contesta rápido, las dos caen en el mismo
+ * segundo. Con Brave en plan Free —una consulta por segundo— eso es un 429
+ * seguro, y lo medimos así: dos llamadas estampadas a las 20:46:33, la primera
+ * con resultados y la segunda rechazada.
+ */
+describe("límite de tasa", () => {
+  /** El mensaje tal cual lo devolvió Brave, no una paráfrasis. */
+  const MENSAJE_DE_BRAVE =
+    'ERROR: mcp__brave__brave_web_search: Error: Brave API error: 429 Too Many Requests ' +
+    '{"type":"ErrorResponse","error":{"status":429,"detail":"Request rate limit exceeded for plan",' +
+    '"meta":{"plan":"Free","rate_limit":1,"rate_current":1,"quota_limit":2000,"quota_current":27},' +
+    '"code":"RATE_LIMITED"}}';
+
+  it("reconoce las tres formas en que un servidor MCP lo dice", () => {
+    expect(esLimiteDeTasa(MENSAJE_DE_BRAVE)).toBe(true);
+    expect(esLimiteDeTasa("ERROR: rate limit exceeded")).toBe(true);
+    expect(esLimiteDeTasa("ERROR: Too Many Requests")).toBe(true);
+  });
+
+  it("no confunde otros errores con un límite", () => {
+    // Reintentar acá sería demorar la fila del servidor para nada.
+    expect(esLimiteDeTasa("ERROR: 404 Not Found")).toBe(false);
+    expect(esLimiteDeTasa("ERROR: 500 Internal Server Error")).toBe(false);
+    expect(esLimiteDeTasa("ERROR: la búsqueda no devolvió resultados")).toBe(false);
+    // Un 4290 no es un 429: la palabra completa, no el prefijo.
+    expect(esLimiteDeTasa("ERROR: código 4290")).toBe(false);
+  });
+
+  it("espera un poco más de un segundo, que es lo que pide un límite por segundo", () => {
+    // 1100 ms y no 1000: con exactamente un segundo el reintento vuelve a caer
+    // sobre el borde de la ventana y el límite se dispara de nuevo.
+    expect(esperaDeReintento(MENSAJE_DE_BRAVE, 1)).toBeGreaterThan(1_000);
+    // El segundo intento espera más que el primero.
+    expect(esperaDeReintento(MENSAJE_DE_BRAVE, 2)).toBeGreaterThan(
+      esperaDeReintento(MENSAJE_DE_BRAVE, 1),
+    );
+  });
+
+  it("le hace caso al servicio cuando dice cuánto esperar, y lo acota", () => {
+    // Nadie sabe mejor que él cuándo vuelve a atender.
+    expect(esperaDeReintento('{"retry-after": 3}', 1)).toBe(3_000);
+    expect(esperaDeReintento("Retry-After: 5", 1)).toBe(5_000);
+    // Un valor disparatado no puede dejar la fila del servidor congelada.
+    expect(esperaDeReintento("retry-after: 86400", 1)).toBe(15_000);
   });
 });

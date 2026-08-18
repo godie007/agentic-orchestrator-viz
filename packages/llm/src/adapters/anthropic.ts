@@ -8,6 +8,7 @@ import {
   type ChatRequest,
   type FinishReason,
   type LlmProvider,
+  type TokenUsage,
   type ToolCall,
 } from "../types.js";
 
@@ -112,14 +113,20 @@ export class AnthropicProvider implements LlmProvider {
         {
           model: req.model,
           max_tokens: req.maxOutputTokens ?? 4096,
-          ...(system ? { system } : {}),
+          ...(system.length ? { system } : {}),
           messages,
           ...(req.tools?.length
             ? {
-                tools: req.tools.map((tool) => ({
+                tools: req.tools.map((tool, i) => ({
                   name: tool.name,
                   description: tool.description,
                   input_schema: tool.inputSchema as Anthropic.Tool.InputSchema,
+                  // El último breakpoint en la última herramienta mantiene el
+                  // catálogo completo servido desde caché entre iteraciones.
+                  // Sin esto, las tools se reenvían enteras en cada llamada.
+                  ...(i === req.tools!.length - 1
+                    ? { cache_control: { type: "ephemeral" as const } }
+                    : {}),
                 })),
               }
             : {}),
@@ -136,7 +143,7 @@ export class AnthropicProvider implements LlmProvider {
 
     let text = "";
     let finishReason: FinishReason = "stop";
-    const usage = { inputTokens: 0, outputTokens: 0 };
+    const usage: TokenUsage = { inputTokens: 0, outputTokens: 0 };
     // Los bloques llegan por índice: `content_block_start` trae id y nombre,
     // y los `input_json_delta` siguientes van armando el JSON de argumentos.
     const blocks = new Map<number, { id: string; name: string; json: string }>();
@@ -146,6 +153,9 @@ export class AnthropicProvider implements LlmProvider {
         switch (event.type) {
           case "message_start":
             usage.inputTokens = event.message.usage?.input_tokens ?? 0;
+            usage.cachedInputTokens =
+              (event.message.usage?.cache_read_input_tokens ?? 0) +
+              (event.message.usage?.cache_creation_input_tokens ?? 0);
             break;
 
           case "content_block_start":
@@ -266,9 +276,17 @@ export class ClaudeSesionProvider extends AnthropicProvider {
 /**
  * Anthropic lleva el system prompt fuera del array de mensajes, y espera los
  * resultados de herramienta como bloques `tool_result` dentro de un `user`.
+ *
+ * El caching de prefijo se marca con breakpoints (`cache_control`):
+ * - El system va como un solo bloque con breakpoint: es lo más estable del
+ *   turno (el rol, el objetivo, la memoria) y se repite entero en cada
+ *   iteración.
+ * - El último mensaje de la conversación lleva el breakpoint final, así todo
+ *   lo anterior queda dentro del segmento cacheado y sólo se reenvía el delta.
+ *   Es el patrón que documenta Anthropic para loops de herramientas.
  */
-function splitSystem(messages: ChatMessage[]): {
-  system: string;
+export function splitSystem(messages: ChatMessage[]): {
+  system: Anthropic.TextBlockParam[];
   messages: Anthropic.MessageParam[];
 } {
   const systemParts: string[] = [];
@@ -315,7 +333,38 @@ function splitSystem(messages: ChatMessage[]): {
     if (content.length > 0) converted.push({ role: "assistant", content });
   }
 
-  return { system: systemParts.join("\n\n"), messages: converted };
+  const system: Anthropic.TextBlockParam[] = systemParts.length
+    ? [
+        {
+          type: "text",
+          text: systemParts.join("\n\n"),
+          cache_control: { type: "ephemeral" },
+        },
+      ]
+    : [];
+
+  // Breakpoint final en el último bloque de la conversación: cachea todo el
+  // segmento previo. Los bloques que Anthropic acepta acá (text, tool_use,
+  // tool_result) todos soportan `cache_control`.
+  const last = converted.at(-1);
+  if (last && Array.isArray(last.content) && last.content.length > 0) {
+    const ultimoBloque = last.content.at(-1);
+    if (ultimoBloque && "type" in ultimoBloque) {
+      (ultimoBloque as Anthropic.TextBlockParam).cache_control = {
+        type: "ephemeral",
+      };
+    }
+  } else if (last && typeof last.content === "string") {
+    last.content = [
+      {
+        type: "text",
+        text: last.content,
+        cache_control: { type: "ephemeral" },
+      },
+    ];
+  }
+
+  return { system, messages: converted };
 }
 
 function mapStopReason(reason: string): FinishReason {

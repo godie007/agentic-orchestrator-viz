@@ -10,7 +10,19 @@ import type { RunState } from "./state.js";
  * modelo omnisciente hablando consigo mismo.
  */
 
-export function buildSystemPrompt(state: RunState, role: Role, objective: string): string {
+export function buildSystemPrompt(
+  state: RunState,
+  role: Role,
+  objective: string,
+  /**
+   * Mapa del árbol de contexto de la empresa, ya armado por quien llama.
+   *
+   * Va el mapa y no el contenido: se reenvía en cada vuelta del turno, y lo
+   * largo se abre con `leer_contexto` sólo cuando hace falta. El motor no sabe
+   * dónde vive ese árbol — lo inyecta el servidor, igual que la fecha.
+   */
+  mapaDeContexto?: string,
+): string {
   const sections: string[] = [];
 
   sections.push(
@@ -41,6 +53,8 @@ export function buildSystemPrompt(state: RunState, role: Role, objective: string
   sections.push(buildAuthoritySection(role, state));
   sections.push(buildMemorySection(state));
   sections.push(WORKING_AGREEMENT);
+
+  if (mapaDeContexto?.trim()) sections.push(mapaDeContexto.trim());
 
   return sections.filter((section) => section.trim()).join("\n\n");
 }

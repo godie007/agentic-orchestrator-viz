@@ -755,6 +755,47 @@ export class Store {
     );
   }
 
+  /**
+   * El pulso de una corrida: cuánto trabajo lleva hecho y cuándo dio señal.
+   *
+   * Es lo que contesta "¿esto avanza o está trabado?" sin descargar la traza
+   * entera —8.000 eventos para pintar un contador sería absurdo—: se cuenta con
+   * agregados sobre el índice `idx_events_run` y se lee **una** fila, la última.
+   *
+   * `acciones` cuenta `tool.end` y no eventos totales a propósito: el trabajo
+   * fino es lo único que siempre ocurre. Un agente puede pasar minutos pensando
+   * sin mover una tarea, pero si no ejecutó nada, no avanzó.
+   */
+  progresoDeCorrida(runId: string): {
+    eventos: number;
+    acciones: number;
+    ultimaSenalAt: number | null;
+  } {
+    const conteo = this.db
+      .prepare(
+        `SELECT COUNT(*) AS eventos,
+                SUM(CASE WHEN type = 'tool.end' THEN 1 ELSE 0 END) AS acciones
+         FROM events WHERE run_id = ?`,
+      )
+      .get(runId) as { eventos: number; acciones: number | null } | undefined;
+
+    const ultima = this.db
+      .prepare("SELECT data FROM events WHERE run_id = ? ORDER BY seq DESC LIMIT 1")
+      .get(runId) as { data: string } | undefined;
+
+    let ultimaSenalAt: number | null = null;
+    if (ultima) {
+      const evento = JSON.parse(ultima.data) as { at?: number };
+      ultimaSenalAt = typeof evento.at === "number" ? evento.at : null;
+    }
+
+    return {
+      eventos: conteo?.eventos ?? 0,
+      acciones: conteo?.acciones ?? 0,
+      ultimaSenalAt,
+    };
+  }
+
   // --- Helpers -------------------------------------------------------------
 
   private upsertScoped(table: string, id: string, companyId: string, value: unknown): void {

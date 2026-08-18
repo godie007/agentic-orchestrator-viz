@@ -49,7 +49,10 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
    * base, o queda un orquestador escribiendo eventos de algo que ya no existe.
    */
   const limpiarTerminadas = (corridas: readonly { id: string }[]): number => {
-    const terminadas = corridas.filter((run) => !runtime.estaViva(run.id));
+    // `estaViva` es sólo `running`: con ese filtro la limpieza se llevaba
+    // puestas las corridas pausadas y las que esperaban una respuesta, que no
+    // avanzan pero se pueden continuar. Se borra lo que ya no vuelve.
+    const terminadas = corridas.filter((run) => !runtime.sePuedeContinuar(run.id));
     for (const run of terminadas) {
       runtime.olvidarCorrida(run.id);
       store.deleteRun(run.id);
@@ -282,7 +285,13 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
   });
   registerChild(app, "roles", roleSchema, ids.role, {
     list: (companyId) => store.listRoles(companyId),
-    save: (value) => store.saveRole(value),
+    save: (value) => {
+      store.saveRole(value);
+      // La corrida viva congela el organigrama al arrancar: sin esto, otorgarle
+      // una herramienta a un agente desde la configuración no le llega hasta la
+      // corrida siguiente, y mientras tanto insiste con la que no puede usar.
+      runtime.actualizarRolEnCorridasVivas(value.companyId, value);
+    },
     remove: (id, companyId) => {
       // El nombre se lee antes de borrarlo, para poder nombrarlo en la traza.
       const nombre = store.listRoles(companyId).find((role) => role.id === id)?.name ?? id;
@@ -544,6 +553,29 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
 
   // --- Memoria de la empresa ----------------------------------------------
 
+  /**
+   * El pulso del proyecto: qué corrida hay y cómo viene.
+   *
+   * Vive aparte de `/runs` porque lo consume el shell —está en pantalla en
+   * todas las secciones— y tiene que ser barato: agregados sobre el índice de
+   * eventos y una sola fila leída, en vez de la traza entera. El cliente calcula
+   * el reloj solo; acá va lo que sólo el servidor sabe.
+   */
+  app.get("/api/companies/:companyId/progreso", async (request) => {
+    const { companyId } = request.params as { companyId: string };
+    // La más reciente, viva o no: después de un reinicio, saber cuándo terminó
+    // la última y por qué es tan útil como ver una en curso.
+    const run = store.listRuns(companyId)[0] ?? null;
+    if (!run) return { run: null, viva: false, progreso: null };
+    return {
+      // El estado autoritativo es el del orquestador vivo: `run.status` de la
+      // base queda viejo cuando la corrida se pausó o se detuvo.
+      run: runtime.snapshot(run.id) ?? run,
+      viva: runtime.estaViva(run.id),
+      progreso: store.progresoDeCorrida(run.id),
+    };
+  });
+
   app.get("/api/companies/:companyId/learnings", async (request) => {
     const { companyId } = request.params as { companyId: string };
     return store
@@ -573,13 +605,26 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
       updatedAt: now,
     };
     store.saveLearning(learning);
+    // Al vault también: la memoria entra por dos puertas y las dos tienen que
+    // llegar al árbol, o lo que carga una persona no se ve en Obsidian.
+    const empresa = store.getCompany(companyId);
+    if (empresa) await runtime.espejarAprendizajes(empresa, learning.topic);
     reply.code(201);
     return learning;
   });
 
   app.delete("/api/companies/:companyId/learnings/:id", async (request) => {
-    const { id } = request.params as { id: string };
+    const { companyId, id } = request.params as { companyId: string; id: string };
+    // El tema se lee **antes** de borrar: después ya no está para saber qué
+    // nota del vault hay que reescribir.
+    const tema = store.listLearnings(companyId).find((l) => l.id === id)?.topic ?? null;
     store.deleteLearning(id);
+    // La memoria entra por dos puertas y tiene que salir por las dos. Sin esto
+    // el vault conserva una lección ya borrada: lo pagamos con dos lecciones
+    // equivocadas —un falso positivo que mandaba a los agentes a "corregir" un
+    // documento sano— que seguían en Obsidian después de sacarlas de la base.
+    const empresa = store.getCompany(companyId);
+    if (empresa && tema) await runtime.espejarAprendizajes(empresa, tema);
     return { ok: true };
   });
 
@@ -748,6 +793,14 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
       reply.code(409);
       return { error: "La corrida está avanzando. Pausala o terminala antes de borrarla." };
     }
+    if (runtime.sePuedeContinuar(id)) {
+      reply.code(409);
+      return {
+        error:
+          "La corrida está en pausa o esperando una respuesta: todavía se puede continuar. " +
+          "Terminala si querés cerrarla, y recién ahí borrala.",
+      };
+    }
     runtime.olvidarCorrida(id);
     store.deleteRun(id);
     return { ok: true };
@@ -774,7 +827,8 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
     return {
       base: { bytes: store.pesoEnDisco(), residuos: store.residuos() },
       carpetas: await runtime.exports.carpetasResiduales(vivas),
-      corridasTerminadas: store.listAllRuns().filter((run) => !runtime.estaViva(run.id)).length,
+      corridasTerminadas: store.listAllRuns().filter((run) => !runtime.sePuedeContinuar(run.id))
+        .length,
     };
   });
 
@@ -904,7 +958,25 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
       try {
         if (action === "tick") return await runtime.tick(id);
         if (action === "resume") {
-          void runtime.resume(id); // no bloquea la respuesta: puede durar minutos
+          // `snapshot` valida que la corrida siga viva en memoria **antes** de
+          // contestar: sin eso, retomar una corrida que no sobrevivió a un
+          // reinicio devolvía `started: true` y el error viajaba por una
+          // promesa sin dueño — una rechazada sin manejar **mata el proceso
+          // entero de Node**, así que un pedido inválido bajaba el servidor y
+          // con él todas las corridas vivas. Lo medimos dos veces.
+          if (!runtime.estaEnMemoria(id)) {
+            throw new Error(
+              `La corrida "${id}" no está activa en memoria: no sobrevivió a un reinicio ` +
+                `del servidor. Podés leer su traza, pero para seguir el trabajo hay que ` +
+                `arrancar una corrida nueva — las tareas abiertas se heredan.`,
+            );
+          }
+          void runtime.resume(id).catch((error: unknown) => {
+            // Lo que falle después de contestar ya no tiene a quién avisarle
+            // por HTTP; queda en el log del servidor y en la traza de la
+            // corrida, que es donde alguien lo va a buscar.
+            app.log.error({ err: error, runId: id }, "la corrida se cortó al retomar");
+          });
           return { started: true };
         }
         if (action === "pause") runtime.pause(id);
@@ -942,6 +1014,10 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
         parsed.data.resolution,
       );
       if (!resolved) return notFound(reply, "aprobación pendiente", approvalId);
+      // Igual que al contestar una consulta: si era la última pendiente, la
+      // corrida sigue sola. Aprobar y que no pase nada convierte una espera
+      // asincrónica en una intervención manual.
+      runtime.reanudarSiEsperaba(id);
       return { ok: true };
     } catch (error) {
       reply.code(409);

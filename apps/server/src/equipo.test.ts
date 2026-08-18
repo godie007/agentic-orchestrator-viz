@@ -26,6 +26,7 @@ function envDePrueba(base: string): Env {
     databaseUrl: join(base, "db.sqlite"),
     exportsDir: join(base, "exports"),
     musicaDir: join(base, "musica"),
+    contextoDir: join(base, "contexto"),
     defaultBudgetUsd: 1,
     defaultMaxTicks: 10,
     agentConcurrency: 1,

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { parseGuion, type EscenaUbicada } from "./guion.js";
 import { atarClips, clipDePortada, filtroDeEscena, planificarCortes } from "./clips.js";
+import { informeDeExploracion, tomarSesion } from "./index.js";
 
 /**
  * El reloj del empalme es la única cuenta con la que se puede equivocar el
@@ -112,5 +113,73 @@ describe("filtroDeEscena", () => {
     expect(filtro).toContain("force_original_aspect_ratio=decrease");
     expect(filtro).toContain("pad=1920:1080");
     expect(filtro).toContain("[e0]");
+  });
+});
+
+describe("tomarSesion", () => {
+  it("sin nombre no hay perfil: la grabación se comporta como siempre", () => {
+    expect(tomarSesion(undefined).perfil).toBeNull();
+    expect(tomarSesion("   ").perfil).toBeNull();
+  });
+
+  it("sanea el nombre: el perfil es una ruta, no lo que escribió un modelo", () => {
+    const s = tomarSesion("Inspector / Electrovatio!!");
+    expect(s.perfil).toContain("orq-sesiones");
+    expect(s.perfil?.split("/").pop()).toBe("inspector-electrovatio");
+    s.soltar();
+  });
+
+  it("dos tomas a la vez sobre la misma sesión: la segunda graba igual y avisa", () => {
+    // Dos Chrome sobre el mismo --user-data-dir no conviven. Fallar sería peor
+    // que grabar con un navegador nuevo: el clip es lo que importa.
+    const primera = tomarSesion("inspector");
+    const segunda = tomarSesion("inspector");
+    expect(primera.perfil).not.toBeNull();
+    expect(segunda.perfil).toBeNull();
+    expect(segunda.avisos.join(" ")).toMatch(/ya está grabando/);
+    primera.soltar();
+    // Soltada la primera, la sesión vuelve a estar disponible.
+    const tercera = tomarSesion("inspector");
+    expect(tercera.perfil).toBe(primera.perfil);
+    tercera.soltar();
+  });
+});
+
+describe("informeDeExploracion", () => {
+  const vista = (encontrados: Array<{ texto: string; visible: boolean; estable: boolean }>) => ({
+    url: "https://app/inspector/nc",
+    titulo: "No conformidades",
+    encontrados,
+    clickeables: ["Abierta", "Solicitar cierre"],
+    pantalla: "NC-2026-014 · Abierta · Art. 210.52 (d)",
+  });
+
+  it("avisa fuerte del texto que aparece y se borra: es la trampa que cuesta la toma", () => {
+    const informe = informeDeExploracion(
+      vista([{ texto: "Cargando proyectos", visible: true, estable: false }]),
+    );
+    expect(informe).toContain("APARECEN Y SE BORRAN");
+    expect(informe).toContain("Cargando proyectos");
+    expect(informe).toContain("NO los uses como ancla");
+  });
+
+  it("separa lo que sirve de ancla de lo que no está", () => {
+    const informe = informeDeExploracion(
+      vista([
+        { texto: "Abierta", visible: true, estable: true },
+        { texto: "Sin requisitos", visible: false, estable: false },
+      ]),
+    );
+    expect(informe).toMatch(/Sirven como ancla[^\n]*"Abierta"/);
+    expect(informe).toMatch(/No están en esta pantalla[^\n]*"Sin requisitos"/);
+  });
+
+  it("trae la URL, para que la preparación de grabar_clip no se adivine", () => {
+    expect(informeDeExploracion(vista([]))).toContain("https://app/inspector/nc");
+  });
+
+  it("el aviso de sesión ocupada llega al agente", () => {
+    const informe = informeDeExploracion(vista([]), ["La sesión ya está grabando otra toma."]);
+    expect(informe).toContain("Atención:");
   });
 });

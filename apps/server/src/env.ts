@@ -30,6 +30,8 @@ export interface Env {
    * puede ver. Si la carpeta no existe, los videos salen sin música.
    */
   musicaDir: string;
+  /** Vault de Obsidian donde vive el árbol de contexto de cada empresa. */
+  contextoDir: string;
   defaultBudgetUsd: number;
   defaultMaxTicks: number;
   agentConcurrency: number;
@@ -57,6 +59,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
     databaseUrl: fromRoot(source.DATABASE_URL?.trim() || "./data/orquestador.db"),
     exportsDir: fromRoot(source.EXPORTS_DIR?.trim() || "./data/exports"),
     musicaDir: fromRoot(source.MUSICA_DIR?.trim() || "./data/musica"),
+    contextoDir: fromRoot(source.CONTEXTO_DIR?.trim() || "./data/contexto"),
     defaultBudgetUsd: numeric(source.DEFAULT_RUN_BUDGET_USD, 1, "DEFAULT_RUN_BUDGET_USD"),
     defaultMaxTicks: numeric(source.DEFAULT_MAX_TICKS, 50, "DEFAULT_MAX_TICKS"),
     agentConcurrency: numeric(source.AGENT_CONCURRENCY, 4, "AGENT_CONCURRENCY"),

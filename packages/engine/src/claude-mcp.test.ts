@@ -105,7 +105,16 @@ function callMCP(
 
 describe("createClaudeMcpBridge", () => {
   function bridgePara(byName: Map<string, RegisteredTool>) {
-    const state = { forActor: () => ({}), recordActivity: () => {} } as unknown as RunState;
+    // Las colecciones van vacías pero presentes: los emisores de eventos de
+    // efecto (`write_artifact`, `assign_task`…) leen la última entrada.
+    const state = {
+      forActor: () => ({}),
+      recordActivity: () => {},
+      artifacts: [],
+      messages: [],
+      requests: [],
+      approvals: [],
+    } as unknown as RunState;
     return createClaudeMcpBridge({
       bus: { emit: () => {} } as unknown as EventBus,
       state,
@@ -168,4 +177,128 @@ describe("createClaudeMcpBridge", () => {
       await session.close();
     }
   });
+  it("una relectura idéntica devuelve un puntero, no el contenido otra vez", async () => {
+    // El memo del loop no llegaba al camino delegado, y es donde más pesa: un
+    // turno delegado encadena decenas de llamadas y cada resultado se reenvía
+    // en todas las vueltas que le siguen.
+    let veces = 0;
+    const byName = new Map<string, RegisteredTool>([
+      ["leer", habitada("leer", "contenido-largo", () => { veces += 1; })],
+    ]);
+    const session = await bridgePara(byName).open();
+    try {
+      const primera = (await callMCP(session.socketPath, "call", {
+        name: "leer",
+        args: { valor: "guion" },
+      })) as { content: { text: string }[] };
+      const segunda = (await callMCP(session.socketPath, "call", {
+        name: "leer",
+        args: { valor: "guion" },
+      })) as { content: { text: string }[] };
+
+      expect(primera.content[0]!.text).toContain("contenido-largo");
+      expect(segunda.content[0]!.text).toContain("más arriba");
+      expect(segunda.content[0]!.text).not.toContain("contenido-largo");
+      // Y no se vuelve a ejecutar: el memo ahorra el trabajo, no sólo los tokens.
+      expect(veces).toBe(1);
+    } finally {
+      await session.close();
+    }
+  });
+
+  it("una lectura con otros argumentos sí se ejecuta", async () => {
+    let veces = 0;
+    const byName = new Map<string, RegisteredTool>([
+      ["leer", habitada("leer", "ok", () => { veces += 1; })],
+    ]);
+    const session = await bridgePara(byName).open();
+    try {
+      await callMCP(session.socketPath, "call", { name: "leer", args: { valor: "guion" } });
+      await callMCP(session.socketPath, "call", { name: "leer", args: { valor: "brief" } });
+      expect(veces).toBe(2);
+    } finally {
+      await session.close();
+    }
+  });
+
+  it("un resultado enorme entra acotado y dice cómo pedir el resto", async () => {
+    const gigante: RegisteredTool = {
+      ...habitada("listar"),
+      inputSchema: {
+        type: "object",
+        properties: { folder: { type: "string" } },
+        additionalProperties: false,
+      },
+      execute: async () => ({ ok: true, content: "x".repeat(60_000) }),
+    } as RegisteredTool;
+    const session = await bridgePara(new Map([["listar", gigante]])).open();
+    try {
+      const out = (await callMCP(session.socketPath, "call", {
+        name: "listar",
+        args: {},
+      })) as { content: { text: string }[] };
+      const texto = out.content[0]!.text;
+      expect(texto.length).toBeLessThan(20_000);
+      expect(texto).toContain("RECORTADO");
+      // Nombra un argumento que la herramienta declara de verdad.
+      expect(texto).toContain("folder");
+    } finally {
+      await session.close();
+    }
+  });
+  it("pasado el tope de largo niega lecturas pero deja entregar", async () => {
+    // La asimetría es el punto: lo que alarga un turno es explorar, lo que lo
+    // cierra es entregar. Negar todo dejaría al agente sin poder guardar lo que
+    // ya averiguó, que es justo el trabajo que se quiere conservar.
+    const lectura = habitada("leer");
+    const escritura: RegisteredTool = { ...habitada("write_artifact"), readOnly: false };
+    const session = await bridgePara(
+      new Map([
+        ["leer", lectura],
+        ["write_artifact", escritura],
+      ]),
+    ).open();
+    try {
+      // 80 llamadas es el tope; se hacen con argumentos distintos para que el
+      // memo no las absorba y cuenten de verdad.
+      for (let i = 0; i < 80; i += 1) {
+        await callMCP(session.socketPath, "call", { name: "leer", args: { valor: `v${i}` } });
+      }
+      const negada = (await callMCP(session.socketPath, "call", {
+        name: "leer",
+        args: { valor: "otra" },
+      })) as { isError?: boolean; content: { text: string }[] };
+      expect(negada.isError).toBe(true);
+      expect(negada.content[0]!.text).toContain("FRENÁ");
+      expect(negada.content[0]!.text).toContain("write_artifact");
+
+      const entrega = (await callMCP(session.socketPath, "call", {
+        name: "write_artifact",
+        args: { valor: "informe" },
+      })) as { isError?: boolean; content: { text: string }[] };
+      expect(entrega.isError).toBeUndefined();
+      expect(entrega.content[0]!.text).toContain("ok");
+    } finally {
+      await session.close();
+    }
+  }, 20_000);
+
+  it("avisa antes de llegar al tope, para que pueda cerrar ordenado", async () => {
+    const byName = new Map<string, RegisteredTool>([["leer", habitada("leer")]]);
+    const session = await bridgePara(byName).open();
+    try {
+      let ultimo = "";
+      for (let i = 0; i < 50; i += 1) {
+        const out = (await callMCP(session.socketPath, "call", {
+          name: "leer",
+          args: { valor: `v${i}` },
+        })) as { content: { text: string }[] };
+        ultimo = out.content[0]!.text;
+      }
+      expect(ultimo).toContain("50 llamadas en este turno");
+      expect(ultimo).toContain("andá cerrando");
+    } finally {
+      await session.close();
+    }
+  }, 20_000);
 });

@@ -1,4 +1,4 @@
-import { ids, mcpServerSchema, plantillaEquipo } from "@orq/shared";
+import { esCorridaTerminal, ids, mcpServerSchema, plantillaEquipo } from "@orq/shared";
 import type {
   AgentRequest,
   CreateRunInput,
@@ -22,6 +22,8 @@ import {
   createCrearHerramienta,
   createEmailTools,
   createSkillTools,
+  crearHerramientasDeContexto,
+  mapaDeContextoEnPrompt,
   type Correo,
 } from "@orq/tools";
 import { EventBus, Orchestrator, RunState, type CompanyConfig } from "@orq/engine";
@@ -29,6 +31,7 @@ import type { Store } from "./db.js";
 import type { Env } from "./env.js";
 import { resolveSecret } from "./env.js";
 import { ExportStore } from "./exports.js";
+import { ContextoStore, notaDeAprendizajes, rutaDeTema } from "./contexto.js";
 
 /**
  * Runtime del servidor: mantiene lo que está vivo.
@@ -86,6 +89,15 @@ export class Runtime {
   /** Documentos que producen las habilidades, uno por empresa. */
   readonly exports: ExportStore;
 
+  /**
+   * El árbol de contexto de cada empresa, como vault de Obsidian.
+   *
+   * Va por el filesystem y no por el plugin de Obsidian a propósito: así el
+   * conocimiento del sistema no depende de que una aplicación de escritorio
+   * esté abierta. Obsidian es el visor.
+   */
+  readonly contexto: ContextoStore;
+
   /** Salida de correo de todo el servidor. La comparten misiones y agentes. */
   readonly correo: Correo;
 
@@ -95,6 +107,7 @@ export class Runtime {
     private readonly env: Env,
   ) {
     this.exports = new ExportStore(env.exportsDir);
+    this.contexto = new ContextoStore(env.contextoDir);
     this.correo = crearCorreo({ webhookUrl: env.emailWebhookUrl });
   }
 
@@ -111,6 +124,23 @@ export class Runtime {
         musicaHome: this.env.musicaDir,
       })) {
         tools.register(skill);
+      }
+      // El árbol de contexto también es por empresa: cada una escribe en su
+      // rama del vault y no ve la de las otras.
+      // El nombre se resuelve al usar y no acá: si la empresa se renombra, la
+      // carpeta del vault la sigue sin que haya que reiniciar el runtime.
+      const empresaDeContexto = (): { id: string; nombre: string } => ({
+        id: companyId,
+        nombre: this.store.getCompany(companyId)?.name ?? companyId,
+      });
+      for (const tool of crearHerramientasDeContexto({
+        escribir: (ruta, contenido) =>
+          this.contexto.escribir(empresaDeContexto(), ruta, contenido),
+        leer: (ruta) => this.contexto.leer(empresaDeContexto(), ruta),
+        buscar: (texto) => this.contexto.buscar(empresaDeContexto(), texto),
+        mapa: () => this.contexto.mapa(empresaDeContexto()),
+      })) {
+        tools.register(tool);
       }
       // El correo también se registra por empresa: el enlace de un adjunto
       // lleva el id de la empresa adentro, así que no puede ser una tool global.
@@ -183,7 +213,13 @@ export class Runtime {
    * OpenRouter cierra la lista porque resuelve por bandas de precio.
    */
   proveedorPreferido(): ProviderId | null {
-    const prioridad: ProviderId[] = ["claude-sesion", "anthropic", "claude-code", "openrouter"];
+    const prioridad: ProviderId[] = [
+      "claude-sesion",
+      "anthropic",
+      "claude-code",
+      "opencode",
+      "openrouter",
+    ];
     for (const id of prioridad) {
       if (this.providers.has(id)) return id;
     }
@@ -313,6 +349,33 @@ export class Runtime {
   estaViva(runId: string): boolean {
     const activa = this.runs.get(runId);
     return activa != null && activa.orchestrator.snapshot.status === "running";
+  }
+
+  /**
+   * Si la corrida sigue **en memoria**, que es lo único que se puede retomar.
+   *
+   * No es `estaViva`: una corrida pausada o detenida no está corriendo y sin
+   * embargo se puede continuar. Existe para que quien llama a `resume` valide
+   * antes de contestar — el error viajaba por una promesa sin dueño, y una
+   * rechazada sin manejar **mata el proceso de Node**, llevándose puestas las
+   * corridas que sí estaban trabajando.
+   */
+  estaEnMemoria(runId: string): boolean {
+    return this.runs.has(runId);
+  }
+
+  /**
+   * Si todavía se puede continuar: sigue en memoria y no llegó a un estado
+   * terminal.
+   *
+   * `estaViva` es más angosta —sólo `running`— y por eso no sirve para decidir
+   * un borrado: una corrida `paused` o `awaiting_approval` no avanza pero
+   * conserva su estado vivo, y borrarla tira trabajo que alcanzaba con
+   * continuar. La limpieza en lote se llevaba puestas justamente esas.
+   */
+  sePuedeContinuar(runId: string): boolean {
+    const activa = this.runs.get(runId);
+    return activa != null && !esCorridaTerminal(activa.orchestrator.snapshot.status);
   }
 
   /**
@@ -565,7 +628,13 @@ export class Runtime {
       saveTask: (task) => this.store.saveTask(task),
       saveArtifact: (artifact) => this.store.saveArtifact(artifact, company.id),
       saveApproval: (approval) => this.store.saveApproval(approval),
-      saveLearning: (learning) => this.store.saveLearning(learning),
+      // La lección va a la base —de ahí sale la memoria corta del prompt— y
+      // además refresca su nota en el vault, para que lo que la empresa aprende
+      // trabajando se pueda leer y corregir en Obsidian sin correr un script.
+      saveLearning: (learning) => {
+        this.store.saveLearning(learning);
+        void this.espejarAprendizajes(company, learning.topic);
+      },
       saveRequest: (request) => this.store.saveRequest(request),
       // Un especialista convocado en medio de una corrida es un rol de la
       // empresa como cualquier otro: queda disponible para las siguientes.
@@ -604,6 +673,12 @@ export class Runtime {
       // Lo que la empresa produjo, para que un agente pueda **verlo**. Se presta
       // en sólo lectura; producir sigue yendo por las herramientas del org.
       dirDeTrabajo: this.exports.dirDeEmpresa(company.id),
+      // El mapa del árbol de contexto, resuelto por turno: un agente escribe
+      // una nota en un ciclo y el resto la ve en el siguiente.
+      mapaDeContexto: async () =>
+        mapaDeContextoEnPrompt(
+          await this.contexto.mapa({ id: company.id, nombre: company.name }),
+        ),
       fechaHoy: () =>
         new Date().toLocaleDateString("es-AR", {
           day: "numeric",
@@ -677,9 +752,16 @@ export class Runtime {
     if (!runId) return;
     const active = this.runs.get(runId);
     if (!active) return;
-    if (active.orchestrator.snapshot.status !== "awaiting_approval") return;
-    // Si todavía queda otra pregunta sin responder, se sigue esperando.
+    const estado = active.orchestrator.snapshot.status;
+    // También vale desde `paused`: resolver la última pendiente deja la corrida
+    // en pausa (`Orchestrator.resolveApproval`), y sin esto contestar una
+    // aprobación no reanudaba nada —había que apretar "continuar" a mano,
+    // justo lo que esta función existe para evitar—.
+    if (estado !== "awaiting_approval" && estado !== "paused") return;
+    // Si todavía queda otra pregunta o aprobación sin responder, se sigue
+    // esperando: reanudar volvería a frenar en el mismo lugar.
     if (active.state.requests.some((pedido) => pedido.status === "pending")) return;
+    if (active.state.pendingApprovals().length > 0) return;
 
     void this.resume(runId).catch(() => {
       // Un fallo acá ya quedó registrado en la traza de la corrida; no puede
@@ -688,7 +770,12 @@ export class Runtime {
   }
 
   pause(runId: string): void {
-    this.require(runId).orchestrator.pause();
+    const active = this.require(runId);
+    active.orchestrator.pause();
+    // Se persiste como en `stop`: sin esto la fila queda en `running` y una
+    // caída del servidor la deja informando que avanzaba cuando estaba en
+    // pausa.
+    this.store.saveRun(active.orchestrator.snapshot);
   }
 
   stop(runId: string): void {
@@ -745,6 +832,53 @@ export class Runtime {
       decision === "grant" ? "granted" : "denied",
       resolution,
     );
+  }
+
+  /**
+   * Reescribe en el vault la nota de un tema de la memoria.
+   *
+   * Se hace por tema y no por lección porque así se lee: una nota "Rodaje" con
+   * todo lo aprendido sobre rodaje, no cincuenta archivos de un párrafo. Falla
+   * en silencio a propósito —un disco lleno no puede tumbar una corrida— pero
+   * deja el error en el log del servidor.
+   *
+   * Es público porque la memoria entra por dos puertas: `record_lesson` de un
+   * agente y la API cuando la carga una persona. Si sólo espejara la primera,
+   * lo que vos escribís no aparecería en Obsidian y el vault mentiría por
+   * omisión.
+   */
+  async espejarAprendizajes(
+    company: { id: string; name: string },
+    topic: string,
+  ): Promise<void> {
+    try {
+      const todas = this.store.listLearnings(company.id);
+      const delTema = todas.filter((learning) => learning.topic === topic);
+      // Un tema que se quedó sin lecciones tiene que **desaparecer** del vault.
+      // Salir sin hacer nada dejaba la nota entera en Obsidian después de
+      // borrar su última lección: el vault seguía enseñando algo que la empresa
+      // ya no cree, y eso es peor que no espejar, porque nadie sospecha de una
+      // nota que está ahí.
+      if (delTema.length === 0) {
+        await this.contexto.borrar({ id: company.id, nombre: company.name }, rutaDeTema(topic));
+        return;
+      }
+      await this.contexto.escribir(
+        { id: company.id, nombre: company.name },
+        rutaDeTema(topic),
+        notaDeAprendizajes({
+          tema: topic,
+          empresa: company.name,
+          // La fecha entra formateada, como en el render de documentos: acá
+          // adentro no hay reloj.
+          fecha: new Date().toISOString().slice(0, 10),
+          lecciones: delTema,
+          temas: [...new Set(todas.map((l) => l.topic))],
+        }),
+      );
+    } catch (error) {
+      console.error("no se pudo espejar la memoria al vault:", error);
+    }
   }
 
   private require(runId: string): ActiveRun {
@@ -1029,6 +1163,55 @@ export class Runtime {
       herramientasOtorgadas: otorgadas,
       avisos,
     };
+  }
+
+  /**
+   * Lleva a las corridas vivas un rol que se editó desde la configuración.
+   *
+   * La corrida congela el organigrama y el catálogo al arrancar. Para el
+   * borrado ya estaba resuelto (`removeRoleFromLiveRuns`); para la edición no,
+   * y ahí el síntoma es peor porque nada falla: se instala un servidor MCP
+   * desde la tienda, se le asignan sus herramientas a los roles, la base queda
+   * impecable y los agentes siguen sin verlas. Lo medimos con Brave conectado
+   * y `ready`, con las dos tools otorgadas a los tres roles, y una corrida
+   * entera insistiendo con `web_search` —que su proveedor no soporta— sin una
+   * sola invocación al servidor que tenía al lado.
+   *
+   * Las herramientas nuevas entran al catálogo de la corrida antes de otorgar:
+   * un `toolIds` que apunta a algo que la corrida no tiene en catálogo no le
+   * agrega nada al agente. Lo *ejecutable* ya está —el registry es el de la
+   * empresa, compartido con la corrida—, lo que faltaba era el catálogo.
+   */
+  actualizarRolEnCorridasVivas(companyId: string, role: Role): number {
+    const catalogo = this.store.listTools(companyId);
+    let alcanzadas = 0;
+
+    for (const active of this.runs.values()) {
+      if (active.companyId !== companyId) continue;
+      if (!active.state.roles.some((candidate) => candidate.id === role.id)) continue;
+
+      const conocidas = new Set(active.state.tools.map((tool) => tool.id));
+      const nuevas = catalogo.filter(
+        (tool) => role.toolIds.includes(tool.id) && !conocidas.has(tool.id),
+      );
+      for (const tool of nuevas) active.state.incorporarHerramienta(tool, null);
+      if (!active.state.actualizarRol(role)) continue;
+      alcanzadas++;
+
+      if (nuevas.length > 0) {
+        active.bus.emit({
+          type: "log",
+          level: "info",
+          runId: active.run.id,
+          tick: active.run.tick,
+          roleId: role.id,
+          message:
+            `${role.name} recibe ${nuevas.length} herramienta(s) desde la configuración y las ` +
+            `tiene en su próximo turno: ${nuevas.map((tool) => tool.name).join(", ")}.`,
+        });
+      }
+    }
+    return alcanzadas;
   }
 
   /**

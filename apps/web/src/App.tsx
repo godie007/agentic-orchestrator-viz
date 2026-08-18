@@ -24,7 +24,7 @@ import {
   Store,
 } from "lucide-react";
 import { api, type CompanyBundle } from "./api.js";
-import { Empty, Skeleton, BotonDeTema, ToastProvider } from "./ui/index.js";
+import { Empty, Skeleton, BotonDeTema, PulsoDeCorrida, ToastProvider } from "./ui/index.js";
 import { Board } from "./routes/Board.js";
 import { LiveProcess } from "./routes/LiveProcess.js";
 import { McpHub } from "./routes/McpHub.js";
@@ -125,6 +125,10 @@ function Shell() {
         </nav>
 
         <div className="ml-auto flex items-center gap-2">
+          {/* Cuánto lleva el proyecto trabajando su encargo. Vive en el shell y
+              no en la pantalla de proceso porque un encargo dura horas y quien
+              lo sigue está en el tablero o en la salida, no mirando la traza. */}
+          {companyId && <PulsoDeCorrida companyId={companyId} />}
           {/* Alterna rápido entre proyectos conservando la sección abierta. */}
           <select
             value={companyId ?? ""}
