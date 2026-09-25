@@ -401,6 +401,14 @@ export const repositorioSchema = z.object({
   /** Lo que se levanta adentro: ver `servicioSchema`. Se detecta al cargar y se edita en la UI. */
   servicios: z.array(servicioSchema).max(20).default([]),
   /**
+   * Si cada turno de agente cierra con un commit (checkpoint). Por default no:
+   * los cambios quedan sin commitear y la persona decide qué prepara, escribe
+   * (o genera) el mensaje, commitea y publica —el flujo de Cursor—. Cada
+   * pedido igual se puede ver y deshacer: el turno toma instantáneas del árbol
+   * sin tocar la rama.
+   */
+  commitsAutomaticos: z.boolean().default(false),
+  /**
    * Llegó importado de un blueprint: la allowlist está pero nadie la confirmó
    * en esta máquina. Hasta confirmarla no se ejecuta nada.
    */
@@ -537,8 +545,20 @@ export const mcpServerSchema = z.object({
   description: z.string().max(1000).default(""),
   transport: mcpTransportSchema,
   enabled: z.boolean().default(true),
-  /** Auto-aprobar todas las tools de este servidor al descubrirlas. */
+  /**
+   * Auto-aprobar todas las tools de este servidor al descubrirlas. Apagado,
+   * sólo piden aprobación las que el servidor **no** declara de sólo lectura
+   * (`annotations.readOnlyHint`): en una base de datos, listar tablas corre
+   * solo y una migración espera a una persona.
+   */
   autoApproveTools: z.boolean().default(true),
+  /**
+   * Roles a los que se otorgan las tools del servidor **cuando aparezcan**. Un
+   * servidor con OAuth no las publica hasta que una persona lo autoriza en el
+   * navegador; sin esto, autorizar dejaba las herramientas sin dueño y había
+   * que acordarse de volver a asignarlas. Se vacía al otorgarlas.
+   */
+  otorgarAlConectar: z.array(idSchema).default([]),
   /**
    * Qué variables de entorno necesita el servidor, declaradas de antemano.
    * `ref` es el **nombre** de la variable (regla de secretos por referencia).
@@ -589,6 +609,11 @@ export const mcpServerHealthSchema = z.object({
    * aparecía lejos de su causa.
    */
   envFaltantes: z.array(z.string()).default([]),
+  /**
+   * El servidor pide autorización OAuth (Supabase, Sentry…): la URL para
+   * iniciar sesión en el navegador. Mientras no se autorice, no conecta.
+   */
+  autorizacion: z.string().nullable().default(null),
 });
 export type McpServerHealth = z.infer<typeof mcpServerHealthSchema>;
 

@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 import {
   MEJORADOR_DE_CODIGO,
   argvATexto,
@@ -59,6 +59,7 @@ import {
 import { RepoStore, type EventoDeCodigo } from "./repos.js";
 import { ServiciosVivos, type EntornoDeArranque, type VistaDeServicio } from "./servicios.js";
 import { ControlDeVersiones } from "./scm.js";
+import { crearFabricaOAuth, olvidarOAuth } from "./mcp-oauth.js";
 import { git } from "./git.js";
 import {
   ArriendosDeCodigo,
@@ -258,11 +259,17 @@ export class Runtime {
       // se puede cumplir hace gastar turnos intentándola.
       this.registrarCodigoEn(tools, companyId);
       const health = new Map<string, McpServerHealth>();
-      const mcp = new McpBridge(tools, resolveSecret, (update) => {
-        health.set(update.serverId, update);
-        this.broadcastMcp(update);
-        this.persistMcpTools(companyId, tools);
-      });
+      const mcp = new McpBridge(
+        tools,
+        resolveSecret,
+        (update) => {
+          health.set(update.serverId, update);
+          this.broadcastMcp(update);
+          this.persistMcpTools(companyId, tools);
+          if (update.status === "ready") this.otorgarAlConectar(companyId, update.serverId);
+        },
+        this.fabricaOAuth,
+      );
       runtime = { companyId, tools, mcp, health };
       this.companies.set(companyId, runtime);
     }
@@ -280,7 +287,7 @@ export class Runtime {
       companyId,
       emitirCheckpoint: (
         runId: string,
-        evento: { roleId: string; repoId: string; rama: string; sha: string; mensaje: string; archivos: number },
+        evento: { roleId: string; repoId: string; rama: string; sha: string; mensaje: string; archivos: number; antes?: string; commit?: boolean },
       ) => {
         const activa = this.runs.get(runId);
         activa?.bus.emit({ type: "codigo.checkpoint", runId, tick: activa.state.tick, ...evento });
@@ -422,7 +429,9 @@ export class Runtime {
     }
     const sesion = this.repos.sesionAbierta(repo.id, companyId);
     const persona = await this.repos.identidadDePersona();
-    const sha = sesion
+    // Sin commits automáticos, package.json y el lockfile quedan como cambios
+    // para que la persona los commitee con el resto.
+    const sha = sesion && repo.commitsAutomaticos
       ? await this.repos.checkpoint(sesion, repo, { nombre: persona.nombre, id: "persona", email: persona.email }, request.reason, {
           titulo: `Instala ${pedido.paquetes.join(", ")}`,
         })
@@ -1022,6 +1031,7 @@ export class Runtime {
       .filter((tool) => tool.mcpServerId === serverId).length;
     this.store.deleteToolsByMcpServer(companyId, serverId);
     this.store.deleteMcpServer(serverId);
+    olvidarOAuth(this.dirOAuth, serverId);
     const rolesPodados = this.store.podarToolIdsHuerfanos(companyId);
     return { herramientas, rolesPodados };
   }
@@ -1087,6 +1097,45 @@ export class Runtime {
    * la empresa pueda asignarlas a un rol y la asignación sobreviva a un
    * reinicio aunque el servidor MCP esté caído en ese momento.
    */
+  /** Dónde viven los tokens OAuth de los servidores MCP: fuera de la base. Ver `mcp-oauth.ts`. */
+  private get dirOAuth(): string {
+    return join(dirname(this.env.databaseUrl), "mcp-oauth");
+  }
+
+  private readonly fabricaOAuth = (server: McpServer, alPedir: (url: URL) => void) =>
+    crearFabricaOAuth(this.dirOAuth, `${this.env.apiUrl.replace(/\/$/, "")}/api/mcp/oauth/callback`)(server, alPedir);
+
+  /** La vuelta del navegador: busca en todas las empresas el servidor que esperaba ese `state`. */
+  async completarAutorizacionMcp(estado: string, codigo: string): Promise<{ serverId: string; nombre: string } | null> {
+    for (const runtime of this.companies.values()) {
+      const hecho = await runtime.mcp.completarAutorizacion(estado, codigo);
+      if (hecho) return hecho;
+    }
+    return null;
+  }
+
+  /**
+   * Las tools de un servidor que recién se conectó van a los roles que se
+   * anotaron al darlo de alta (`otorgarAlConectar`), también en las corridas
+   * vivas, y la lista se vacía: es de una sola vez.
+   */
+  private otorgarAlConectar(companyId: string, serverId: string): void {
+    const server = this.store.listMcpServers(companyId).find((s) => s.id === serverId);
+    if (!server?.otorgarAlConectar.length) return;
+    const ids = this.store
+      .listTools(companyId)
+      .filter((tool) => tool.mcpServerId === serverId)
+      .map((tool) => tool.id);
+    if (!ids.length) return;
+    for (const rol of this.store.listRoles(companyId)) {
+      if (!server.otorgarAlConectar.includes(rol.id)) continue;
+      const actualizado = { ...rol, toolIds: [...new Set([...rol.toolIds, ...ids])] };
+      this.store.saveRole(actualizado);
+      this.actualizarRolEnCorridasVivas(companyId, actualizado);
+    }
+    this.store.saveMcpServer({ ...server, otorgarAlConectar: [] });
+  }
+
   private persistMcpTools(companyId: string, tools: ToolRegistry): void {
     const existing = new Map(this.store.listTools(companyId).map((tool) => [tool.name, tool]));
     for (const described of tools.describe()) {
@@ -1385,7 +1434,7 @@ export class Runtime {
     approvalId: string,
     decision: "grant" | "deny",
     resolution: string,
-  ): boolean {
+  ): Promise<boolean> {
     const active = this.require(runId);
     return active.orchestrator.resolveApproval(
       approvalId,

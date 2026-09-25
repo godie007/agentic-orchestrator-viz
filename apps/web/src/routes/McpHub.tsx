@@ -159,6 +159,20 @@ export function McpHub({ company }: { company: CompanyBundle }) {
                       )}
                     </button>
                     <div className="flex gap-1 px-3 pb-2">
+                      {server.autorizacion && (
+                        // El servidor pide iniciar sesión (OAuth): se abre en otra
+                        // pestaña, y la vuelta la recibe el servidor del orquestador.
+                        // Cuando termina, el estado llega solo por SSE.
+                        <a
+                          href={server.autorizacion}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          title="Iniciá sesión en el servicio para que el orquestador pueda usar este servidor"
+                          className="inline-flex items-center rounded bg-accent px-2 py-1 text-xs font-medium text-white hover:opacity-90"
+                        >
+                          Autorizar
+                        </a>
+                      )}
                       <Button onClick={() => reconnect.mutate(server.serverId)}>reconectar</Button>
                       {config && (
                         <Button
@@ -310,6 +324,7 @@ function AltaDeServidor({
           description: servidor.description,
           transport: servidor.transport,
           enabled: true,
+          otorgarAlConectar: [],
           autoApproveTools: true,
           envRequeridas: [],
           catalogoId: null,

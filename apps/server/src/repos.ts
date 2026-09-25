@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { cp, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import {
@@ -283,6 +284,7 @@ export class RepoStore {
         unaVez: [],
       },
       servicios: await detectarServicios(destino, carga.origen.tipo === "local" ? resolve(carga.origen.ruta) : null),
+      commitsAutomaticos: false,
       pendienteDeConfirmar: false,
       createdAt: ahora,
       updatedAt: ahora,
@@ -404,9 +406,83 @@ export class RepoStore {
   }
 
   /** Devuelve la sesión abierta del repo, o abre una. Idempotente. */
+  /**
+   * ¿La sesión trabaja sobre la rama del proyecto (`dev`) y no sobre una
+   * `orq/…` propia? Sí para todo repo que vino de afuera con git: la persona
+   * tiene su rama, su historia y su forma de trabajar, y el IDE tiene que estar
+   * "parado" donde está ella. Un repo creado por la empresa o una copia sin git
+   * siguen con su rama de sesión: no hay una rama de afuera que respetar.
+   */
+  usaRamaDelProyecto(repo: Repositorio): boolean {
+    return !repo.origenSinGit && repo.origen.tipo !== "creado";
+  }
+
+  /**
+   * El clon suelta la rama base (queda en HEAD desprendido, mismos archivos)
+   * para que la sesión pueda abrirla: git no deja una rama abierta en dos
+   * carpetas a la vez.
+   */
+  async soltarRamaDelClon(repo: Repositorio): Promise<void> {
+    const clon = this.rutaClon(repo);
+    const actual = (await git(["symbolic-ref", "--short", "-q", "HEAD"], { cwd: clon, tolerar: true })).stdout.trim();
+    if (actual) await git(["checkout", "-q", "--detach"], { cwd: clon, tolerar: true });
+  }
+
+  /** La rama local del clon avanza hasta la de la persona, sólo si es un fast-forward. */
+  private async adelantarRamaLocal(clon: string, rama: string): Promise<void> {
+    const remota = `refs/remotes/origin/${rama}`;
+    if (!(await git(["rev-parse", "--verify", "-q", remota], { cwd: clon, tolerar: true })).ok) return;
+    const local = await git(["rev-parse", "--verify", "-q", `refs/heads/${rama}`], { cwd: clon, tolerar: true });
+    if (!local.ok) {
+      await git(["branch", "-q", "--track", rama, `origin/${rama}`], { cwd: clon, tolerar: true });
+      return;
+    }
+    const adelante = await git(["merge-base", "--is-ancestor", `refs/heads/${rama}`, remota], { cwd: clon, tolerar: true });
+    if (adelante.ok) await git(["update-ref", `refs/heads/${rama}`, remota], { cwd: clon, tolerar: true });
+  }
+
+  /** Ramas abiertas en algún worktree del clon. */
+  private async ramasAbiertasEnClon(clon: string): Promise<Set<string>> {
+    const salida = (await git(["worktree", "list", "--porcelain"], { cwd: clon, tolerar: true })).stdout;
+    return new Set(
+      salida
+        .split("\n")
+        .filter((l) => l.startsWith("branch refs/heads/"))
+        .map((l) => l.slice("branch refs/heads/".length)),
+    );
+  }
+
+  /**
+   * Una sesión de antes, en una `orq/…`, pasa a la rama del proyecto si todavía
+   * no tiene trabajo propio (ni commits ni cambios): para la persona es la
+   * misma sesión, ahora parada donde está su repo. Con trabajo no se toca —se
+   * decide desde el panel: cambiar a `dev` y traerlo, o integrarlo como rama—.
+   */
+  async alinearConLaRamaDelProyecto(sesion: SesionCodigo, repo: Repositorio): Promise<SesionCodigo> {
+    if (!this.usaRamaDelProyecto(repo) || !sesion.rama.startsWith("orq/")) return sesion;
+    const g = this.gitSesion(sesion, repo);
+    const commits = sesion.baseSha
+      ? Number((await git(["rev-list", "--count", `${sesion.baseSha}..HEAD`], { ...g, tolerar: true })).stdout.trim() || 0)
+      : 1;
+    const sucio = (await git(["status", "--porcelain"], { ...g, tolerar: true })).stdout.trim();
+    if (commits > 0 || sucio) return sesion;
+    const clon = this.rutaClon(repo);
+    await this.soltarRamaDelClon(repo);
+    await this.adelantarRamaLocal(clon, repo.ramaBase);
+    if ((await this.ramasAbiertasEnClon(clon)).has(repo.ramaBase)) return sesion;
+    const cambio = await git(["switch", "-q", repo.ramaBase], { ...g, tolerar: true });
+    if (!cambio.ok) return sesion;
+    await git(["branch", "-q", "-D", sesion.rama], { cwd: clon, tolerar: true });
+    const baseSha = (await git(["rev-parse", "HEAD"], g)).stdout.trim();
+    const alineada: SesionCodigo = { ...sesion, rama: repo.ramaBase, baseSha, updatedAt: Date.now() };
+    this.guardarSesion(alineada);
+    this.emitir({ tipo: "sesion_abierta", companyId: repo.companyId, repoId: repo.id, sesionId: sesion.id, detalle: repo.ramaBase, at: Date.now() });
+    return alineada;
+  }
+
   async abrirSesion(repo: Repositorio, runId: string | null = null): Promise<SesionCodigo> {
     const abierta = this.sesionAbierta(repo.id, repo.companyId);
-    if (abierta && existsSync(this.rutaWorktree(abierta))) return abierta;
+    if (abierta && existsSync(this.rutaWorktree(abierta))) return this.alinearConLaRamaDelProyecto(abierta, repo);
     if (abierta) {
       // La fila dice abierta pero el worktree no está: alguien lo borró a mano.
       this.guardarSesion({ ...abierta, estado: "descartada" });
@@ -415,7 +491,7 @@ export class RepoStore {
     const clon = this.rutaClon(repo);
     const fecha = new Date().toISOString().slice(0, 10).replace(/-/g, "");
     const sufijo = Math.random().toString(36).slice(2, 6);
-    const rama = `orq/${fecha}-${sufijo}`;
+    let rama = `orq/${fecha}-${sufijo}`;
     const carpeta = `worktrees/${repo.slug}/${fecha}-${sufijo}`;
     const destino = join(this.directorios.ruta(repo.companyId), carpeta);
     await mkdir(dirname(destino), { recursive: true });
@@ -434,12 +510,31 @@ export class RepoStore {
       cwd: clon,
       tolerar: true,
     });
-    const base = remota.ok ? `origin/${repo.ramaBase}` : repo.ramaBase;
+    let base = remota.ok ? `origin/${repo.ramaBase}` : repo.ramaBase;
     const tieneCommits = (await git(["rev-parse", "--verify", "-q", "HEAD"], { cwd: clon, tolerar: true })).ok;
-    if (tieneCommits) {
-      await git(["worktree", "add", "-q", "-b", rama, destino, base], { cwd: clon });
-    } else {
-      await git(["worktree", "add", "-q", "--orphan", "-b", rama, destino], { cwd: clon });
+    // La sesión se para en la rama del proyecto: el clon la suelta, se pone al
+    // día con la de la persona y se abre en el worktree. Si justo está
+    // abierta en otro lado, se cae a una rama de sesión, como antes.
+    let enLaRamaDelProyecto = false;
+    if (tieneCommits && this.usaRamaDelProyecto(repo)) {
+      await this.soltarRamaDelClon(repo);
+      await this.adelantarRamaLocal(clon, repo.ramaBase);
+      const existe = (await git(["rev-parse", "--verify", "-q", `refs/heads/${repo.ramaBase}`], { cwd: clon, tolerar: true })).ok;
+      if (existe && !(await this.ramasAbiertasEnClon(clon)).has(repo.ramaBase)) {
+        const r = await git(["worktree", "add", "-q", destino, repo.ramaBase], { cwd: clon, tolerar: true });
+        if (r.ok) {
+          enLaRamaDelProyecto = true;
+          rama = repo.ramaBase;
+          base = repo.ramaBase;
+        }
+      }
+    }
+    if (!enLaRamaDelProyecto) {
+      if (tieneCommits) {
+        await git(["worktree", "add", "-q", "-b", rama, destino, base], { cwd: clon });
+      } else {
+        await git(["worktree", "add", "-q", "--orphan", "-b", rama, destino], { cwd: clon });
+      }
     }
     const baseSha = tieneCommits
       ? (await git(["rev-parse", base], { cwd: clon })).stdout.trim()
@@ -503,8 +598,90 @@ export class RepoStore {
     const sucio = (await git(["status", "--porcelain", "--untracked-files=no"], { cwd: clon, tolerar: true })).stdout.trim();
     if (actual === repo.ramaBase && !sucio) {
       await git(["merge", "--ff-only", "-q", `origin/${repo.ramaBase}`], { cwd: clon, tolerar: true });
+    } else if (!(await this.ramasAbiertasEnClon(clon)).has(repo.ramaBase)) {
+      // Nadie la tiene abierta: avanza sola hasta la de la persona.
+      await this.adelantarRamaLocal(clon, repo.ramaBase);
+      // El clon desprendido es la vista de la base sin sesión: que sea la de hoy.
+      if (!actual && !sucio) await git(["checkout", "-q", "--detach", repo.ramaBase], { cwd: clon, tolerar: true });
     }
     return { ok: true, detalle: "Sincronizado con tu repo." };
+  }
+
+  // --- Instantáneas: lo que hizo un turno, sin commitear ------------------------
+
+  /**
+   * Un commit suelto con el estado del árbol **tal cual está** —lo commiteado,
+   * lo modificado y lo nuevo—, sin tocar la rama ni el índice de la sesión.
+   *
+   * Es lo que permite que un agente no commitee: el turno toma una al empezar
+   * y otra al terminar, y lo que cambió es la diferencia. Con eso el chat
+   * sigue mostrando "qué cambió este pedido" y lo puede deshacer, mientras los
+   * cambios esperan sin commitear a que la persona los prepare, escriba el
+   * mensaje y los publique. Se arma con un índice aparte (`GIT_INDEX_FILE`) y
+   * se ancla en `refs/orq/instantaneas/…` para que git no la borre.
+   */
+  async instantanea(sesion: SesionCodigo, repo: Repositorio, etiqueta: string): Promise<string> {
+    const g = this.gitSesion(sesion, repo);
+    const indice = join(tmpdir(), `orq-indice-${sesion.id}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`);
+    try {
+      const cabeza = (await git(["rev-parse", "-q", "--verify", "HEAD"], { ...g, tolerar: true })).stdout.trim();
+      if (cabeza) await git(["read-tree", cabeza], { ...g, indice });
+      await git(["add", "-A"], { ...g, indice });
+      const arbol = (await git(["write-tree"], { ...g, indice })).stdout.trim();
+      const sha = (
+        await git(["commit-tree", arbol, ...(cabeza ? ["-p", cabeza] : []), "-m", `instantánea: ${etiqueta}`], g)
+      ).stdout.trim();
+      await git(["update-ref", `refs/orq/instantaneas/${slugTecnico(etiqueta)}-${sha.slice(0, 8)}`, sha], g);
+      return sha;
+    } finally {
+      await rm(indice, { force: true });
+    }
+  }
+
+  /** Los archivos que cambiaron entre dos instantáneas (o commits). */
+  async cambiosEntre(sesion: SesionCodigo, repo: Repositorio, desde: string, hasta: string): Promise<Array<{ estado: string; ruta: string }>> {
+    if (!/^[0-9a-f]{7,40}$/.test(desde) || !/^[0-9a-f]{7,40}$/.test(hasta)) throw new Error("Referencia inválida.");
+    const salida = await git(["diff-tree", "-r", "--no-renames", "--name-status", desde, hasta], { ...this.gitSesion(sesion, repo), tolerar: true });
+    return salida.stdout
+      .split("\n")
+      .filter(Boolean)
+      .map((linea) => {
+        const [estado = "", ruta = ""] = linea.split("\t");
+        return { estado: estado.charAt(0), ruta };
+      })
+      .filter((a) => a.ruta);
+  }
+
+  /**
+   * Deshace en el árbol lo que cambió entre dos instantáneas —el "Deshacer" de
+   * un pedido del chat cuando no hubo commit—. Se aplica el diff al revés
+   * sobre los archivos (sin índice); si la persona tocó después las mismas
+   * líneas, no se aplica nada y se dice qué choca.
+   */
+  async deshacerEntre(sesion: SesionCodigo, repo: Repositorio, desde: string, hasta: string): Promise<void> {
+    if (!/^[0-9a-f]{7,40}$/.test(desde) || !/^[0-9a-f]{7,40}$/.test(hasta)) throw new Error("Referencia inválida.");
+    const g = this.gitSesion(sesion, repo);
+    const diff = (await git(["diff", "--binary", "--no-color", "--no-ext-diff", desde, hasta], g)).stdout;
+    if (!diff.trim()) return;
+    const prueba = await git(["apply", "-R", "--check", "-"], { ...g, entrada: diff, tolerar: true });
+    if (!prueba.ok) {
+      throw new Error(
+        `No se pudo deshacer sin pisar cambios hechos después: ${prueba.stderr.trim().split("\n").slice(0, 3).join(" ")}`,
+      );
+    }
+    await git(["apply", "-R", "-"], { ...g, entrada: diff });
+    this.avisarCambioDeSesion(sesion, repo, "pedido deshecho");
+  }
+
+  /** Ajustes del repo que decide la persona desde la UI. */
+  actualizarAjustes(repo: Repositorio, ajustes: { commitsAutomaticos?: boolean }): Repositorio {
+    const actualizado: Repositorio = {
+      ...repo,
+      ...(ajustes.commitsAutomaticos != null ? { commitsAutomaticos: ajustes.commitsAutomaticos } : {}),
+      updatedAt: Date.now(),
+    };
+    this.store.saveRepositorio(actualizado);
+    return actualizado;
   }
 
   // --- Para el control de versiones del IDE (`scm.ts`) ---------------------------
@@ -923,14 +1100,26 @@ export class RepoStore {
   async integrar(
     sesion: SesionCodigo,
     repo: Repositorio,
+    opciones: {
+      /** Además, subir la rama al remoto de la persona (`git push origin <rama>`). */
+      subir?: boolean;
+    } = {},
   ): Promise<
-    | { ok: true; modo: "fast-forward" | "rama" | "copia"; detalle: string }
+    | { ok: true; modo: "fast-forward" | "rama" | "copia"; detalle: string; sigueAbierta?: boolean }
     | { ok: false; motivo: string; conflictos?: string[] }
   > {
     if (sesion.estado !== "abierta") return { ok: false, motivo: "La sesión ya está cerrada." };
     const g = this.gitSesion(sesion, repo);
     const pendientes = await git(["status", "--porcelain"], g);
     if (pendientes.stdout.trim()) {
+      // Sin commits automáticos, lo que no está commiteado es de la persona
+      // decidirlo: publicar no se lo commitea por ella con un mensaje genérico.
+      if (!repo.commitsAutomaticos) {
+        return {
+          ok: false,
+          motivo: "Tenés cambios sin commitear. Preparalos y hacé commit (podés generar el mensaje con ✨), o descartalos, y después publicá.",
+        };
+      }
       await this.checkpoint(sesion, repo, { nombre: "Orquestador", id: "orquestador" }, "Cambios pendientes al integrar");
     }
 
@@ -987,6 +1176,29 @@ export class RepoStore {
       const local = await this.integrarEnRepoLocal(sesion, repo);
       if ("ok" in local) return local;
       resultado = local;
+    }
+
+    if (opciones.subir) {
+      const subida = await this.subirAlRemoto(sesion, repo);
+      if (!subida.ok) return { ok: false, motivo: `${resultado.detalle} Pero no se pudo subir: ${subida.detalle}` };
+      resultado = { ...resultado, detalle: `${resultado.detalle} ${subida.detalle}` };
+    }
+
+    // En la rama del proyecto publicar no cierra nada: la persona sigue
+    // trabajando sobre `dev`, con los mismos servicios levantados. La base
+    // pasa a ser lo publicado, así "contra la base" vuelve a empezar de cero.
+    if (this.usaRamaDelProyecto(repo) && !sesion.rama.startsWith("orq/")) {
+      const cabeza = (await git(["rev-parse", "HEAD"], g)).stdout.trim();
+      this.guardarSesion({ ...sesion, baseSha: cabeza, updatedAt: Date.now() });
+      this.emitir({
+        tipo: "sesion_integrada",
+        companyId: sesion.companyId,
+        repoId: repo.id,
+        sesionId: sesion.id,
+        detalle: resultado.detalle,
+        at: Date.now(),
+      });
+      return { ok: true, ...resultado, sigueAbierta: true };
     }
 
     await git(["worktree", "remove", "--force", this.rutaWorktree(sesion)], { cwd: clon, tolerar: true });
@@ -1086,6 +1298,25 @@ export class RepoStore {
     return { modo: "rama", detalle: existia ? `${rama} avanzó en ${destino}.` : `Se creó la rama ${rama} en ${destino}.` };
   }
 
+  /**
+   * Sube la rama al remoto de la persona. Con origen local se empuja **desde su
+   * repo** a su `origin` (su GitHub), con su ayudante de credenciales o su
+   * agente SSH; con origen git, desde el clon. Sin hooks —la config segura los
+   * apaga—, y sin forzar nunca: un push que no es fast-forward se rechaza.
+   */
+  private async subirAlRemoto(sesion: SesionCodigo, repo: Repositorio): Promise<{ ok: boolean; detalle: string }> {
+    const cwd = repo.origen.tipo === "local" ? repo.origen.ruta : this.rutaClon(repo);
+    const tieneRemoto = (await git(["remote", "get-url", "origin"], { cwd, tolerar: true })).stdout.trim();
+    if (!tieneRemoto) return { ok: false, detalle: "tu repo no tiene un remoto origin." };
+    const r = await git([...(await this.configCredenciales()), "push", "origin", `${sesion.rama}:${sesion.rama}`], {
+      cwd,
+      tolerar: true,
+      corteMs: 120_000,
+    });
+    if (!r.ok) return { ok: false, detalle: r.stderr.trim().split("\n").filter((l) => !l.startsWith("hint:")).slice(-3).join(" ") };
+    return { ok: true, detalle: `Se subió ${sesion.rama} a ${tieneRemoto}.` };
+  }
+
   /** Origen sin git: vuelve a la carpeta lo que cambió, sin pisar lo que cambió la persona. */
   private async copiarDeVuelta(
     sesion: SesionCodigo,
@@ -1147,7 +1378,13 @@ export class RepoStore {
     await git(["worktree", "remove", "--force", this.rutaWorktree(sesion)], { cwd: clon, tolerar: true });
     await rm(this.rutaWorktree(sesion), { recursive: true, force: true });
     await git(["worktree", "prune"], { cwd: clon, tolerar: true });
-    await git(["branch", "-D", sesion.rama], { cwd: clon, tolerar: true });
+    if (sesion.rama.startsWith("orq/")) {
+      await git(["branch", "-D", sesion.rama], { cwd: clon, tolerar: true });
+    } else if ((await git(["rev-parse", "--verify", "-q", `refs/remotes/origin/${sesion.rama}`], { cwd: clon, tolerar: true })).ok) {
+      // La rama del proyecto no se borra: vuelve a estar como en el repo de la
+      // persona, que es lo que significa descartar el trabajo de la sesión.
+      await git(["branch", "-f", sesion.rama, `origin/${sesion.rama}`], { cwd: clon, tolerar: true });
+    }
     this.guardarSesion({ ...sesion, estado: "descartada" });
     this.emitir({
       tipo: "sesion_descartada",
@@ -1264,6 +1501,7 @@ export class RepoStore {
         unaVez: [],
       },
       servicios: [],
+      commitsAutomaticos: false,
       pendienteDeConfirmar: false,
       createdAt: ahora,
       updatedAt: ahora,

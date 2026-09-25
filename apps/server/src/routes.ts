@@ -502,6 +502,31 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
 
   // --- Tienda de servidores MCP -------------------------------------------
 
+  /**
+   * La vuelta del navegador después de autorizar un servidor MCP con OAuth.
+   * Se contesta una página, no JSON: la abre la persona en su navegador.
+   */
+  app.get("/api/mcp/oauth/callback", async (request, reply) => {
+    const { code, state, error, error_description } = request.query as Record<string, string | undefined>;
+    const pagina = (titulo: string, detalle: string) =>
+      reply
+        .type("text/html; charset=utf-8")
+        .send(
+          `<!doctype html><meta charset="utf-8"><title>${titulo}</title><body style="font:15px system-ui;padding:3rem;max-width:36rem;margin:auto;color:#222"><h2>${titulo}</h2><p>${detalle}</p><p style="color:#777">Podés cerrar esta pestaña y volver al orquestador.</p><script>setTimeout(()=>window.close(),2500)</script></body>`,
+        );
+    const escapar = (t: string) => t.replace(/[<>&"]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" })[c]!);
+    if (error) return pagina("No se autorizó", escapar(error_description ?? error));
+    if (!code || !state) return pagina("Falta información", "La vuelta no trajo el código de autorización.");
+    try {
+      const hecho = await runtime.completarAutorizacionMcp(state, code);
+      return hecho
+        ? pagina(`Listo: ${escapar(hecho.nombre)} está autorizado`, "El servidor se conectó y sus herramientas ya están disponibles para los agentes.")
+        : pagina("No encontré ese pedido", "Puede que ya se haya completado, o que el servidor se haya reiniciado. Volvé a apretar Autorizar en el Hub.");
+    } catch (fallo) {
+      return pagina("No se pudo completar la autorización", escapar(fallo instanceof Error ? fallo.message : String(fallo)));
+    }
+  });
+
   app.get("/api/tienda-mcp", async (request) => {
     const { companyId } = request.query as { companyId?: string };
     const instalados = companyId
@@ -1175,7 +1200,7 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
     const parsed = resolveApprovalSchema.safeParse(request.body);
     if (!parsed.success) return invalid(reply, parsed.error);
     try {
-      const resolved = runtime.resolveApproval(
+      const resolved = await runtime.resolveApproval(
         id,
         approvalId,
         parsed.data.decision,

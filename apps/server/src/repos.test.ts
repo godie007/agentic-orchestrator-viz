@@ -131,13 +131,34 @@ describe("RepoStore con un origen local con git", () => {
     const sesion = await repos.abrirSesion(repo);
     writeFileSync(join(repos.rutaWorktree(sesion), "nuevo.js"), "hola\n");
 
+    // Sin commits automáticos, publicar no commitea por la persona.
+    const sinCommit = await repos.integrar(sesion, repo);
+    expect(sinCommit.ok).toBe(false);
+    expect(sinCommit.ok === false && sinCommit.motivo).toMatch(/sin commitear/);
+    expect(existsSync(join(origen, "nuevo.js"))).toBe(false);
+
+    await repos.checkpoint(sesion, repo, { nombre: "Persona", id: "persona" }, "");
     const resultado = await repos.integrar(sesion, repo);
-    expect(resultado).toMatchObject({ ok: true, modo: "fast-forward" });
+    expect(resultado).toMatchObject({ ok: true, modo: "fast-forward", sigueAbierta: true });
     expect(readFileSync(join(origen, "nuevo.js"), "utf8")).toBe("hola\n");
-    expect(store.getSesionCodigo(sesion.id)?.estado).toBe("integrada");
+    // En la rama del proyecto publicar no cierra la sesión: se sigue trabajando
+    // sobre ella, y la base pasa a ser lo publicado.
+    const despues = store.getSesionCodigo(sesion.id)!;
+    expect(despues.estado).toBe("abierta");
+    expect(despues.baseSha).toBe(sh(origen, "rev-parse", "main").trim());
+    expect(existsSync(repos.rutaWorktree(sesion))).toBe(true);
   });
 
-  it("con la carpeta sucia no mezcla: deja la rama creada y lo dice", async () => {
+  it("la sesión trabaja en la rama del proyecto, no en una rama inventada", async () => {
+    const { repo } = await repos.cargar(COMPANY, { origen: { tipo: "local", ruta: repoDePersona() } });
+    const sesion = await repos.abrirSesion(repo);
+    expect(sesion.rama).toBe("main");
+    expect(sh(repos.rutaWorktree(sesion), "rev-parse", "--abbrev-ref", "HEAD").trim()).toBe("main");
+    // El clon la soltó: quedó desprendido, con los mismos archivos.
+    expect(sh(repos.rutaClon(repo), "rev-parse", "--abbrev-ref", "HEAD").trim()).toBe("HEAD");
+  });
+
+  it("con la carpeta sucia no integra encima: lo dice y la sesión sigue abierta", async () => {
     const origen = repoDePersona();
     const { repo } = await repos.cargar(COMPANY, { origen: { tipo: "local", ruta: origen } });
     const sesion = await repos.abrirSesion(repo);
@@ -145,10 +166,11 @@ describe("RepoStore con un origen local con git", () => {
     writeFileSync(join(origen, "index.js"), "// cambio sin commitear\n");
 
     const resultado = await repos.integrar(sesion, repo);
-    expect(resultado).toMatchObject({ ok: true, modo: "rama" });
-    expect(sh(origen, "branch", "--list", sesion.rama).trim()).toContain(sesion.rama);
+    expect(resultado.ok).toBe(false);
+    expect(resultado.ok === false && resultado.motivo).toMatch(/sin commitear/);
     expect(existsSync(join(origen, "nuevo.js"))).toBe(false);
     expect(readFileSync(join(origen, "index.js"), "utf8")).toBe("// cambio sin commitear\n");
+    expect(store.getSesionCodigo(sesion.id)?.estado).toBe("abierta");
   });
 
   it("si la base cambió y choca, no integra: nombra los conflictos", async () => {
@@ -156,6 +178,7 @@ describe("RepoStore con un origen local con git", () => {
     const { repo } = await repos.cargar(COMPANY, { origen: { tipo: "local", ruta: origen } });
     const sesion = await repos.abrirSesion(repo);
     writeFileSync(join(repos.rutaWorktree(sesion), "index.js"), "sesion\n");
+    await repos.checkpoint(sesion, repo, { nombre: "Persona", id: "persona" }, "");
     writeFileSync(join(origen, "index.js"), "persona\n");
     sh(origen, "commit", "-q", "-am", "cambio de la persona");
 
@@ -165,14 +188,43 @@ describe("RepoStore con un origen local con git", () => {
     expect(store.getSesionCodigo(sesion.id)?.estado).toBe("abierta");
   });
 
-  it("descartar se lleva el worktree y la rama", async () => {
+  it("descartar se lleva el worktree y deja la rama del proyecto como está en el repo de la persona", async () => {
     const { repo } = await repos.cargar(COMPANY, { origen: { tipo: "local", ruta: repoDePersona() } });
     const sesion = await repos.abrirSesion(repo);
     const wt = repos.rutaWorktree(sesion);
+    writeFileSync(join(wt, "nuevo.js"), "hola\n");
+    await repos.checkpoint(sesion, repo, { nombre: "Rol", id: "rol_x" }, "trabajo que se descarta");
     await repos.descartar(sesion, repo);
     expect(existsSync(wt)).toBe(false);
-    expect(sh(repos.rutaClon(repo), "branch", "--list", sesion.rama).trim()).toBe("");
+    const clon = repos.rutaClon(repo);
+    // La rama no se borra —es la del proyecto—: vuelve a la de la persona.
+    expect(sh(clon, "rev-parse", "main").trim()).toBe(sh(clon, "rev-parse", "origin/main").trim());
     expect(store.getSesionCodigo(sesion.id)?.estado).toBe("descartada");
+  });
+
+  it("una instantánea guarda el árbol entero sin tocar la rama ni el índice; deshacer vuelve atrás lo del tramo", async () => {
+    const { repo } = await repos.cargar(COMPANY, { origen: { tipo: "local", ruta: repoDePersona() } });
+    const sesion = await repos.abrirSesion(repo);
+    const wt = repos.rutaWorktree(sesion);
+    writeFileSync(join(wt, "de-la-persona.js"), "mío\n");
+    const antes = await repos.instantanea(sesion, repo, "run_x-antes");
+    // Lo que haría un agente en su turno:
+    writeFileSync(join(wt, "index.js"), "// editado por el agente\n");
+    writeFileSync(join(wt, "nuevo-del-agente.js"), "x\n");
+    const despues = await repos.instantanea(sesion, repo, "run_x-despues");
+
+    expect(sh(wt, "rev-parse", "HEAD").trim()).toBe(sesion.baseSha);
+    expect(sh(wt, "diff", "--cached", "--name-only").trim()).toBe("");
+    expect((await repos.cambiosEntre(sesion, repo, antes, despues)).map((c) => `${c.estado} ${c.ruta}`).sort()).toEqual([
+      "A nuevo-del-agente.js",
+      "M index.js",
+    ]);
+
+    await repos.deshacerEntre(sesion, repo, antes, despues);
+    expect(readFileSync(join(wt, "index.js"), "utf8")).toBe("export const suma = (a, b) => a + b;\n");
+    expect(existsSync(join(wt, "nuevo-del-agente.js"))).toBe(false);
+    // Lo que la persona tenía antes del pedido sigue ahí.
+    expect(readFileSync(join(wt, "de-la-persona.js"), "utf8")).toBe("mío\n");
   });
 
   it("el diff muestra también lo que todavía no se commiteó", async () => {
@@ -209,6 +261,7 @@ describe("RepoStore con una carpeta sin git", () => {
     const { repo } = await repos.cargar(COMPANY, { origen: { tipo: "local", ruta: origen } });
     const sesion = await repos.abrirSesion(repo);
     writeFileSync(join(repos.rutaWorktree(sesion), "app.py"), "print('chau')\n");
+    await repos.checkpoint(sesion, repo, { nombre: "Persona", id: "persona" }, "");
     const resultado = await repos.integrar(sesion, repo);
     expect(resultado).toMatchObject({ ok: true, modo: "copia" });
     expect(readFileSync(join(origen, "app.py"), "utf8")).toBe("print('chau')\n");
@@ -353,6 +406,7 @@ describe("repos creados por la empresa", () => {
     const repo = await repos.crearVacio(COMPANY, "app-nueva", "");
     const sesion = await repos.abrirSesion(repo);
     writeFileSync(join(repos.rutaWorktree(sesion), "index.js"), "console.log(1);\n");
+    await repos.checkpoint(sesion, repo, { nombre: "Persona", id: "persona" }, "");
     const resultado = await repos.integrar(sesion, repo);
     expect(resultado).toMatchObject({ ok: true, modo: "fast-forward" });
     expect(readFileSync(join(repos.rutaClon(repo), "index.js"), "utf8")).toBe("console.log(1);\n");

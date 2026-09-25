@@ -570,11 +570,19 @@ export const api = {
   diffDeSesion: (id: string, ruta?: string) =>
     request<{ diff: string }>(`/sesiones/${id}/diff${ruta ? `?ruta=${encodeURIComponent(ruta)}` : ""}`),
   patchUrl: (id: string) => `/api/sesiones/${id}/patch`,
-  integrarSesion: (id: string) =>
+  integrarSesion: (id: string, opciones: { subir?: boolean } = {}) =>
     request<
-      | { ok: true; modo: "fast-forward" | "rama" | "copia"; detalle: string }
+      | { ok: true; modo: "fast-forward" | "rama" | "copia"; detalle: string; sigueAbierta?: boolean }
       | { ok: false; motivo: string; conflictos?: string[] }
-    >(`/sesiones/${id}/integrar`, { method: "POST" }),
+    >(`/sesiones/${id}/integrar`, { method: "POST", body: JSON.stringify(opciones) }),
+  cambiosEntre: (sesionId: string, desde: string, hasta: string) =>
+    request<{ archivos: Array<{ ruta: string; estado: string }> }>(
+      `/sesiones/${sesionId}/entre?desde=${encodeURIComponent(desde)}&hasta=${encodeURIComponent(hasta)}`,
+    ),
+  deshacerEntre: (sesionId: string, desde: string, hasta: string) =>
+    request<{ ok: true }>(`/sesiones/${sesionId}/deshacer-entre`, { method: "POST", body: JSON.stringify({ desde, hasta }) }),
+  ajustesRepo: (repoId: string, ajustes: { commitsAutomaticos?: boolean }) =>
+    request<Repositorio>(`/repos/${repoId}/ajustes`, { method: "PATCH", body: JSON.stringify(ajustes) }),
   descartarSesion: (id: string) => request<{ ok: true }>(`/sesiones/${id}/descartar`, { method: "POST" }),
 
   // --- IDE -------------------------------------------------------------------

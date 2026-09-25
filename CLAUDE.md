@@ -173,6 +173,48 @@ credencial en la base y rompe la garantía de que una empresa exportada a JSON n
 lleva credenciales adentro. Descartarlo en silencio sería peor que no importar —
 el servidor arrancaría sin credencial y el error aparecería lejos de su causa.
 
+**Un servidor MCP remoto puede pedir OAuth, como en `claude mcp add --transport
+http`** (el de Supabase, el de Sentry). Un transporte HTTP sin cabeceras de
+credencial recibe un proveedor OAuth (`mcp-oauth.ts`, inyectado al `McpBridge`
+como `FabricaOAuth`: `packages/tools` no decide dónde van los tokens). Si el
+servidor exige iniciar sesión, la URL queda en `health.autorizacion`, el Hub
+ofrece **Autorizar** y la vuelta llega a `/api/mcp/oauth/callback`, que la ata
+al servidor por el `state` y reconecta. Tres reglas: el puente **no reintenta**
+mientras falte autorizar (el servidor va a decir que no hasta que alguien
+inicie sesión); los tokens van a `data/mcp-oauth/<id>.json` con permisos 0600 y
+**nunca a la base** —la misma regla de secretos por referencia— y se borran con
+el servidor; y como las tools recién aparecen al autorizar, el alta guarda a
+quién dárselas (`otorgarAlConectar`), que se otorga sola al conectar (también en
+las corridas vivas) y se vacía.
+
+Con `autoApproveTools` apagado, sólo pide aprobación lo que el servidor **no**
+declara de sólo lectura (`annotations.readOnlyHint`): en una base de datos,
+listar tablas corre solo y una migración espera a una persona. INSPIA tiene el
+de **staging** (`vrmbrxxcvxeaflsgtyfa`) así; producción es otro proyecto
+(`qnfeqicedlysxredgzid`) y no se dio de alta.
+
+**Aprobar una herramienta la ejecuta** (`Orchestrator.ejecutarAprobada`). Una
+tool con `requiresApproval` no corre: abre una aprobación y el turno espera.
+Antes, aprobar sólo le mandaba "Aprobación concedida" al agente, y si la volvía
+a llamar pedía aprobación otra vez — una migración aprobada no se aplicaba
+nunca. Ahora al aprobar se corre **esa** llamada, con los argumentos que vio la
+persona (el agente no puede cambiar el SQL después), queda en la traza y en
+`activity`, y el resultado le llega al solicitante en el mismo mensaje. El chat
+del IDE muestra la aprobación en línea con el SQL resaltado.
+
+**Un agente de código con un MCP de base de datos recibe cómo trabajar con él**
+(`bloqueDeBaseDeDatos` en `codigo-servidor.ts`): mirar el esquema antes de
+tocarlo, y que un cambio de esquema tiene dos mitades que no se separan —el
+archivo versionado en el repo (la carpeta de migraciones se detecta:
+`backend/migrations` en INSPIA) y **el mismo SQL** aplicado con
+`apply_migration`—. Sin decirlo, un agente hace una sola: SQL en vivo que nadie
+puede reproducir, o un archivo que nunca se aplica.
+
+**Una consulta del chat es trabajo aunque no deje código.** "¿Qué tablas hay?"
+no produce entregables, mensajes ni ediciones, y el detector de pedidos
+perdidos la marcaba `failed`. En una corrida enfocada (`run.foco`), un turno que
+usó herramientas y cerró con una respuesta cuenta.
+
 **La lista autoritativa de servidores es la base, no la memoria del runtime.**
 `McpBridge.disconnect` cierra la conexión y da de baja las herramientas pero no
 publica un último estado, así que el mapa de salud se quedaba con la entrada del
@@ -1185,15 +1227,45 @@ archivos tocados, rechazando los que ella cambió desde la base. `.git/info/excl
 deja afuera `.env*`, `node_modules`, `dist`: sin eso el commit base se llevaba
 los secretos y los agentes los podían leer.
 
-La **sesión** (`sesiones_codigo`) es un worktree con su rama `orq/<fecha>-<x>`,
-una por repo, y **sobrevive a la corrida** como las tareas heredadas. Cada turno
-que escribe cierra con un **checkpoint** —commit con el rol como autor— en el
-mismo `finally` que `agent.turn_end` (`EspacioDeTurno.cerrar`). Es lo único que
-registra lo que editó el CLI con su propio `Edit`, y por eso emite
-`codigo.checkpoint`. Integrar y descartar son sólo de la persona, desde la UI:
-integrar absorbe la base **dentro del worktree** (un conflicto se le pide a un
-agente, nunca se resuelve en la carpeta de ella), crea la rama en su repo y
-avanza con `--ff-only` sólo si tiene la rama base abierta y limpia.
+La **sesión** (`sesiones_codigo`) es un worktree, uno por repo, y **sobrevive a
+la corrida** como las tareas heredadas. **Trabaja en la rama del proyecto**
+(`dev` en INSPIA), no en una inventada: la persona tiene su rama, su historia y
+su forma de trabajar, y el IDE tiene que estar parado donde está ella —una
+`orq/20260925-4t33` en la barra de estado no le dice nada—. Para eso el clon
+**suelta** la rama base (queda en HEAD desprendido: git no deja una rama
+abierta en dos carpetas) y la adelanta hasta la de la persona antes de abrirla
+(`RepoStore.usaRamaDelProyecto`, `soltarRamaDelClon`). Integrar es adelantar
+su `dev` con fast-forward (`integrarRamaPropia`); descartar **no borra** la
+rama: la vuelve a `origin/<rama>`. Las sesiones viejas en `orq/…` sin trabajo
+propio se pasan solas a la rama del proyecto (`alinearConLaRamaDelProyecto`);
+con commits se dejan, y se decide desde el panel. Un repo creado por la
+empresa o una copia sin git siguen con su `orq/…`: no hay rama de afuera que
+respetar.
+
+**Los agentes no commitean: la persona prepara, escribe el mensaje, commitea y
+publica** (el flujo de Cursor; `repositorio.commitsAutomaticos`, default
+`false`). Lo que edita un turno —por las herramientas del org o por el `Edit`
+propio del CLI— queda sin commitear en la rama del proyecto, junto con lo que
+haya editado ella, y nada se commitea por nadie (ni lo de la persona antes del
+turno, ni `package.json` al instalar una dependencia). Para que cada pedido
+del chat se siga pudiendo **ver y deshacer**, el turno toma dos
+**instantáneas** (`RepoStore.instantanea`): un `commit-tree` armado con un
+índice aparte (`GIT_INDEX_FILE`), anclado en `refs/orq/instantaneas/…`, que no
+toca ni la rama ni el índice de la sesión. `codigo.checkpoint` lleva `antes`,
+`sha` y `commit: false`; "ver cambios" es el diff entre las dos y "deshacer"
+lo aplica al revés sobre el árbol (`deshacerEntre`), y si ella tocó después las
+mismas líneas no aplica nada y lo dice. Con `commitsAutomaticos` prendido vuelve
+el checkpoint por turno con el rol como autor.
+
+**Publicar** (antes "integrar") exige que no quede nada sin commitear —no
+commitea por ella con un mensaje genérico—. En la rama del proyecto adelanta su
+`dev` con fast-forward y **la sesión sigue abierta** (se sigue trabajando sobre
+`dev`, con los servicios andando; la base pasa a ser lo publicado). Con
+`subir`, además hace `git push origin <rama>` desde su repo, con su ayudante de
+credenciales o su agente SSH, sin hooks y sin forzar nunca: es una acción hacia
+afuera que la persona marca explícitamente. Absorber la base antes de publicar
+sigue pasando **dentro del worktree**: un conflicto se le pide a un agente,
+nunca se resuelve en la carpeta de ella.
 
 **Git del servidor, endurecido** (`git.ts`): sin hooks (`core.hooksPath=/dev/null`),
 sin fsmonitor, sin config global ni de sistema, identidad fija, nunca pregunta
@@ -1469,6 +1541,24 @@ El chat (`elemento.ts`, `buscarCandidatos`) busca en la carpeta del servicio
 dónde se **define** cada componente y dónde aparece el texto visible, y manda al
 agente los candidatos con el tramo de código de la línea que coincide: el
 agente va derecho al archivo en vez de buscarlo.
+
+**El mismo script es el inspector** (consola y red, como DevTools, con un
+botón "Al chat"). Por eso se inyecta **al principio del `<head>` y sin
+`defer`**: tiene que envolver `console`, `fetch` y `XMLHttpRequest` (axios va
+por el segundo) antes de que corra un solo módulo de la app, o se pierde justo
+el error que tira al arrancar. Lo registrado antes del saludo del IDE
+(`orq-inspector`) espera en una cola acotada; después sólo se le habla a ese
+origen — el único mensaje a `*` es "estoy lista", sin datos. De la red se
+guarda el **cuerpo de la respuesta sólo de lo que falla** (ahí está el mensaje
+del backend), de lo enviado sólo la **descripción** de un multipart (nombre,
+tamaño y tipo de cada archivo: lo que diagnostica una subida) y **nunca
+cabeceras**, que llevan el token. En el chat la falla viaja con los archivos
+propios que nombra el stack —Vite los sirve con su ruta real, `/src/…:línea`—
+y la vecindad de la línea que tiró. El script se prueba en una VM
+(`proxy-vista.test.ts`) y sigue sin backticks ni `${`. Ojo con el nombre de
+archivo: `inspector.ts` al lado de `Inspector.tsx` **choca en macOS** (el
+sistema de archivos no distingue mayúsculas y tsc lo rechaza), por eso los
+tipos viven en `sonda.ts`.
 
 **El chat tiene conversaciones** (`foco.conversacionId`). Cada pedido es una
 corrida nueva y el agente arranca sin memoria, así que los pedidos anteriores

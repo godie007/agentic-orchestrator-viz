@@ -68,6 +68,8 @@ export interface OpcionesGit {
   tolerar?: boolean;
   entrada?: string;
   maxBuffer?: number;
+  /** Otro archivo de índice (`GIT_INDEX_FILE`): para armar una instantánea sin tocar el de la sesión. */
+  indice?: string;
 }
 
 export function entornoGit(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
@@ -131,7 +133,7 @@ function gitUnaVez(args: string[], opciones: OpcionesGit = {}): Promise<Resultad
         // ls-files -o) trabajan sobre el cwd del servidor: la raíz del
         // orquestador. El default es el propio worktree.
         cwd: opciones.cwd ?? opciones.workTree,
-        env: entornoGit(),
+        env: opciones.indice ? { ...entornoGit(), GIT_INDEX_FILE: opciones.indice } : entornoGit(),
         timeout: opciones.corteMs ?? 60_000,
         killSignal: "SIGKILL",
         maxBuffer: opciones.maxBuffer ?? 32 * 1024 * 1024,

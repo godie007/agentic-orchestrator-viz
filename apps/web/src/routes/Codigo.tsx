@@ -31,6 +31,7 @@ import { VistaDeServicio } from "./codigo/VistaDeServicio.js";
 import { Salida } from "./codigo/SalidaDeServicio.js";
 import { IndiceDeNotas, Nota } from "./codigo/Nota.js";
 import type { ElementoSeleccionado } from "./codigo/elemento.js";
+import type { FallaDeVista } from "./codigo/sonda.js";
 import { etiquetaDeLenguaje, lenguajeDe } from "./codigo/monaco.js";
 
 /**
@@ -247,6 +248,21 @@ export function Codigo({ company }: { company: CompanyBundle }) {
         ...previos.filter((a) => !(a.tipo === "elemento" && a.servicioId === servicio.id && a.elemento.selector === elemento.selector)),
         { tipo: "elemento", ruta: servicio.carpeta, servicioId: servicio.id, servicioNombre: servicio.nombre, elemento },
       ]);
+      setChatAbierto(true);
+    },
+    [activa, pestanas],
+  );
+
+  /** Una falla del inspector de la vista previa: al chat, con su stack o su respuesta. */
+  const agregarFalla = useCallback(
+    (servicio: { id: string; nombre: string; carpeta: string }, falla: FallaDeVista) => {
+      const repoId = pestanas.find((p) => p.id === activa)?.repoId;
+      if (repoId) setRepoElegido(repoId);
+      setAdjuntos((previos) =>
+        previos.some((a) => a.tipo === "falla" && a.servicioId === servicio.id && a.falla.titulo === falla.titulo)
+          ? previos
+          : [...previos, { tipo: "falla", ruta: servicio.carpeta, servicioId: servicio.id, servicioNombre: servicio.nombre, falla }],
+      );
       setChatAbierto(true);
     },
     [activa, pestanas],
@@ -646,6 +662,7 @@ export function Codigo({ company }: { company: CompanyBundle }) {
                   repoId={pestanaActiva.repoId}
                   servicioId={pestanaActiva.ruta}
                   onElemento={agregarElemento}
+                  onFalla={agregarFalla}
                 />
               ) : pestanaActiva.tipo === "docs" ? (
                 <Documentacion

@@ -113,11 +113,14 @@ export function ControlDeCodigo({
     onError: (e: Error) => avisar(e.message, "error"),
   });
 
+  const [subir, setSubir] = useState(false);
   const integrar = useMutation({
-    mutationFn: () => api.integrarSesion(sesion!.id),
+    mutationFn: () => api.integrarSesion(sesion!.id, { subir }),
     onSuccess: (r) => {
       setConfirmar(null);
+      setSubir(false);
       if (r.ok) avisar(r.detalle, "ok");
+      else avisar(r.motivo, "error");
       refrescar();
     },
     onError: (e: Error) => {
@@ -146,6 +149,8 @@ export function ControlDeCodigo({
     );
   }
 
+  const ramaActual = estado?.rama ?? sesion.rama;
+  const esRamaDelProyecto = origen !== "creado" && !ramaActual.startsWith("orq/");
   const sensibles = new Set(arbol?.sensibles ?? []);
   const contraBase = arbol?.cambios ?? [];
   const preparados = estado?.preparados ?? [];
@@ -394,12 +399,25 @@ export function ControlDeCodigo({
       <div className="mt-auto space-y-1.5 border-t border-line p-3">
         <button
           type="button"
-          disabled={contraBase.length === 0 || bloqueado}
+          disabled={bloqueado || hayAlgo || (estado ? estado.base.adelante === 0 : contraBase.length === 0)}
           onClick={() => setConfirmar({ tipo: "integrar" })}
+          title={
+            hayAlgo
+              ? "Primero commiteá (o descartá) los cambios: se publica lo commiteado"
+              : estado && estado.base.adelante === 0
+                ? "No hay commits nuevos para publicar"
+                : "Llevar los commits a tu repo"
+          }
           className="flex h-7 w-full items-center justify-center gap-1.5 rounded border border-accent/50 bg-accent/10 text-[12px] font-medium text-accent hover:bg-accent/20 disabled:opacity-40"
         >
-          <GitMerge className="size-3.5" aria-hidden /> Integrar {estado?.rama ?? sesion.rama} a {origen === "git" ? "la rama" : origen === "creado" ? "su main" : "tu repo"}
+          <GitMerge className="size-3.5" aria-hidden />
+          {esRamaDelProyecto
+            ? `Publicar ${estado?.base.adelante ? `${estado.base.adelante} commit(s) ` : ""}en tu ${ramaActual}`
+            : `Integrar ${ramaActual} a ${origen === "git" ? "la rama" : origen === "creado" ? "su main" : "tu repo"}`}
         </button>
+        {hayAlgo && esRamaDelProyecto && (
+          <p className="text-center text-[10px] text-ink-faint">Para publicar, primero commiteá los cambios.</p>
+        )}
         <div className="flex gap-1.5">
           <a
             href={api.patchUrl(sesion.id)}
@@ -421,13 +439,26 @@ export function ControlDeCodigo({
 
       <ConfirmDialog
         abierto={confirmar?.tipo === "integrar"}
-        titulo="Integrar la sesión"
+        titulo={esRamaDelProyecto ? `Publicar en tu ${ramaActual}` : "Integrar la sesión"}
         detalle={
-          origen === "git"
+          <>
+            {origen === "git"
             ? "La rama queda en la copia de trabajo lista para subir; te dice el comando. También podés descargar el patch."
-            : "Se crea la rama en tu repo y, si tenés la rama base abierta y sin cambios pendientes, avanza con fast-forward. Si no, la rama queda para que la mezcles vos."
+            : ramaActual.startsWith("orq/")
+              ? "Se crea la rama en tu repo y, si tenés la rama base abierta y sin cambios pendientes, avanza con fast-forward. Si no, la rama queda para que la mezcles vos."
+              : `Tu ${ramaActual} avanza hasta la sesión, sólo con fast-forward: nada se reescribe. Si la tenés abierta, tiene que estar sin cambios sin commitear; si avanzó por otro lado, primero traé esos cambios.`}
+            {origen !== "creado" ? (
+            <label className="mt-3 flex items-start gap-2 text-[12px] text-ink-dim">
+              <input type="checkbox" checked={subir} onChange={(e) => setSubir(e.target.checked)} className="mt-0.5 accent-[var(--color-accent)]" />
+              <span>
+                Además, subirla a GitHub (<code>git push origin {ramaActual}</code>). Si tu repo despliega desde esa rama, esto dispara el
+                despliegue. No fuerza nunca: si el remoto avanzó, se rechaza.
+              </span>
+            </label>
+          ) : null}
+          </>
         }
-        confirmar="Integrar"
+        confirmar={esRamaDelProyecto ? (subir ? "Publicar y subir" : "Publicar") : "Integrar"}
         pendiente={integrar.isPending}
         onConfirmar={() => integrar.mutate()}
         onCancelar={() => setConfirmar(null)}
@@ -435,7 +466,11 @@ export function ControlDeCodigo({
       <ConfirmDialog
         abierto={confirmar?.tipo === "descartar-sesion"}
         titulo="Descartar la sesión"
-        detalle="Se borran el worktree y la rama con todos sus checkpoints. No hay vuelta atrás. Tu repo original no se toca."
+        detalle={
+          ramaActual.startsWith("orq/")
+            ? "Se borran el worktree y la rama con todos sus checkpoints. No hay vuelta atrás. Tu repo original no se toca."
+            : `Se borra la copia de trabajo y ${ramaActual} vuelve a como está en tu repo: los commits y cambios sin integrar se pierden. Tu repo no se toca.`
+        }
         confirmar="Descartar"
         pendiente={descartarSesion.isPending}
         onConfirmar={() => descartarSesion.mutate()}

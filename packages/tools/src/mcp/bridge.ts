@@ -1,6 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { UnauthorizedError, type OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import { fetchConCa } from "./ca-fetch.js";
 import type { McpServer, McpServerHealth, McpConnectionStatus } from "@orq/shared";
 import { fail, ok, preview, type RegisteredTool } from "../types.js";
@@ -21,6 +22,14 @@ export type McpStatusListener = (health: McpServerHealth) => void;
 /** Cómo se resuelven los secretos: el nombre de la variable → su valor. */
 export type SecretResolver = (envVarName: string) => string | undefined;
 
+/**
+ * Da el proveedor OAuth de un servidor HTTP, o `null` si no corresponde. Lo
+ * inyecta el servidor —que decide dónde se guardan los tokens—, igual que
+ * `resolveSecret`: `packages/tools` no sabe de rutas. `alPedir` se llama con la
+ * URL de autorización cuando el servidor exige iniciar sesión.
+ */
+export type FabricaOAuth = (server: McpServer, alPedir: (url: URL) => void) => OAuthClientProvider | null;
+
 interface Connection {
   server: McpServer;
   client: Client | null;
@@ -30,6 +39,8 @@ interface Connection {
   closed: boolean;
   /** Turnero del servidor: sus llamadas van de a una. Ver `crearFila`. */
   fila: Fila;
+  /** El transporte HTTP en curso: `finishAuth` tiene que llamarse sobre éste. */
+  transporte: StreamableHTTPClientTransport | null;
 }
 
 /** Encola trabajo: devuelve el resultado de cada tarea, corriéndolas de a una. */
@@ -122,6 +133,7 @@ export class McpBridge {
     private readonly registry: ToolRegistry,
     private readonly resolveSecret: SecretResolver,
     private readonly onStatus: McpStatusListener,
+    private readonly oauth: FabricaOAuth | null = null,
   ) {}
 
   /** Estado actual de todos los servidores, para pintar el Hub al abrirlo. */
@@ -179,6 +191,7 @@ export class McpBridge {
       // el Hub y la tienda tienen que poder decir "falta GITHUB_TOKEN" antes
       // de que el handshake falle con un error de auth ajeno.
       envFaltantes: this.referenciasSinValor(server),
+      autorizacion: null,
     };
     const conn: Connection = {
       server,
@@ -187,6 +200,7 @@ export class McpBridge {
       retryTimer: null,
       closed: false,
       fila: crearFila(),
+      transporte: null,
     };
     this.connections.set(server.id, conn);
     this.publish(conn);
@@ -221,7 +235,7 @@ export class McpBridge {
         { name: "orquestador-agentico", version: "0.1.0" },
         { capabilities: {} },
       );
-      await client.connect(this.buildTransport(conn.server));
+      await client.connect(this.buildTransport(conn));
       if (conn.closed) {
         await client.close();
         return;
@@ -246,10 +260,40 @@ export class McpBridge {
         this.scheduleReconnect(conn, "la conexión se cerró");
       };
     } catch (error) {
+      // Falta que una persona autorice: reintentar solo no sirve de nada —el
+      // servidor va a decir que no hasta que alguien inicie sesión—. Se queda
+      // esperando la vuelta del navegador (`completarAutorizacion`).
+      if (error instanceof UnauthorizedError || conn.health.autorizacion) {
+        conn.health.lastError = conn.health.autorizacion
+          ? "Falta autorizar el acceso: abrí el enlace de autorización e iniciá sesión."
+          : `El servidor rechazó la autorización: ${error instanceof Error ? error.message : String(error)}`;
+        this.setStatus(conn, "error");
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       conn.health.errors += 1;
       this.scheduleReconnect(conn, message);
     }
+  }
+
+  /**
+   * La vuelta del navegador después de autorizar: se canjea el código en el
+   * mismo transporte que pidió la autorización y se vuelve a conectar. Se
+   * reconoce la conexión por el `state` de la URL, que es único por pedido.
+   */
+  async completarAutorizacion(estado: string, codigo: string): Promise<{ serverId: string; nombre: string } | null> {
+    for (const conn of this.connections.values()) {
+      const pedido = conn.health.autorizacion;
+      if (!pedido || !conn.transporte) continue;
+      if (new URL(pedido).searchParams.get("state") !== estado) continue;
+      await conn.transporte.finishAuth(codigo);
+      conn.health.autorizacion = null;
+      conn.health.lastError = null;
+      this.setStatus(conn, "connecting");
+      await this.open(conn);
+      return { serverId: conn.server.id, nombre: conn.server.name };
+    }
+    return null;
   }
 
   /** Referencias de env/headers del transporte que no resuelven a un valor. */
@@ -261,7 +305,8 @@ export class McpBridge {
     return [...new Set(refs.filter((ref) => this.resolveSecret(ref) == null))];
   }
 
-  private buildTransport(server: McpServer) {
+  private buildTransport(conn: Connection) {
+    const server = conn.server;
     if (server.transport.type === "stdio") {
       const env: Record<string, string> = {};
       for (const [key, envVar] of Object.entries(server.transport.envRefs)) {
@@ -284,12 +329,24 @@ export class McpBridge {
       if (value != null) headers[header] = value;
     }
     const { caPath } = server.transport;
-    return new StreamableHTTPClientTransport(new URL(server.transport.url), {
+    // Sin cabeceras de credencial declaradas, el servidor puede pedir OAuth
+    // (el MCP remoto de Supabase, el de Sentry): se ofrece un proveedor y, si
+    // lo usa, la URL para iniciar sesión queda en la salud para el Hub.
+    const proveedor =
+      Object.keys(server.transport.headerRefs).length === 0
+        ? (this.oauth?.(server, (url) => {
+            conn.health.autorizacion = url.toString();
+          }) ?? null)
+        : null;
+    const transporte = new StreamableHTTPClientTransport(new URL(server.transport.url), {
       requestInit: { headers },
+      ...(proveedor ? { authProvider: proveedor } : {}),
       // Con CA declarada se verifica contra ella; sin ella, contra las del
       // sistema. En ningún caso se apaga la verificación.
       ...(caPath ? { fetch: fetchConCa(caPath) } : {}),
     });
+    conn.transporte = transporte;
+    return transporte;
   }
 
   /** Descubre las tools del servidor y las publica en el registro. */
@@ -308,10 +365,11 @@ export class McpBridge {
           type: "object",
           properties: {},
         },
-        // MCP no declara si una tool es de solo lectura, así que se asume que
-        // muta: ejecutarlas en serie es más lento pero no rompe nada.
-        readOnly: false,
-        requiresApproval: !conn.server.autoApproveTools,
+        // Sólo se cree la declaración explícita del servidor
+        // (`readOnlyHint`); sin ella se asume que muta. Con aprobación manual,
+        // lo de sólo lectura corre solo y lo que escribe espera a una persona.
+        readOnly: tool.annotations?.readOnlyHint === true,
+        requiresApproval: !conn.server.autoApproveTools && tool.annotations?.readOnlyHint !== true,
         execute: async (args, ctx) => this.invoke(conn, tool.name, qualified, args, ctx.signal),
       };
       this.registry.register(registered);

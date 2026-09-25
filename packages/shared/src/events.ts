@@ -255,6 +255,14 @@ const codigoCheckpointEvent = z.object({
   sha: z.string(),
   mensaje: z.string(),
   archivos: z.number().int().nonnegative(),
+  /**
+   * Sin commits automáticos: `sha` es la instantánea del árbol al cerrar el
+   * turno y `antes` la del principio. Lo que cambió el turno es la diferencia
+   * entre las dos; no hay commit en la rama.
+   */
+  antes: z.string().optional(),
+  /** `false` = instantánea sin commit. Ausente en los eventos de antes, que eran commits. */
+  commit: z.boolean().optional(),
 });
 
 export const traceEventSchema = z.discriminatedUnion("type", [

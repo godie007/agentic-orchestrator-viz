@@ -66,6 +66,27 @@ export function Repositorio({
               <dt className="text-ink-faint">Copia</dt>
               <dd className="min-w-0 truncate font-mono text-[11px] text-ink-dim" title={item.clon}>{item.clon}</dd>
             </dl>
+            <label
+              className="flex items-start gap-2 rounded border border-line p-2 text-[12px] text-ink-dim"
+              title="Por default no: los cambios de los agentes quedan sin commitear y vos decidís qué preparar, el mensaje y cuándo publicar."
+            >
+              <input
+                type="checkbox"
+                checked={item.repo.commitsAutomaticos}
+                onChange={(e) =>
+                  void api
+                    .ajustesRepo(item.repo.id, { commitsAutomaticos: e.target.checked })
+                    .then(() => queryClient.invalidateQueries({ queryKey: ["repos", companyId] }))
+                    .catch((error: Error) => avisar(error.message, "error"))
+                }
+                className="mt-0.5 accent-[var(--color-accent)]"
+              />
+              <span>
+                <span className="block font-medium text-ink">Los agentes hacen commit al terminar cada turno</span>
+                Apagado: sus cambios quedan sin commitear para que los prepares, generes el mensaje, hagas commit y publiques vos,
+                como en Cursor. Cada pedido del chat igual se puede ver y deshacer.
+              </span>
+            </label>
             <EditorDeComandos key={item.repo.id + item.repo.updatedAt} repo={item} companyId={companyId} />
             <button
               type="button"

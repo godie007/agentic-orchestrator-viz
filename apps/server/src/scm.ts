@@ -452,6 +452,9 @@ export class ControlDeVersiones {
   async cambiarRama(sesion: SesionCodigo, repo: Repositorio, nombre: string): Promise<SesionCodigo> {
     const g = this.g(sesion, repo);
     const rama = await this.validarNombreDeRama(nombre.replace(/^(origin|remoto)\//, ""), g);
+    // La base la sostiene el clon sólo por costumbre: se suelta para que la
+    // sesión la pueda abrir.
+    if (rama === repo.ramaBase) await this.repos.soltarRamaDelClon(repo);
     if ((await this.ramasAbiertas(sesion, repo)).has(rama) && rama !== sesion.rama) {
       throw new Error(
         rama === repo.ramaBase

@@ -293,3 +293,38 @@ describe("aprobar una dependencia", () => {
     await expect(entorno.runtime.applyRequest(companyId, request, null)).rejects.toThrow(/no es un paquete del registro/);
   });
 });
+
+describe("el turno de un agente sin commits automáticos", () => {
+  it("deja los cambios sin commitear y anuncia sus instantáneas", async () => {
+    const { companyId, repos } = await empresaConRepos();
+    const mejorador = (await app.inject({ method: "POST", url: `/api/companies/${companyId}/mejorador` })).json() as Role;
+    const repo = entorno.store.getRepositorio(repos[0]!.id)!;
+    expect(repo.commitsAutomaticos).toBe(false);
+    const { abrirTurnoDeCodigo, ArriendosDeCodigo } = await import("./codigo-servidor.js");
+    const eventos: Array<{ sha: string; antes?: string; commit?: boolean; archivos: number }> = [];
+    const deps = {
+      store: entorno.store,
+      repos: entorno.runtime.repos,
+      directorios: entorno.runtime.directorios,
+      arriendos: new ArriendosDeCodigo(),
+      servicios: entorno.runtime.servicios,
+      companyId,
+      emitirCheckpoint: (_runId: string, e: { sha: string; antes?: string; commit?: boolean; archivos: number }) => void eventos.push(e),
+    };
+    const turno = await abrirTurnoDeCodigo(deps, mejorador, "run_chat", { repoPrincipalId: repo.id });
+    expect(turno?.escritura).toBe(true);
+    expect(turno?.resumen).toContain("SIN commitear");
+    const sesion = entorno.runtime.repos.sesionAbierta(repo.id, companyId)!;
+    const wt = entorno.runtime.repos.rutaWorktree(sesion);
+    const cabezaAntes = execFileSync("git", ["rev-parse", "HEAD"], { cwd: wt, encoding: "utf8" }).trim();
+    writeFileSync(join(wt, "src", "app.js"), "export const x = 2;\n");
+    await turno!.cerrar("Cambié x a 2.");
+
+    expect(execFileSync("git", ["rev-parse", "HEAD"], { cwd: wt, encoding: "utf8" }).trim()).toBe(cabezaAntes);
+    expect(execFileSync("git", ["status", "--porcelain"], { cwd: wt, encoding: "utf8" })).toContain("src/app.js");
+    expect(eventos).toHaveLength(1);
+    expect(eventos[0]).toMatchObject({ commit: false, archivos: 1 });
+    const cambios = await entorno.runtime.repos.cambiosEntre(sesion, repo, eventos[0]!.antes!, eventos[0]!.sha);
+    expect(cambios).toEqual([{ estado: "M", ruta: "src/app.js" }]);
+  });
+});

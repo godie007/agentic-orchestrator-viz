@@ -84,7 +84,7 @@ describe("ControlDeVersiones", () => {
 
     await scm.preparar(sesion, repo, "todo");
     await scm.commit(sesion, repo, { mensaje: "feat: cambia a y suma nuevo", amend: true });
-    expect(sh(wt, "log", "--format=%s", "main..HEAD").trim()).toBe("feat: cambia a y suma nuevo");
+    expect(sh(wt, "log", "--format=%s", `${sesion.baseSha}..HEAD`).trim()).toBe("feat: cambia a y suma nuevo");
   });
 
   it("no modifica con amend un commit que es de la base", async () => {
@@ -122,8 +122,9 @@ describe("ControlDeVersiones", () => {
     await expect(scm.usarStash(sesion, repo, "HEAD; rm -rf /", "borrar")).rejects.toThrow(/no es un stash/);
   });
 
-  it("crear y cambiar de rama mueve la sesión; la base (abierta en el clon) no se puede abrir", async () => {
+  it("crear y cambiar de rama mueve la sesión, y se puede volver a la rama del proyecto", async () => {
     const original = sesion.rama;
+    expect(original).toBe("main");
     writeFileSync(join(wt, "a.txt"), "para la rama nueva\n");
     sesion = await scm.crearRama(sesion, repo, "feature/boton");
     expect(sesion.rama).toBe("feature/boton");
@@ -132,14 +133,14 @@ describe("ControlDeVersiones", () => {
     expect(readFileSync(join(wt, "a.txt"), "utf8")).toBe("para la rama nueva\n");
     await scm.commit(sesion, repo, { mensaje: "en la rama" });
 
-    await expect(scm.cambiarRama(sesion, repo, "main")).rejects.toThrow(/rama base/);
     await expect(scm.crearRama(sesion, repo, "no vale")).rejects.toThrow(/no es un nombre de rama/);
 
     sesion = await scm.cambiarRama(sesion, repo, original);
+    expect(sesion.rama).toBe("main");
     expect(readFileSync(join(wt, "a.txt"), "utf8")).toBe("uno\n");
     const ramas = (await scm.estado(sesion, repo)).ramas;
-    expect(ramas.find((r) => r.nombre === "main")?.ocupada).toBe(true);
-    expect(ramas.find((r) => r.nombre === original)?.actual).toBe(true);
+    expect(ramas.find((r) => r.nombre === "main")?.actual).toBe(true);
+    expect(ramas.some((r) => r.ocupada)).toBe(false);
 
     await scm.borrarRama(sesion, repo, "feature/boton");
     expect((await scm.estado(sesion, repo)).ramas.some((r) => r.nombre === "feature/boton")).toBe(false);
@@ -201,10 +202,12 @@ describe("el repo de la persona", () => {
     expect(estado.base).toMatchObject({ rama: "dev", ref: "origin/dev", adelante: 0, atras: 0 });
     expect(estado.ramasDelRepo.map((r) => r.nombre).sort()).toEqual(["dev", "main"]);
 
+    expect(sesion.rama).toBe("dev");
     sesion = await scm.cambiarRama(sesion, repo, "main");
     expect(sh(wt, "rev-parse", "--abbrev-ref", "main@{upstream}").trim()).toBe("origin/main");
     expect(existsSync(join(wt, "b.txt"))).toBe(false);
-    await expect(scm.cambiarRama(sesion, repo, "dev")).rejects.toThrow(/rama base/);
+    sesion = await scm.cambiarRama(sesion, repo, "dev");
+    expect(existsSync(join(wt, "b.txt"))).toBe(true);
   });
 
   it("la historia es la de la rama entera, con sus ramas y tags, y marca lo no integrado", async () => {
@@ -214,7 +217,9 @@ describe("el repo de la persona", () => {
     expect(commits.map((c) => c.asunto)).toEqual(["feat: algo de la sesión", "trabajo en dev", "inicial"]);
     expect(commits[0]!.sinIntegrar).toBe(true);
     expect(commits[1]!.sinIntegrar).toBe(false);
-    expect(commits[1]!.refs).toEqual(expect.arrayContaining(["origin/dev", "dev"]));
+    // Se commitea sobre dev: dev apunta a lo nuevo, y "tu dev" sigue donde estaba.
+    expect(commits[0]!.refs).toContain("dev");
+    expect(commits[1]!.refs).toContain("origin/dev");
     expect(commits[2]!.refs).toEqual(expect.arrayContaining(["tag: v1", "origin/main"]));
     const { archivos } = await scm.archivosDeCommit(sesion, repo, commits[0]!.sha);
     expect(archivos).toEqual([{ estado: "A", ruta: "c.txt" }]);
@@ -229,6 +234,15 @@ describe("el repo de la persona", () => {
     const traer = await scm.fusionar(sesion, repo, "origin/dev");
     expect(traer.ok).toBe(true);
     expect(readFileSync(join(wt, "b.txt"), "utf8")).toBe("dev avanzó\n");
+  });
+
+  it("integrar la sesión adelanta el dev de la persona, que lo tiene abierto", async () => {
+    writeFileSync(join(wt, "c.txt"), "de la sesión\n");
+    await scm.commit(sesion, repo, { mensaje: "feat: algo" });
+    const r = await repos.integrar(sesion, repo);
+    expect(r).toMatchObject({ ok: true, modo: "fast-forward" });
+    expect(sh(origen, "log", "-1", "--format=%s", "dev").trim()).toBe("feat: algo");
+    expect(sh(origen, "branch", "--list", "orq/*").trim()).toBe("");
   });
 
   it("integrar una rama con nombre propio nunca pisa la de la persona", async () => {

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { argvATexto, slugTecnico, type Repositorio, type Role, type SesionCodigo } from "@orq/shared";
@@ -90,7 +91,10 @@ export interface DepsCodigo {
   servicios: ServiciosVivos;
   companyId: string;
   /** Para anunciar checkpoints en la traza de la corrida. */
-  emitirCheckpoint?: (runId: string, evento: { roleId: string; repoId: string; rama: string; sha: string; mensaje: string; archivos: number }) => void;
+  emitirCheckpoint?: (
+    runId: string,
+    evento: { roleId: string; repoId: string; rama: string; sha: string; mensaje: string; archivos: number; antes?: string; commit?: boolean },
+  ) => void;
 }
 
 /**
@@ -435,10 +439,21 @@ export async function abrirTurnoDeCodigo(
   // el IDE (los turnos de agente cierran siempre con checkpoint). Se commitea
   // a su nombre **antes** de que el agente toque nada: si no, el checkpoint del
   // turno se llevaba su trabajo firmado por el agente.
+  // Sin commits automáticos no se commitea nada de nadie: lo de la persona y
+  // lo del agente quedan juntos sin commitear, y ella decide. Lo que hizo el
+  // turno se sigue pudiendo ver y deshacer por las instantáneas.
+  const instantaneasAntes = new Map<string, string>();
   for (const repoId of conArriendo) {
     const repo = store.getRepositorio(repoId);
     const abierta = repo ? repos.sesionAbierta(repoId, companyId) : null;
-    if (repo && abierta && (await repos.tieneCambiosPendientes(abierta, repo))) {
+    if (repo && abierta && !repo.commitsAutomaticos) {
+      instantaneasAntes.set(repoId, await repos.instantanea(abierta, repo, `${runId}-antes`));
+    }
+  }
+  for (const repoId of conArriendo) {
+    const repo = store.getRepositorio(repoId);
+    const abierta = repo ? repos.sesionAbierta(repoId, companyId) : null;
+    if (repo?.commitsAutomaticos && abierta && (await repos.tieneCambiosPendientes(abierta, repo))) {
       const persona = await repos.identidadDePersona();
       await repos.checkpoint(
         abierta,
@@ -473,6 +488,7 @@ export async function abrirTurnoDeCodigo(
       ].join("\n"),
     );
   }
+  bloques.push(...(await bloqueDeBaseDeDatos(deps, role, dir)));
   bloques.push(
     [
       "Cómo se trabaja acá:",
@@ -480,7 +496,9 @@ export async function abrirTurnoDeCodigo(
       "- Editá con editar_codigo (reemplazo exacto y único) y verificá corriendo los tests con ejecutar_comando. Un exit distinto de 0 es un resultado: leelo y corregí.",
       "- No declares algo terminado sin haber corrido los tests o la verificación y leído su salida. Contá en tu resumen qué corriste y qué dio.",
       "- ¿Falta una librería? Pedila con instalar_dependencia (la aprueba una persona y se instala sola). No la bajes con curl ni la copies a mano: no hay red para eso.",
-      "- Al cerrar el turno se hace solo un checkpoint (un commit con tu nombre). Integrar a la rama de la persona lo decide ella.",
+      lista.some((r) => r.commitsAutomaticos)
+        ? "- Al cerrar el turno se hace solo un checkpoint (un commit con tu nombre). Integrar a la rama de la persona lo decide ella."
+        : "- Tus cambios quedan SIN commitear: la persona los revisa, los prepara, escribe el mensaje y hace el commit y la publicación. No intentes commitear ni publicar vos. En tu resumen contá qué archivos cambiaste y por qué, que es lo que ella va a leer para decidir.",
     ].join("\n"),
   );
 
@@ -495,6 +513,26 @@ export async function abrirTurnoDeCodigo(
           const abierta = repo ? repos.sesionAbierta(repoId, companyId) : null;
           if (!repo || !abierta) continue;
           const mensaje = (resumenDelTurno?.trim() || `Turno de ${role.name}`).slice(0, 4000);
+          const antes = instantaneasAntes.get(repoId);
+          if (!repo.commitsAutomaticos && antes) {
+            // Sin commit: la instantánea del final. Si el árbol no cambió, no
+            // hay nada que anunciar.
+            const despues = await repos.instantanea(abierta, repo, `${runId}-despues`);
+            const cambios = await repos.cambiosEntre(abierta, repo, antes, despues);
+            if (cambios.length && deps.emitirCheckpoint) {
+              deps.emitirCheckpoint(runId, {
+                roleId: role.id,
+                repoId,
+                rama: abierta.rama,
+                sha: despues,
+                antes,
+                commit: false,
+                mensaje: mensaje.replace(/\s+/g, " ").slice(0, 200),
+                archivos: cambios.length,
+              });
+            }
+            continue;
+          }
           const sha = await repos.checkpoint(abierta, repo, { nombre: role.name, id: role.id }, mensaje);
           if (sha && deps.emitirCheckpoint) {
             const tocados = await git(["diff-tree", "--no-commit-id", "--name-only", "-r", sha], {
@@ -537,6 +575,44 @@ function lineasDeServicios(deps: DepsCodigo, repo: Repositorio): string[] {
     "Es un monorepo. Cada parte tiene su package.json: corré sus tests con ejecutar_comando carpeta=\"<carpeta>\" y pedí sus dependencias con instalar_dependencia carpeta=\"<carpeta>\".",
     ...lineas,
     "Con un servicio levantado, después de editar mirá sus logs (servicios accion=logs) para ver si compiló, y probá la API con probar_servicio.",
+  ];
+}
+
+/** Dónde guarda las migraciones un repo, por convención. La primera que exista. */
+const CARPETAS_DE_MIGRACIONES = ["supabase/migrations", "backend/migrations", "db/migrations", "migrations", "backend/supabase/migrations", "prisma/migrations"];
+
+/**
+ * Si el rol tiene herramientas de un MCP de base de datos (Supabase, Postgres),
+ * cómo se trabaja con él. Un cambio de esquema tiene dos mitades que no pueden
+ * separarse —el archivo versionado en el repo y su aplicación en la base— y
+ * sin decirlo un agente hace una sola: aplica SQL en vivo que nadie puede
+ * reproducir, o escribe el archivo y nunca lo aplica.
+ */
+async function bloqueDeBaseDeDatos(deps: DepsCodigo, role: Role, dir: string): Promise<string[]> {
+  const herramientas = deps.store.listTools(deps.companyId).filter((t) => role.toolIds.includes(t.id) && t.mcpServerId);
+  const servidores = deps.store
+    .listMcpServers(deps.companyId)
+    .filter((s) => herramientas.some((t) => t.mcpServerId === s.id))
+    .filter((s) => /supabase|postgres|database|base de datos|\bdb\b|sql/i.test(`${s.name} ${s.description}`));
+  if (!servidores.length) return [];
+  const carpeta = CARPETAS_DE_MIGRACIONES.find((c) => existsSync(join(dir, c)));
+  const conAprobacion = herramientas.filter((t) => servidores.some((s) => s.id === t.mcpServerId) && t.requiresApproval).map((t) => t.name.split("__").at(-1));
+  return [
+    [
+      "## Base de datos",
+      ...servidores.map((s) => `- MCP \`${s.name}\`${s.description ? `: ${s.description}` : ""} (herramientas \`mcp__${s.name}__…\`).`),
+      "- Antes de cambiar el esquema, mirá cómo está: list_tables (con los esquemas) y list_migrations. No asumas columnas.",
+      `- Un cambio de esquema es una migración **versionada en el repo y aplicada en la base, las dos cosas**: escribí el SQL como archivo${
+        carpeta ? ` en \`${carpeta}/\` siguiendo el estilo de las que ya hay` : " (buscá dónde guarda las migraciones el repo)"
+      }, idempotente (IF NOT EXISTS), y aplicá **ese mismo SQL** con apply_migration.`,
+      conAprobacion.length
+        ? `- ${conAprobacion.join(", ")} piden aprobación de una persona: llamala una vez con el SQL completo y terminá el turno. Cuando la aprueben se ejecuta sola, con esos argumentos, y te llega el resultado a la bandeja: no la vuelvas a llamar.`
+        : "",
+      "- Nunca borres datos, tablas ni columnas si el pedido no lo dice explícitamente. Una migración que borra se describe en tu resumen, en mayúsculas.",
+      "- Después de migrar: get_advisors (security) para ver que no quedó una tabla sin RLS, y si el código usa tipos generados, generate_typescript_types.",
+    ]
+      .filter(Boolean)
+      .join("\n"),
   ];
 }
 

@@ -4,6 +4,7 @@ import {
   ArrowUp,
   AtSign,
   Bot,
+  Bug,
   Check,
   FileCode2,
   History,
@@ -11,6 +12,7 @@ import {
   MessageSquarePlus,
   MousePointerClick,
   PackagePlus,
+  ShieldAlert,
   Plus,
   Sparkles,
   Square,
@@ -26,6 +28,7 @@ import { IconoDeArchivo } from "./Explorador.js";
 import { lenguajeDe } from "./monaco.js";
 import { Markdown } from "./Markdown.js";
 import { buscarCandidatos, rotuloDeElemento, type ElementoSeleccionado } from "./elemento.js";
+import { archivosDelStack, type FallaDeVista } from "./sonda.js";
 
 /**
  * El chat de IA del IDE, a la manera de Cursor: le pedís a un agente una
@@ -47,14 +50,22 @@ export type Adjunto =
    * "select element" de Cursor. `ruta` es la carpeta del servicio: es donde
    * se buscan los archivos que lo dibujan.
    */
-  | { tipo: "elemento"; ruta: string; servicioId: string; servicioNombre: string; elemento: ElementoSeleccionado };
+  | { tipo: "elemento"; ruta: string; servicioId: string; servicioNombre: string; elemento: ElementoSeleccionado }
+  /**
+   * Una falla que la persona vio en el inspector de la vista previa: un error
+   * de consola o un pedido que falló, con su stack o su respuesta. `ruta` es la
+   * carpeta del servicio, contra la que se resuelven los archivos del stack.
+   */
+  | { tipo: "falla"; ruta: string; servicioId: string; servicioNombre: string; falla: FallaDeVista };
 
 const claveDe = (a: Adjunto) =>
   a.tipo === "archivo"
     ? `f:${a.ruta}`
     : a.tipo === "seleccion"
       ? `s:${a.ruta}:${a.desde}-${a.hasta}`
-      : `e:${a.servicioId}:${a.elemento.ruta}:${a.elemento.selector}`;
+      : a.tipo === "falla"
+        ? `x:${a.servicioId}:${a.falla.titulo}`
+        : `e:${a.servicioId}:${a.elemento.ruta}:${a.elemento.selector}`;
 
 /** Una conversación nueva: los pedidos anteriores no viajan en ella. */
 const nuevaConversacion = () => `conv_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
@@ -156,6 +167,48 @@ async function describirElemento(
   return partes.join("\n");
 }
 
+/**
+ * Una falla del inspector, contada para el agente: qué se vio, dónde, y —si el
+ * stack nombra archivos propios— la vecindad de la línea que tiró. Es lo que
+ * una persona le pegaría a un colega: el error entero, no "no anda".
+ */
+async function describirFalla(repoId: string, a: Extract<Adjunto, { tipo: "falla" }>, restante: number): Promise<string> {
+  const f = a.falla;
+  const partes = [
+    `#### Falla vista en la vista previa de ${a.servicioNombre} (${a.ruta || "raíz"}/), en la página \`${f.pagina || "/"}\``,
+    `**${f.titulo}**`,
+    "```",
+    f.detalle.slice(0, Math.min(6_000, Math.max(800, restante / 3))),
+    "```",
+  ];
+  const propios = archivosDelStack(f.detalle).map((x) => ({ ...x, ruta: a.ruta ? `${a.ruta}/${x.ruta}` : x.ruta }));
+  if (propios.length) {
+    partes.push("Archivos del repo que nombra el stack:");
+    for (const x of propios) partes.push(`- \`${x.ruta}:${x.linea}\``);
+    const primero = propios[0]!;
+    try {
+      const contenido = (await api.archivo(repoId, primero.ruta)).contenido;
+      if (contenido && restante > 4_000) {
+        const lineas = contenido.split("\n");
+        const desde = Math.max(0, primero.linea - 15);
+        partes.push(
+          `Líneas ${desde + 1}–${Math.min(lineas.length, primero.linea + 15)} de \`${primero.ruta}\` (la ${primero.linea} es la del stack):`,
+          `\`\`\`${FENCE[lenguajeDe(primero.ruta)] ?? ""}`,
+          lineas.slice(desde, primero.linea + 15).join("\n"),
+          "```",
+        );
+      }
+    } catch {
+      // el stack puede nombrar un archivo generado: el agente lo busca
+    }
+  } else if (f.titulo.includes("→")) {
+    partes.push(
+      "Es un pedido de red: buscá con buscar_codigo dónde lo arma el frontend y qué ruta lo atiende en el backend, y leé la respuesta de arriba antes de suponer la causa.",
+    );
+  }
+  return partes.join("\n");
+}
+
 /** Cuánto contenido adjunto viaja en el pedido. Lo que no entra, va por nombre. */
 const PRESUPUESTO = 30_000;
 const TOPE_POR_ARCHIVO = 12_000;
@@ -182,8 +235,8 @@ export async function armarContexto(repoId: string, nombreRepo: string, adjuntos
   let restante = PRESUPUESTO;
   const partes: string[] = [`---\nContexto que adjuntó la persona (repo "${nombreRepo}"):`];
   for (const a of adjuntos) {
-    if (a.tipo === "elemento") {
-      const texto = await describirElemento(repoId, a, restante);
+    if (a.tipo === "elemento" || a.tipo === "falla") {
+      const texto = a.tipo === "elemento" ? await describirElemento(repoId, a, restante) : await describirFalla(repoId, a, restante);
       restante -= texto.length;
       partes.push(texto);
       continue;
@@ -443,11 +496,22 @@ export function ChatDeIA({
                   <IconoDeArchivo nombre={a.ruta} className="size-3" />
                 ) : a.tipo === "elemento" ? (
                   <MousePointerClick className="size-3 text-accent" aria-hidden />
+                ) : a.tipo === "falla" ? (
+                  <Bug className="size-3 text-danger" aria-hidden />
                 ) : (
                   <TextSelect className="size-3 text-accent" aria-hidden />
                 )}
-                <span className="truncate" title={a.tipo === "elemento" ? `${a.servicioNombre} ${a.elemento.ruta} · ${a.elemento.selector}` : a.ruta}>
-                  {a.tipo === "elemento" ? rotuloDeElemento(a.elemento) : a.ruta.split("/").at(-1)}
+                <span
+                  className="truncate"
+                  title={
+                    a.tipo === "elemento"
+                      ? `${a.servicioNombre} ${a.elemento.ruta} · ${a.elemento.selector}`
+                      : a.tipo === "falla"
+                        ? `${a.servicioNombre} ${a.falla.pagina}\n${a.falla.detalle.slice(0, 600)}`
+                        : a.ruta
+                  }
+                >
+                  {a.tipo === "elemento" ? rotuloDeElemento(a.elemento) : a.tipo === "falla" ? a.falla.titulo.slice(0, 60) : a.ruta.split("/").at(-1)}
                   {a.tipo === "seleccion" && <span className="text-ink-faint"> :{a.desde}-{a.hasta}</span>}
                   {a.tipo === "elemento" && <span className="text-ink-faint"> {a.elemento.ruta}</span>}
                 </span>
@@ -594,7 +658,13 @@ function guardarAdjuntosDe(runId: string, adjuntos: Adjunto[]): void {
     localStorage.setItem(
       `orq-chat-adjuntos-${runId}`,
       JSON.stringify(
-        adjuntos.map((a) => (a.tipo === "elemento" ? { ...a, elemento: { ...a.elemento, html: "" } } : { ...a, texto: undefined })),
+        adjuntos.map((a) =>
+          a.tipo === "elemento"
+            ? { ...a, elemento: { ...a.elemento, html: "" } }
+            : a.tipo === "falla"
+              ? { ...a, falla: { ...a.falla, detalle: a.falla.detalle.slice(0, 600) } }
+              : { ...a, texto: undefined },
+        ),
       ),
     );
   } catch {
@@ -707,14 +777,27 @@ function Pedido({
     const cierres = eventos.filter((e): e is Extract<TraceEvent, { type: "agent.turn_end" }> => e.type === "agent.turn_end" && Boolean(e.summary));
     return cierres.at(-1)?.summary ?? null;
   }, [eventos]);
-  const shas = useMemo(
-    () => eventos.filter((e): e is Extract<TraceEvent, { type: "codigo.checkpoint" }> => e.type === "codigo.checkpoint").map((e) => e.sha),
+  const checkpoints = useMemo(
+    () => eventos.filter((e): e is Extract<TraceEvent, { type: "codigo.checkpoint" }> => e.type === "codigo.checkpoint"),
     [eventos],
   );
+  const shas = useMemo(() => checkpoints.map((e) => e.sha), [checkpoints]);
+  /**
+   * Sin commits automáticos, lo que cambió el pedido es la diferencia entre la
+   * instantánea del principio de su primer turno y la del final del último: no
+   * hay commits que listar ni revertir.
+   */
+  const tramo = useMemo(() => {
+    if (!checkpoints.length || checkpoints.some((e) => e.commit !== false)) return null;
+    const desde = checkpoints[0]!.antes;
+    const hasta = checkpoints.at(-1)!.sha;
+    return desde ? { desde, hasta } : null;
+  }, [checkpoints]);
   const archivos = useQuery({
-    queryKey: ["archivos-pedido", run.id, shas.join(",")],
+    queryKey: ["archivos-pedido", run.id, shas.join(","), tramo?.desde ?? ""],
     enabled: sesionId != null && shas.length > 0,
     queryFn: async () => {
+      if (tramo) return (await api.cambiosEntre(sesionId!, tramo.desde, tramo.hasta)).archivos;
       const todos = new Map<string, string>();
       for (const sha of shas) {
         for (const a of (await api.archivosDeCommit(sesionId!, sha)).archivos) todos.set(a.ruta, a.estado);
@@ -727,7 +810,7 @@ function Pedido({
   const adjuntos = useMemo(() => leerAdjuntosDe(run.id), [run.id]);
 
   const deshacer = useMutation({
-    mutationFn: () => api.revertirCheckpoints(sesionId!, shas),
+    mutationFn: () => (tramo ? api.deshacerEntre(sesionId!, tramo.desde, tramo.hasta) : api.revertirCheckpoints(sesionId!, shas)),
     onSuccess: () => {
       guardarDecision(run.id, "deshecho");
       setDecision("deshecho");
@@ -749,7 +832,12 @@ function Pedido({
         {adjuntos.length > 0 && (
           <div className="mt-1.5 flex flex-wrap gap-1">
             {adjuntos.map((a, i) => (
-              a.tipo === "elemento" ? (
+              a.tipo === "falla" ? (
+                <span key={i} className="flex items-center gap-1 rounded bg-surface px-1.5 py-0.5 text-[10px] text-ink-dim" title={a.falla.detalle.slice(0, 600)}>
+                  <Bug className="size-2.5 text-danger" aria-hidden />
+                  {a.falla.titulo.slice(0, 60)}
+                </span>
+              ) : a.tipo === "elemento" ? (
                 <span key={i} className="flex items-center gap-1 rounded bg-surface px-1.5 py-0.5 text-[10px] text-ink-dim" title={a.elemento.selector}>
                   <MousePointerClick className="size-2.5 text-accent" aria-hidden />
                   {rotuloDeElemento(a.elemento)} <span className="text-ink-faint">{a.elemento.ruta}</span>
@@ -828,6 +916,11 @@ function Pedido({
             <div className="flex items-center border-b border-line px-2 py-1 text-[11px] text-ink-dim">
               <span className="flex-1">
                 {archivos.data!.length} archivo(s) cambiado(s)
+                {tramo && decision !== "deshecho" && (
+                  <span className="text-ink-faint" title="Quedaron en tu rama sin commitear: preparalos, escribí o generá el mensaje y hacé commit desde Control de código fuente">
+                    {" "}· sin commitear
+                  </span>
+                )}
               </span>
               {decision === "deshecho" && <span className="text-warn">deshecho</span>}
               {decision === "mantenido" && <span className="text-ok">mantenido</span>}
@@ -836,7 +929,7 @@ function Pedido({
               <button
                 key={a.ruta}
                 type="button"
-                onClick={() => onAbrirDiff(a.ruta, `${shas[0]}^`, shas.at(-1)!)}
+                onClick={() => (tramo ? onAbrirDiff(a.ruta, tramo.desde, tramo.hasta) : onAbrirDiff(a.ruta, `${shas[0]}^`, shas.at(-1)!))}
                 title="Ver lo que cambió este pedido"
                 className="flex w-full items-center gap-1.5 px-2 py-1 text-left text-[12px] text-ink-dim hover:bg-surface-2"
               >
@@ -878,6 +971,7 @@ function Pedido({
         )}
         {/* Lo que el agente necesita de vos para seguir, al final: es lo último que pasó. */}
         {!terminal && <SolicitudesDelPedido companyId={companyId} runId={run.id} />}
+        {!terminal && <AprobacionesDelPedido runId={run.id} archivos={archivosDelRepo} />}
       </div>
     </div>
   );
@@ -893,6 +987,87 @@ function Pedido({
  * o correr un comando una vez se aprueba acá mismo, como en Cursor; lo que
  * necesita más contexto (un rol nuevo, un servidor MCP) lleva a Solicitudes.
  */
+/**
+ * Una herramienta que escribe —en INSPIA, aplicar una migración o ejecutar SQL
+ * en Supabase— espera a que la apruebes, y aprobar **la ejecuta** con los
+ * argumentos que ves acá: el agente no puede cambiar el SQL después. Por eso
+ * se muestra entero, resaltado, antes del botón.
+ */
+function AprobacionesDelPedido({ runId, archivos }: { runId: string; archivos: readonly string[] }) {
+  const queryClient = useQueryClient();
+  const avisar = useToast();
+  const corrida = useQuery({ queryKey: ["run", runId, "aprobaciones"], queryFn: () => api.run(runId), refetchInterval: 3_000 });
+  const pendientes = (corrida.data?.approvals ?? []).filter((a) => a.status === "pending");
+  const [motivo, setMotivo] = useState("");
+
+  const resolver = useMutation({
+    mutationFn: ({ id, decision }: { id: string; decision: "grant" | "deny" }) => api.resolveApproval(runId, id, decision, motivo.trim()),
+    onSuccess: (_r, { decision }) => {
+      setMotivo("");
+      void queryClient.invalidateQueries({ queryKey: ["run", runId] });
+      void queryClient.invalidateQueries({ queryKey: ["arbol"] });
+      avisar(decision === "grant" ? "Aprobado y ejecutado. El agente sigue con el resultado." : "Rechazado. El agente busca otra forma.", "ok");
+    },
+    onError: (e: Error) => avisar(e.message, "error"),
+  });
+
+  if (pendientes.length === 0) return null;
+  return (
+    <div className="space-y-2">
+      {pendientes.map((a) => {
+        const [, servidor, herramienta] = /^mcp__([^_]+(?:_[^_]+)*?)__(.+)$/.exec(a.toolName ?? "") ?? [];
+        const args = a.toolArgs ?? {};
+        const sql = typeof args["query"] === "string" ? (args["query"] as string) : null;
+        const resto = Object.fromEntries(Object.entries(args).filter(([k]) => k !== "query"));
+        return (
+          <div key={a.id} className="rounded-lg border border-warn/50 bg-warn/10 p-2.5 text-[12px]">
+            <div className="mb-1 flex items-center gap-1.5 font-medium text-warn">
+              <ShieldAlert className="size-3.5" aria-hidden />
+              Pide ejecutar {servidor ? `${servidor.charAt(0).toUpperCase()}${servidor.slice(1)} · ${herramienta}` : a.toolName}
+            </div>
+            <p className="mb-1.5 text-ink-dim">{a.reason}</p>
+            {Object.keys(resto).length > 0 && (
+              <pre className="mb-1.5 max-h-32 overflow-auto rounded bg-canvas p-1.5 font-mono text-[11px] whitespace-pre-wrap text-ink">
+                {JSON.stringify(resto, null, 2)}
+              </pre>
+            )}
+            {sql && (
+              <div className="mb-2 max-h-72 overflow-auto rounded">
+                <Markdown texto={`\`\`\`sql\n${sql}\n\`\`\``} archivos={archivos} />
+              </div>
+            )}
+            <input
+              value={motivo}
+              onChange={(e) => setMotivo(e.target.value)}
+              placeholder="Comentario para el agente (opcional)"
+              className="mb-1.5 h-6 w-full rounded border border-line bg-canvas px-1.5 text-[11px] text-ink outline-none focus:border-accent"
+            />
+            <div className="flex gap-1.5">
+              <button
+                type="button"
+                disabled={resolver.isPending}
+                onClick={() => resolver.mutate({ id: a.id, decision: "grant" })}
+                className="flex h-6 flex-1 items-center justify-center gap-1 rounded bg-accent text-[11px] font-medium text-white disabled:opacity-50"
+              >
+                {resolver.isPending ? <Loader2 className="size-3 animate-spin" aria-hidden /> : <Check className="size-3" aria-hidden />}
+                Aprobar y ejecutar
+              </button>
+              <button
+                type="button"
+                disabled={resolver.isPending}
+                onClick={() => resolver.mutate({ id: a.id, decision: "deny" })}
+                className="flex h-6 flex-1 items-center justify-center gap-1 rounded border border-line text-[11px] text-ink-dim hover:border-danger/50 hover:text-danger disabled:opacity-50"
+              >
+                <X className="size-3" aria-hidden /> Rechazar
+              </button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function SolicitudesDelPedido({ companyId, runId }: { companyId: string; runId: string }) {
   const queryClient = useQueryClient();
   const avisar = useToast();

@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ExternalLink, Loader2, Monitor, MousePointerClick, Play, RotateCw, Send, Smartphone, Tablet } from "lucide-react";
+import { Bug, ExternalLink, Loader2, Monitor, MousePointerClick, Play, RotateCw, Send, Smartphone, Tablet } from "lucide-react";
 import { api, type RespuestaDeServicio, type ServicioConEstado } from "../../api.js";
 import { COLOR_ESTADO, ICONO_SERVICIO, useServicios } from "./Servicios.js";
 import { Salida } from "./SalidaDeServicio.js";
 import { esElemento, type ElementoSeleccionado } from "./elemento.js";
+import { aplicarRed, consolaDesdeMensaje, esError, type FallaDeVista, type Registro } from "./sonda.js";
+import { Inspector } from "./Inspector.js";
 
 /**
  * La pestaña de un servicio levantado: el frontend o la app móvil en un
@@ -19,6 +21,9 @@ import { esElemento, type ElementoSeleccionado } from "./elemento.js";
  * sesión de su login.
  */
 
+/** Lo que se conserva del inspector: una app que loguea en bucle no puede comerse la memoria. */
+const TOPE_REGISTROS = 1_000;
+
 type Dispositivo = "escritorio" | "tablet" | "movil";
 const ANCHOS: Record<Dispositivo, number | null> = { escritorio: null, tablet: 820, movil: 390 };
 
@@ -26,11 +31,14 @@ export function VistaDeServicio({
   repoId,
   servicioId,
   onElemento,
+  onFalla,
 }: {
   repoId: string;
   servicioId: string;
   /** La persona señaló un elemento de la app: va al chat como contexto. */
   onElemento?: (servicio: ServicioConEstado, elemento: ElementoSeleccionado) => void;
+  /** Un error de consola o un pedido fallido del inspector: al chat. */
+  onFalla?: (servicio: ServicioConEstado, falla: FallaDeVista) => void;
 }) {
   const consulta = useServicios(repoId);
   const s = consulta.data?.servicios.find((x) => x.id === servicioId) ?? null;
@@ -41,7 +49,12 @@ export function VistaDeServicio({
   return s.tipo === "api" ? (
     <ConsolaDeApi repoId={repoId} s={s} url={s.vivo.url} />
   ) : (
-    <Navegador s={s} url={s.vivo.url} {...(onElemento ? { onElemento: (e: ElementoSeleccionado) => onElemento(s, e) } : {})} />
+    <Navegador
+      s={s}
+      url={s.vivo.url}
+      {...(onElemento ? { onElemento: (e: ElementoSeleccionado) => onElemento(s, e) } : {})}
+      {...(onFalla ? { onFalla: (f: FallaDeVista) => onFalla(s, f) } : {})}
+    />
   );
 }
 
@@ -98,10 +111,12 @@ function Navegador({
   s,
   url,
   onElemento,
+  onFalla,
 }: {
   s: ServicioConEstado;
   url: string;
   onElemento?: (elemento: ElementoSeleccionado) => void;
+  onFalla?: (falla: FallaDeVista) => void;
 }) {
   const [dispositivo, setDispositivo] = useState<Dispositivo>(s.tipo === "movil" ? "movil" : "escritorio");
   const marco = useRef<HTMLIFrameElement>(null);
@@ -111,6 +126,11 @@ function Navegador({
   const [selectorListo, setSelectorListo] = useState(false);
   const seleccionandoRef = useRef(false);
   seleccionandoRef.current = seleccionando;
+  /** Consola y red de la página, como DevTools. Cada carga de página empieza de cero. */
+  const [registros, setRegistros] = useState<Registro[]>([]);
+  const [inspectorAbierto, setInspectorAbierto] = useState(false);
+  const idConsola = useRef(0);
+  const errores = registros.filter(esError).length;
 
   const avisarAlSelector = (activo: boolean) =>
     marco.current?.contentWindow?.postMessage({ tipo: "orq-seleccionar", activo }, origen);
@@ -121,8 +141,17 @@ function Navegador({
     const alRecibir = (e: MessageEvent) => {
       if (e.origin !== origen || e.source !== marco.current?.contentWindow) return;
       const dato = e.data as { tipo?: string; elemento?: unknown } | null;
-      if (dato?.tipo === "orq-selector-listo") {
+      if (dato?.tipo === "orq-consola") {
+        const r = consolaDesdeMensaje(dato as Record<string, unknown>, ++idConsola.current);
+        if (r) setRegistros((previos) => [...previos, r].slice(-TOPE_REGISTROS));
+      } else if (dato?.tipo === "orq-red") {
+        setRegistros((previos) => aplicarRed(previos, dato as Record<string, unknown>).slice(-TOPE_REGISTROS));
+      } else if (dato?.tipo === "orq-selector-listo") {
         setSelectorListo(true);
+        // Página nueva: lo registrado es de la anterior. El saludo le fija a
+        // la sonda a quién hablarle, y recién ahí suelta lo que juntó al cargar.
+        setRegistros([]);
+        marco.current?.contentWindow?.postMessage({ tipo: "orq-inspector" }, origen);
         // Una recarga (la de Vite al editar) vuelve a montar el selector
         // apagado: si se estaba señalando, se vuelve a encender.
         if (seleccionandoRef.current) avisarAlSelector(true);
@@ -194,6 +223,20 @@ function Navegador({
             <span className="hidden lg:inline">{seleccionando ? "Elegí un elemento…" : "Seleccionar"}</span>
           </button>
         )}
+        <button
+          type="button"
+          title="Inspector: la consola y los pedidos de red de la app, para ver qué falla"
+          onClick={() => setInspectorAbierto((v) => !v)}
+          className={`relative flex items-center gap-1 rounded px-1.5 py-1 text-[12px] ${
+            inspectorAbierto ? "bg-surface-2 text-ink" : "text-ink-dim hover:bg-surface-2 hover:text-ink"
+          }`}
+        >
+          <Bug className="size-3.5" aria-hidden />
+          <span className="hidden lg:inline">Inspector</span>
+          {errores > 0 && (
+            <span className="rounded-full bg-danger px-1 text-[10px] font-semibold leading-4 text-white">{errores > 99 ? "99+" : errores}</span>
+          )}
+        </button>
         <span className="flex items-center gap-0.5 border-l border-line pl-1.5">
           <button type="button" title="Escritorio" onClick={() => setDispositivo("escritorio")} className={boton(dispositivo === "escritorio")}>
             <Monitor className="size-3.5" aria-hidden />
@@ -230,6 +273,15 @@ function Navegador({
           className={`min-h-0 border-0 bg-white ${ancho ? `h-full shrink-0 rounded-[18px] shadow-xl ring-8 ring-ink/80` : "h-full w-full"}`}
         />
       </div>
+      {inspectorAbierto && (
+        <Inspector
+          registros={registros}
+          sondaActiva={selectorListo}
+          onLimpiar={() => setRegistros([])}
+          onCerrar={() => setInspectorAbierto(false)}
+          {...(onFalla ? { onFalla } : {})}
+        />
+      )}
     </div>
   );
 }

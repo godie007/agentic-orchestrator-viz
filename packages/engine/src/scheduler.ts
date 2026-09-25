@@ -182,7 +182,11 @@ export class Orchestrator {
         // escribir es un pedido perdido. Nos pasó con el encargo de auditoría:
         // cerró en dos ciclos, sin un mensaje ni un entregable, informando que
         // no quedaba trabajo.
-        if (this.state.artifacts.length === 0 && this.mensajesEntreRoles() === 0 && !this.escribioCodigo()) {
+        // Un pedido del chat del IDE que era una **consulta** ("¿qué tablas
+        // hay?") no deja código ni entregables: su producto es la respuesta.
+        // Cuenta si el agente trabajó (usó herramientas) y cerró respondiendo.
+        const consultaRespondida = Boolean(this.run.foco) && this.respondio;
+        if (this.state.artifacts.length === 0 && this.mensajesEntreRoles() === 0 && !this.escribioCodigo() && !consultaRespondida) {
           const reason =
             `La corrida terminó sin producir nada: ningún entregable escrito y ningún ` +
             `mensaje entre roles. El encargo llegó a destino pero no se ejecutó. ` +
@@ -364,7 +368,7 @@ export class Orchestrator {
    * Resuelve una aprobación pendiente. Si era la última, la corrida vuelve a
    * quedar lista para el ciclo siguiente.
    */
-  resolveApproval(approvalId: string, decision: "granted" | "denied", resolution: string): boolean {
+  async resolveApproval(approvalId: string, decision: "granted" | "denied", resolution: string): Promise<boolean> {
     const approval = this.state.resolveApproval(approvalId, decision, resolution);
     if (!approval) return false;
 
@@ -380,6 +384,12 @@ export class Orchestrator {
       toolName: approval.toolName,
     });
 
+    // Aprobar **ejecuta** la llamada aprobada, con los argumentos que vio la
+    // persona. Antes aprobar sólo avisaba, y si el agente la volvía a llamar
+    // pedía aprobación otra vez: una migración aprobada no se aplicaba nunca.
+    // Además así el agente no puede cambiar el SQL después de la aprobación.
+    const ejecucion = decision === "granted" ? await this.ejecutarAprobada(approval) : null;
+
     // El solicitante se entera por su bandeja, como cualquier otra novedad.
     void this.state.forActor(null).sendMessage({
       toRoleId: approval.requestedByRoleId,
@@ -388,7 +398,11 @@ export class Orchestrator {
       subject: decision === "granted" ? "Aprobación concedida" : "Aprobación denegada",
       body:
         `Tu pedido "${approval.reason}" fue ${decision === "granted" ? "aprobado" : "rechazado"}.` +
-        (resolution ? `\n\nComentario: ${resolution}` : ""),
+        (resolution ? `\n\nComentario: ${resolution}` : "") +
+        (ejecucion
+          ? `\n\nYa se ejecutó ${approval.toolName} con los argumentos aprobados — no la vuelvas a llamar con los mismos. ` +
+            `Resultado (${ejecucion.ok ? "ok" : "falló"}):\n${ejecucion.texto}`
+          : ""),
       threadId: null,
       inReplyTo: null,
     });
@@ -399,6 +413,53 @@ export class Orchestrator {
     return true;
   }
 
+  /** Corre la herramienta aprobada a nombre de quien la pidió, con el mismo rastro que una llamada del loop. */
+  private async ejecutarAprobada(approval: {
+    id: string;
+    requestedByRoleId: string;
+    toolName: string | null;
+    toolArgs: Record<string, unknown> | null;
+  }): Promise<{ ok: boolean; texto: string } | null> {
+    if (!approval.toolName) return null;
+    const tool = this.deps.tools.get(approval.toolName);
+    const actor = this.state.roles.find((r) => r.id === approval.requestedByRoleId);
+    if (!tool || !actor) {
+      return { ok: false, texto: `No se pudo ejecutar: ${!tool ? "la herramienta ya no está disponible" : "el rol ya no existe"}.` };
+    }
+    const callId = `aprobada-${approval.id}`;
+    const inicio = Date.now();
+    const base = { runId: this.run.id, tick: this.state.tick, roleId: actor.id, callId, toolName: tool.name, origin: tool.origin, mcpServerId: tool.mcpServerId ?? null };
+    this.deps.bus.emit({ type: "tool.start", ...base, args: approval.toolArgs ?? {} });
+    let ok = false;
+    let texto = "";
+    try {
+      const resultado = await tool.execute(approval.toolArgs ?? {}, {
+        runId: this.run.id,
+        tick: this.state.tick,
+        actor,
+        workspace: this.state.forActor(actor.id),
+        currentThreadId: null,
+        currentMessageId: null,
+        replyToRoleId: null,
+      });
+      ok = resultado.ok;
+      texto = resultado.content;
+    } catch (error) {
+      texto = error instanceof Error ? error.message : String(error);
+    }
+    const acotado = texto.length > 6_000 ? `${texto.slice(0, 6_000)}\n[… ${texto.length - 6_000} caracteres más …]` : texto;
+    this.deps.bus.emit({
+      type: "tool.end",
+      ...base,
+      durationMs: Date.now() - inicio,
+      ok,
+      preview: acotado.slice(0, 400),
+      error: ok ? null : acotado.slice(0, 400),
+    });
+    this.state.recordActivity({ roleId: actor.id, tick: this.state.tick, tool: tool.name, ok, detail: `aprobada: ${acotado.slice(0, 200)}` });
+    return { ok, texto: acotado };
+  }
+
   /**
    * Mensajes que se escribieron entre sí los roles. El encargo de la persona a
    * cargo no cuenta: existe siempre y diría que hubo actividad aunque nadie
@@ -407,6 +468,9 @@ export class Orchestrator {
   private mensajesEntreRoles(): number {
     return this.state.messages.filter((message) => message.fromRoleId !== null).length;
   }
+
+  /** Algún turno de esta corrida trabajó y cerró con una respuesta. Ver la consulta del chat. */
+  private respondio = false;
 
   /**
    * Si alguien cambió código en esta corrida. Un pedido del chat del IDE lo
@@ -569,6 +633,7 @@ export class Orchestrator {
             ...(this.deps.codigo ? { codigo: this.deps.codigo } : {}),
             ...(this.abort ? { signal: this.abort.signal } : {}),
           });
+          if (resultado.herramientas > 0 && resultado.summary?.trim()) this.respondio = true;
           // El contador se reinicia en cuanto hace algo: lo que se persigue es
           // la racha, no un turno suelto en el que no tenía nada que hacer.
           if (resultado.herramientas > 0) {

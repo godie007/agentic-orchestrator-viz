@@ -105,36 +105,146 @@ export function levantarProxyDeVista(opciones: { puerto: number; destino: number
   });
 }
 
-/** Antes de `</head>` si lo hay; si no, al principio. Nunca dos veces. */
+/**
+ * **Al principio** del `<head>` y sin `defer`: la sonda del inspector tiene que
+ * envolver `console`, `fetch` y `XMLHttpRequest` antes de que corra un solo
+ * script de la app, o se pierde justo lo que falla al arrancar. Nunca dos veces.
+ */
 export function inyectarSelector(html: string): string {
   if (html.includes(RUTA_SELECTOR)) return html;
-  const etiqueta = `<script src="${RUTA_SELECTOR}" defer></script>`;
-  const cierre = html.search(/<\/head>/i);
-  return cierre >= 0 ? `${html.slice(0, cierre)}${etiqueta}${html.slice(cierre)}` : `${etiqueta}${html}`;
+  const etiqueta = `<script src="${RUTA_SELECTOR}"></script>`;
+  const apertura = /<head[^>]*>/i.exec(html);
+  if (apertura) {
+    const fin = apertura.index + apertura[0].length;
+    return `${html.slice(0, fin)}${etiqueta}${html.slice(fin)}`;
+  }
+  return `${etiqueta}${html}`;
 }
 
 /**
- * El selector que corre adentro de la página. Va como `String.raw` para que
- * ninguna barra se pierda en el camino, y **sin backticks ni `${`** adentro:
- * cerrarían el template (la trampa ya documentada en CLAUDE.md). Los
- * comentarios sobre su comportamiento van acá afuera:
+ * Lo que corre adentro de la página: la **sonda del inspector** y el
+ * **selector de elementos**. Va como `String.raw` para que ninguna barra se
+ * pierda, y **sin backticks ni `${`** adentro: cerrarían el template (la
+ * trampa ya documentada en CLAUDE.md). Los comentarios sobre su
+ * comportamiento van acá afuera:
  *
- * - Sólo se activa dentro de un iframe y cuando el IDE se lo pide; responde
- *   únicamente al origen que lo activó.
- * - Mientras está activo se come los clics (en captura): elegir un botón no lo
- *   aprieta.
- * - Del elemento manda lo que sirve para encontrarlo en el código: la ruta de
- *   la app, la cadena de componentes de React (leída de la fibra que React
- *   cuelga del nodo en desarrollo), el archivo fuente si React lo expone
- *   (`_debugSource`, hasta React 18), el texto, atributos y el HTML recortado.
- * - Esc cancela.
+ * - Sólo hace algo dentro de un iframe. Nada sale hacia el IDE hasta que el IDE
+ *   saluda (`orq-inspector`) desde su origen: lo que registró antes espera en
+ *   una cola acotada, y a partir de ahí sólo le habla a ese origen. El único
+ *   mensaje a `*` es el aviso de "estoy lista", sin datos.
+ * - Consola: `log/info/warn/error/debug`, excepciones sin capturar y promesas
+ *   rechazadas, con su stack; un recurso que no carga (script, imagen) también.
+ * - Red: `fetch` y `XMLHttpRequest` (axios usa el segundo). De lo que falla
+ *   (4xx, 5xx, sin respuesta) se guarda el cuerpo de la respuesta —ahí está el
+ *   mensaje del backend—; de lo que se envía, sólo la descripción de un
+ *   `multipart` (nombre, tamaño y tipo de cada archivo), que es lo que hace
+ *   falta para diagnosticar una subida. Nunca cabeceras: ahí va el token.
+ * - Selector: el de siempre (ver el IDE): duerme hasta que lo activan, se come
+ *   los clics mientras está activo, Esc cancela.
  */
-const SELECTOR_JS = String.raw`(function () {
-  if (window.__orqSelector || window.parent === window) return;
-  window.__orqSelector = true;
-  var activo = false, origen = null, caja = null, rotulo = null, actual = null;
-  var Z = "2147483647";
+export const SELECTOR_JS = String.raw`(function () {
+  if (window.__orqSonda || window.parent === window) return;
+  window.__orqSonda = true;
+  var origen = null, cola = [], MAX_COLA = 500, seq = 0;
+  function enviar(m) {
+    if (origen) { try { window.parent.postMessage(m, origen); } catch (e) {} return; }
+    cola.push(m);
+    if (cola.length > MAX_COLA) cola.shift();
+  }
+  function aTexto(v) {
+    try {
+      if (v instanceof Error) return v.stack || (v.name + ": " + v.message);
+      if (typeof v === "string") return v;
+      if (v && typeof v === "object") { var s = JSON.stringify(v); return s && s.length > 2000 ? s.slice(0, 2000) + "…" : String(s); }
+      return String(v);
+    } catch (e) { return String(v); }
+  }
+  function ruta() { return location.pathname + location.search; }
 
+  ["log", "info", "warn", "error", "debug"].forEach(function (nivel) {
+    var original = console[nivel];
+    if (typeof original !== "function") return;
+    console[nivel] = function () {
+      try {
+        var partes = Array.prototype.map.call(arguments, aTexto);
+        enviar({ tipo: "orq-consola", nivel: nivel, texto: partes.join(" ").slice(0, 6000), at: Date.now(), ruta: ruta() });
+      } catch (e) {}
+      return original.apply(this, arguments);
+    };
+  });
+  window.addEventListener("error", function (e) {
+    var t = e.target;
+    if (t && t !== window && t.tagName) {
+      enviar({ tipo: "orq-consola", nivel: "error", texto: "No se pudo cargar " + t.tagName.toLowerCase() + ": " + (t.src || t.href || ""), at: Date.now(), ruta: ruta() });
+      return;
+    }
+    var texto = (e.error && e.error.stack) || (e.message + " (" + e.filename + ":" + e.lineno + ":" + e.colno + ")");
+    enviar({ tipo: "orq-consola", nivel: "error", texto: texto, at: Date.now(), ruta: ruta(), excepcion: true });
+  }, true);
+  window.addEventListener("unhandledrejection", function (e) {
+    enviar({ tipo: "orq-consola", nivel: "error", texto: "Promesa rechazada sin manejar: " + aTexto(e.reason), at: Date.now(), ruta: ruta(), excepcion: true });
+  });
+
+  function describirCuerpo(b) {
+    try {
+      if (!b) return null;
+      if (typeof FormData !== "undefined" && b instanceof FormData) {
+        var archivos = [];
+        b.forEach(function (v, k) {
+          if (v && typeof v === "object" && "name" in v && "size" in v) archivos.push(k + ": " + v.name + " (" + v.size + " B, " + (v.type || "sin tipo") + ")");
+        });
+        return "multipart" + (archivos.length ? " — " + archivos.join(", ") : "");
+      }
+      if (typeof Blob !== "undefined" && b instanceof Blob) return "blob (" + b.size + " B, " + (b.type || "sin tipo") + ")";
+      if (typeof b === "string") return "texto (" + b.length + " caracteres)";
+    } catch (e) {}
+    return null;
+  }
+  var fetchOriginal = window.fetch;
+  if (typeof fetchOriginal === "function") {
+    window.fetch = function (entrada, init) {
+      var id = ++seq, inicio = Date.now();
+      var url = typeof entrada === "string" ? entrada : (entrada && entrada.url) || String(entrada);
+      var metodo = String((init && init.method) || (entrada && entrada.method) || "GET").toUpperCase();
+      enviar({ tipo: "orq-red", id: id, fase: "inicio", metodo: metodo, url: url, cuerpo: describirCuerpo(init && init.body), at: inicio, ruta: ruta() });
+      return fetchOriginal.apply(this, arguments).then(function (r) {
+        var fin = { tipo: "orq-red", id: id, fase: "fin", estado: r.status, ms: Date.now() - inicio, tipoContenido: r.headers.get("content-type") };
+        if (r.status >= 400) {
+          r.clone().text().then(function (t) { fin.respuesta = t.slice(0, 4000); enviar(fin); }, function () { enviar(fin); });
+        } else {
+          enviar(fin);
+        }
+        return r;
+      }, function (err) {
+        enviar({ tipo: "orq-red", id: id, fase: "fin", estado: 0, ms: Date.now() - inicio, error: aTexto(err) });
+        throw err;
+      });
+    };
+  }
+  var abrirXhr = XMLHttpRequest.prototype.open, enviarXhr = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function (metodo, url) {
+    this.__orq = { metodo: String(metodo).toUpperCase(), url: String(url) };
+    return abrirXhr.apply(this, arguments);
+  };
+  XMLHttpRequest.prototype.send = function (cuerpo) {
+    var x = this, info = x.__orq || { metodo: "GET", url: "?" }, id = ++seq, inicio = Date.now();
+    enviar({ tipo: "orq-red", id: id, fase: "inicio", metodo: info.metodo, url: info.url, cuerpo: describirCuerpo(cuerpo), at: inicio, ruta: ruta() });
+    x.addEventListener("loadend", function () {
+      var fin = { tipo: "orq-red", id: id, fase: "fin", estado: x.status, ms: Date.now() - inicio, tipoContenido: x.getResponseHeader ? x.getResponseHeader("content-type") : null };
+      if (x.status === 0) fin.error = "Sin respuesta: red caída, CORS rechazado o pedido cancelado.";
+      if (x.status >= 400) {
+        try {
+          var t = x.responseType === "" || x.responseType === "text" ? x.responseText : x.responseType === "json" ? JSON.stringify(x.response) : "";
+          fin.respuesta = String(t || "").slice(0, 4000);
+        } catch (e) {}
+      }
+      enviar(fin);
+    });
+    return enviarXhr.apply(this, arguments);
+  };
+
+  var activo = false, caja = null, rotulo = null, actual = null;
+  var Z = "2147483647";
   function estilo(el, css) { for (var k in css) el.style[k] = css[k]; }
   function crear() {
     caja = document.createElement("div");
@@ -144,7 +254,6 @@ const SELECTOR_JS = String.raw`(function () {
     document.documentElement.appendChild(caja);
     document.documentElement.appendChild(rotulo);
   }
-
   function fibra(el) {
     for (var k in el) if (k.indexOf("__reactFiber$") === 0 || k.indexOf("__reactInternalInstance$") === 0) return el[k];
     return null;
@@ -197,7 +306,6 @@ const SELECTOR_JS = String.raw`(function () {
       tamano: Math.round(r.width) + "x" + Math.round(r.height)
     };
   }
-  function enviar(m) { if (origen) window.parent.postMessage(m, origen); }
   function mover(e) {
     if (!activo) return;
     var el = e.target;
@@ -234,11 +342,19 @@ const SELECTOR_JS = String.raw`(function () {
   document.addEventListener("click", clic, true);
   ["mousedown", "mouseup", "pointerdown", "pointerup", "touchstart", "dblclick", "submit"].forEach(function (t) { document.addEventListener(t, comer, true); });
   document.addEventListener("keydown", tecla, true);
+
   window.addEventListener("message", function (e) {
     var d = e.data;
-    if (!d || d.tipo !== "orq-seleccionar") return;
-    origen = e.origin;
-    if (d.activo) activar(); else desactivar();
+    if (!d || e.source !== window.parent) return;
+    if (d.tipo === "orq-inspector" || d.tipo === "orq-seleccionar") {
+      if (origen !== e.origin) {
+        origen = e.origin;
+        var pendientes = cola;
+        cola = [];
+        pendientes.forEach(enviar);
+      }
+    }
+    if (d.tipo === "orq-seleccionar") { if (d.activo) activar(); else desactivar(); }
   });
   window.parent.postMessage({ tipo: "orq-selector-listo" }, "*");
 })();`;

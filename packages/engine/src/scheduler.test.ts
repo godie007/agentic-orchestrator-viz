@@ -518,6 +518,38 @@ describe("Orchestrator", () => {
     expect(orchestrator.snapshot.status).toBe("completed");
   });
 
+  it("una consulta del chat que trabajó y respondió no es una corrida vacía; una corrida de equipo que sólo habla, sí", async () => {
+    const correr = async (foco: boolean) => {
+      const { ceo, run, state, bus } = buildScenario();
+      if (foco) run.foco = { rolId: ceo.id, repoId: "rep_x" };
+      const tools = new ToolRegistry();
+      tools.register({
+        name: "consultar",
+        description: "",
+        inputSchema: { type: "object", properties: {} },
+        origin: "mcp",
+        readOnly: true,
+        requiresApproval: false,
+        async execute() {
+          return { ok: true, content: "3 tablas" };
+        },
+      });
+      state.incorporarHerramienta({ id: "tool_c", name: "consultar", origin: "mcp", description: "", inputSchema: {}, mcpServerId: null, requiresApproval: false, readOnly: true, composicion: null } as never, null);
+      state.updateRoleTools(ceo.id, ["tool_c"]);
+      let turno = 0;
+      const providers = new ProviderRegistry();
+      providers.register(
+        new FakeProvider(() => (++turno === 1 ? { toolCalls: [{ name: "consultar", arguments: {} }] } : { text: "Hay 3 tablas." })),
+      );
+      const orchestrator = new Orchestrator(run, state, { bus, providers, tools, ledger: new RunLedger(run.budgetUsd) });
+      await state.forActor(null).sendMessage({ toRoleId: ceo.id, toDepartmentId: null, type: "human", subject: "Pedido", body: "¿Cuántas tablas hay?", threadId: null, inReplyTo: null });
+      await orchestrator.runContinuous();
+      return orchestrator.snapshot.status;
+    };
+    expect(await correr(true)).toBe("completed");
+    expect(await correr(false)).toBe("failed");
+  });
+
   it("corta la corrida cuando el proveedor rechaza todos los turnos varios ciclos seguidos", async () => {
     const { ceo, run, state, bus } = buildScenario();
 
@@ -641,5 +673,98 @@ describe("atribución de autoría con turnos en paralelo", () => {
     for (const informe of informes) {
       expect(informe.subject).toBe(`de ${nombre(informe.fromRoleId)}`);
     }
+  });
+});
+
+describe("aprobaciones", () => {
+  it("aprobar ejecuta la llamada aprobada con sus argumentos y le lleva el resultado al agente", async () => {
+    const { ceo, run, state, bus, events } = buildScenario();
+    const ejecutadas: Array<Record<string, unknown>> = [];
+    const tools = new ToolRegistry();
+    tools.register({
+      name: "mcp__supabase__apply_migration",
+      description: "Aplica una migración",
+      inputSchema: { type: "object", properties: { name: { type: "string" }, query: { type: "string" } } },
+      origin: "mcp",
+      readOnly: false,
+      requiresApproval: true,
+      async execute(args) {
+        ejecutadas.push(args);
+        return { ok: true, content: '{"success":true}' };
+      },
+    });
+    state.incorporarHerramienta(
+      {
+        id: "tool_migracion",
+        name: "mcp__supabase__apply_migration",
+        origin: "mcp",
+        description: "",
+        inputSchema: {},
+        mcpServerId: null,
+        requiresApproval: true,
+        readOnly: false,
+        composicion: null,
+      } as never,
+      null,
+    );
+    state.updateRoleTools(ceo.id, ["tool_migracion"]);
+
+    let turnos = 0;
+    const provider = new FakeProvider(() => {
+      turnos += 1;
+      return turnos === 1
+        ? { toolCalls: [{ name: "mcp__supabase__apply_migration", arguments: { name: "requisitos", query: "CREATE TABLE r (id int);" } }] }
+        : { text: "listo" };
+    });
+    const providers = new ProviderRegistry();
+    providers.register(provider);
+    const orchestrator = new Orchestrator(run, state, { bus, providers, tools, ledger: new RunLedger(run.budgetUsd) });
+    await state.forActor(null).sendMessage({
+      toRoleId: ceo.id,
+      toDepartmentId: null,
+      type: "human",
+      subject: "Pedido",
+      body: "Agregá la tabla.",
+      threadId: null,
+      inReplyTo: null,
+    });
+    await orchestrator.tick();
+
+    // Pedir no ejecuta: queda una aprobación pendiente con el SQL exacto.
+    expect(ejecutadas).toEqual([]);
+    const pendiente = state.pendingApprovals()[0]!;
+    expect(pendiente.toolArgs).toEqual({ name: "requisitos", query: "CREATE TABLE r (id int);" });
+
+    expect(await orchestrator.resolveApproval(pendiente.id, "granted", "")).toBe(true);
+    // Aprobar ejecuta lo aprobado, una vez, con esos argumentos.
+    expect(ejecutadas).toEqual([{ name: "requisitos", query: "CREATE TABLE r (id int);" }]);
+    const aviso = state.messages.find((m) => m.type === "approval_grant")!;
+    expect(aviso.body).toContain("Ya se ejecutó mcp__supabase__apply_migration");
+    expect(aviso.body).toContain('{"success":true}');
+    expect(events.some((e) => e.type === "tool.end" && e.toolName === "mcp__supabase__apply_migration" && e.ok)).toBe(true);
+  });
+
+  it("rechazar no ejecuta nada", async () => {
+    const { ceo, state, run, bus } = buildScenario();
+    const tools = new ToolRegistry();
+    let ejecutada = false;
+    tools.register({
+      name: "peligrosa",
+      description: "",
+      inputSchema: { type: "object", properties: {} },
+      origin: "mcp",
+      readOnly: false,
+      requiresApproval: true,
+      async execute() {
+        ejecutada = true;
+        return { ok: true, content: "" };
+      },
+    });
+    const approval = await state.forActor(ceo.id).requestApproval({ approverRoleId: null, reason: "x", toolName: "peligrosa", toolArgs: {} });
+    const providers = new ProviderRegistry();
+    providers.register(new FakeProvider(() => ({ text: "" })));
+    const orchestrator = new Orchestrator(run, state, { bus, providers, tools, ledger: new RunLedger(run.budgetUsd) });
+    await orchestrator.resolveApproval(approval.id, "denied", "no");
+    expect(ejecutada).toBe(false);
   });
 });

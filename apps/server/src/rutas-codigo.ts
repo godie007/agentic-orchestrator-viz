@@ -235,10 +235,13 @@ export function registrarRutasDeCodigo(app: FastifyInstance, deps: { store: Stor
       reply.code(409);
       return { error: "Hay una corrida en curso escribiendo en esta sesión. Esperá a que termine o detenela." };
     }
+    const { subir } = (request.body ?? {}) as { subir?: unknown };
     try {
-      // Los servicios corren sobre el worktree que integrar se lleva.
-      runtime.servicios.detenerDelRepo(encontrada.repo.id);
-      const resultado = await repos.integrar(encontrada.sesion, encontrada.repo);
+      // Los servicios corren sobre el worktree que integrar se lleva. En la
+      // rama del proyecto publicar no lo cierra: siguen andando.
+      const seCierra = !(repos.usaRamaDelProyecto(encontrada.repo) && !encontrada.sesion.rama.startsWith("orq/"));
+      if (seCierra) runtime.servicios.detenerDelRepo(encontrada.repo.id);
+      const resultado = await repos.integrar(encontrada.sesion, encontrada.repo, { subir: subir === true });
       if (!resultado.ok) {
         reply.code(409);
         return { error: resultado.motivo, ...resultado };
@@ -569,7 +572,9 @@ export function registrarRutasDeCodigo(app: FastifyInstance, deps: { store: Stor
       reply.code(404);
       return { error: "No existe el repo." };
     }
-    const sesion = repos.sesionAbierta(repo.id, repo.companyId);
+    const previa = repos.sesionAbierta(repo.id, repo.companyId);
+    // Una sesión vacía de antes, en una `orq/…`, pasa a la rama del proyecto.
+    const sesion = previa ? await repos.alinearConLaRamaDelProyecto(previa, repo) : null;
     // Lo que la persona commiteó en su repo desde otro lado aparece solo: se
     // trae en segundo plano (limitado a una vez cada 45 s) y la próxima
     // consulta ya lo muestra. El `.catch` es obligatorio: sin dueño, una
@@ -831,6 +836,58 @@ export function registrarRutasDeCodigo(app: FastifyInstance, deps: { store: Stor
       }
     }
     return [...grupos.values()].sort((a, b) => b.ultima - a.ultima).slice(0, 50);
+  });
+
+  /** Lo que cambió un pedido sin commit: la diferencia entre sus dos instantáneas. */
+  app.get("/api/sesiones/:id/entre", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const { desde, hasta } = request.query as { desde?: string; hasta?: string };
+    const encontrada = conSesion(id);
+    if (!encontrada) {
+      reply.code(404);
+      return { error: "No existe la sesión." };
+    }
+    try {
+      return { archivos: await repos.cambiosEntre(encontrada.sesion, encontrada.repo, desde ?? "", hasta ?? "") };
+    } catch (error) {
+      reply.code(400);
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  /** "Deshacer" de un pedido sin commit: su diferencia, aplicada al revés sobre el árbol. */
+  app.post("/api/sesiones/:id/deshacer-entre", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const { desde, hasta } = (request.body ?? {}) as { desde?: string; hasta?: string };
+    const encontrada = conSesion(id);
+    if (!encontrada || encontrada.sesion.estado !== "abierta") {
+      reply.code(404);
+      return { error: "No existe la sesión abierta." };
+    }
+    const escritor = runtime.titularDeEscritura(encontrada.repo.id);
+    if (escritor) {
+      reply.code(409);
+      return { error: `${escritor} está escribiendo en su turno. Esperá a que termine.` };
+    }
+    try {
+      await repos.deshacerEntre(encontrada.sesion, encontrada.repo, desde ?? "", hasta ?? "");
+      return { ok: true };
+    } catch (error) {
+      reply.code(409);
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  /** Ajustes del repo: por ahora, si los agentes commitean al final de cada turno. */
+  app.patch("/api/repos/:repoId/ajustes", async (request, reply) => {
+    const { repoId } = request.params as { repoId: string };
+    const repo = conRepo(repoId);
+    if (!repo) {
+      reply.code(404);
+      return { error: "No existe el repo." };
+    }
+    const { commitsAutomaticos } = (request.body ?? {}) as { commitsAutomaticos?: unknown };
+    return repos.actualizarAjustes(repo, typeof commitsAutomaticos === "boolean" ? { commitsAutomaticos } : {});
   });
 
   app.get("/api/sesiones/:id/commit/:sha", async (request, reply) => {
