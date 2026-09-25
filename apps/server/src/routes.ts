@@ -16,6 +16,7 @@ import {
   roleProposalSchema,
   roleSchema,
   misionSchema,
+  normalizarLeccion,
 } from "@orq/shared";
 import { resolverTodosLosTiers, type ProviderRegistry } from "@orq/llm";
 import type { Store } from "./db.js";
@@ -593,6 +594,29 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
     const parsed = learningInput.safeParse(request.body);
     if (!parsed.success) return invalid(reply, parsed.error);
     const now = Date.now();
+
+    // La misma regla de dedupe que `record_lesson`: sin esto, lo que la
+    // herramienta consideraba repetido esta puerta lo creaba como fila gemela.
+    // Cargarla de nuevo cuenta como confirmación de una persona.
+    const gemela = store
+      .listLearnings(companyId)
+      .find(
+        (candidata) =>
+          normalizarLeccion(candidata.topic) === normalizarLeccion(parsed.data.topic) &&
+          normalizarLeccion(candidata.lesson) === normalizarLeccion(parsed.data.lesson),
+      );
+    if (gemela) {
+      gemela.timesConfirmed += 1;
+      if (gemela.confirmaciones.length < 20) {
+        gemela.confirmaciones.push({ roleId: null, runId: null, at: now });
+      }
+      gemela.updatedAt = now;
+      store.saveLearning(gemela);
+      const duena = store.getCompany(companyId);
+      if (duena) await runtime.espejarAprendizajes(duena, gemela.topic);
+      return gemela;
+    }
+
     const learning = {
       id: ids.learning(),
       companyId,
@@ -601,6 +625,11 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
       authorRoleId: null,
       runId: null,
       timesConfirmed: 1,
+      // Sin gate: la escribió una persona, y eso es la procedencia.
+      evidencia: "cargada a mano por la persona a cargo",
+      estado: "activa" as const,
+      refutacion: null,
+      confirmaciones: [],
       createdAt: now,
       updatedAt: now,
     };
@@ -611,6 +640,62 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
     if (empresa) await runtime.espejarAprendizajes(empresa, learning.topic);
     reply.code(201);
     return learning;
+  });
+
+  const learningPatch = z
+    .object({
+      topic: z.string().min(1).max(120),
+      lesson: z.string().min(1).max(4000),
+      estado: z.enum(["activa", "cuestionada", "refutada"]),
+      /** Obligatorio al refutar: el tombstone es el motivo, no el estado. */
+      motivoDeRefutacion: z.string().min(1).max(600),
+    })
+    .partial();
+
+  /**
+   * Edición y refutación de una lección: la revisión humana de la memoria.
+   *
+   * Refutar no borra: la lección queda con su motivo, fuera del prompt. El
+   * registro de por qué algo se creyó y por qué era falso vale tanto como la
+   * lección — borrarla invita a re-aprender el mismo error.
+   */
+  app.patch("/api/companies/:companyId/learnings/:id", async (request, reply) => {
+    const { companyId, id } = request.params as { companyId: string; id: string };
+    const parsed = learningPatch.safeParse(request.body);
+    if (!parsed.success) return invalid(reply, parsed.error);
+
+    const actual = store.listLearnings(companyId).find((candidata) => candidata.id === id);
+    if (!actual) return notFound(reply, "lección", id);
+
+    if (parsed.data.estado === "refutada" && !parsed.data.motivoDeRefutacion) {
+      reply.code(400);
+      return { error: "Refutar exige el motivo: es lo que evita re-aprender el mismo error." };
+    }
+
+    const temaAnterior = actual.topic;
+    const editada = {
+      ...actual,
+      ...(parsed.data.topic != null ? { topic: parsed.data.topic } : {}),
+      ...(parsed.data.lesson != null ? { lesson: parsed.data.lesson } : {}),
+      ...(parsed.data.estado != null ? { estado: parsed.data.estado } : {}),
+      refutacion:
+        parsed.data.estado === "refutada"
+          ? { motivo: parsed.data.motivoDeRefutacion!, at: Date.now() }
+          : parsed.data.estado != null
+            ? null // restaurar limpia el tombstone
+            : actual.refutacion,
+      updatedAt: Date.now(),
+    };
+    store.saveLearning(editada);
+
+    const empresa = store.getCompany(companyId);
+    if (empresa) {
+      // Si cambió el tema, la nota vieja tiene que soltar la lección (o
+      // desaparecer si quedó vacía) y la nueva recibirla.
+      await runtime.espejarAprendizajes(empresa, editada.topic);
+      if (temaAnterior !== editada.topic) await runtime.espejarAprendizajes(empresa, temaAnterior);
+    }
+    return editada;
   });
 
   app.delete("/api/companies/:companyId/learnings/:id", async (request) => {

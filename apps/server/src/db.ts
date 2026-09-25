@@ -19,6 +19,7 @@ import type {
   Tool,
   TraceEvent,
 } from "@orq/shared";
+import { learningSchema } from "@orq/shared";
 
 /**
  * Persistencia.
@@ -717,11 +718,34 @@ export class Store {
     return this.many<LedgerEntry>("SELECT data FROM ledger WHERE run_id = ?", runId);
   }
 
+  /**
+   * Inserta una fila tal cual, salteando el tipo `Learning`.
+   *
+   * Existe sólo para los tests de compatibilidad: el escenario real es un JSON
+   * guardado por una versión anterior del código, sin los campos nuevos del
+   * esquema, y no hay forma de construirlo pasando por los tipos de hoy.
+   */
+  insertarCrudoParaTests(tabla: "learnings", id: string, companyId: string, data: string): void {
+    this.db
+      .prepare(`INSERT INTO ${tabla} (id, company_id, data) VALUES (?, ?, ?)`)
+      .run(id, companyId, data);
+  }
+
   saveLearning(learning: Learning): void {
     this.upsertScoped("learnings", learning.id, learning.companyId, learning);
   }
   listLearnings(companyId: string): Learning[] {
-    return this.many<Learning>("SELECT data FROM learnings WHERE company_id = ?", companyId);
+    // Por Zod y no crudo: `many` hace JSON.parse a secas, así que los campos
+    // nuevos del esquema (estado, evidencia, confirmaciones) no existirían en
+    // las filas guardadas antes del cambio — y `estado === "refutada"` sobre
+    // un undefined haría que el filtro del prompt nunca las viera distintas.
+    // El parse aplica los defaults; es directo (no safeParse) porque estas
+    // filas las escribió este mismo código: una que no parsea es un bug, no
+    // un dato externo.
+    return this.many<Learning>(
+      "SELECT data FROM learnings WHERE company_id = ?",
+      companyId,
+    ).map((fila) => learningSchema.parse(fila));
   }
   deleteLearning(id: string): void {
     this.db.prepare("DELETE FROM learnings WHERE id = ?").run(id);

@@ -314,22 +314,45 @@ export function notaDeAprendizajes(opciones: {
   empresa: string;
   /** Hoy, ya formateado. El render no tiene reloj: la fecha entra, como en los documentos. */
   fecha: string;
-  lecciones: Array<{ lesson: string; timesConfirmed: number }>;
+  lecciones: Array<{
+    lesson: string;
+    timesConfirmed: number;
+    estado?: "activa" | "cuestionada" | "refutada";
+    evidencia?: string | null;
+    refutacion?: { motivo: string; at: number } | null;
+  }>;
   /** Otros temas de la empresa, para enlazar los parientes. */
   temas?: readonly string[];
 }): string {
   const { tema, empresa, fecha, lecciones } = opciones;
-  const ordenadas = [...lecciones].sort((a, b) => b.timesConfirmed - a.timesConfirmed);
+  // Las refutadas van aparte, al final: el tombstone —por qué se creyó y por
+  // qué era falso— vale tanto como una lección viva, pero no puede leerse con
+  // la misma voz. Una nota que quedó sólo con refutadas se conserva: es
+  // memoria de errores, no basura.
+  const vivas = lecciones.filter((l) => l.estado !== "refutada");
+  const refutadas = lecciones.filter((l) => l.estado === "refutada");
+  const ordenadas = [...vivas].sort((a, b) => b.timesConfirmed - a.timesConfirmed);
   const titulo = tituloDeTema(tema);
 
-  const cuerpo = ordenadas.map((l) => {
+  const encabezadoDe = (lesson: string): string => {
     // El encabezado va corto: es lo que se ve en el panel lateral de Obsidian,
     // y repetir ahí el párrafo entero lo vuelve ilegible.
-    const primera = l.lesson.split(/[.\n]/)[0]!.trim();
-    const encabezado = primera.length > 62 ? `${primera.slice(0, 62).trimEnd()}…` : primera;
+    const primera = lesson.split(/[.\n]/)[0]!.trim();
+    return primera.length > 62 ? `${primera.slice(0, 62).trimEnd()}…` : primera;
+  };
+
+  const cuerpo = ordenadas.map((l) => {
     const veces = l.timesConfirmed > 1 ? `\n\n*(reafirmada ${l.timesConfirmed} veces)*` : "";
-    return `## ${encabezado}\n\n${l.lesson}${veces}`;
+    const marca = l.estado === "cuestionada" ? " *(sin verificar)*" : "";
+    const respaldo = l.evidencia ? `\n\n*Evidencia: ${l.evidencia}*` : "";
+    return `## ${encabezadoDe(l.lesson)}${marca}\n\n${l.lesson}${respaldo}${veces}`;
   });
+
+  const seccionRefutadas = refutadas.map(
+    (l) =>
+      `## ~~${encabezadoDe(l.lesson)}~~\n\n${l.lesson}\n\n` +
+      `**Refutada:** ${l.refutacion?.motivo ?? "sin motivo registrado"}`,
+  );
 
   const parientes = (opciones.temas ?? [])
     .filter((otro) => otro !== tema && familiaDeTema(otro) === familiaDeTema(tema))
@@ -351,7 +374,13 @@ export function notaDeAprendizajes(opciones: {
     `# ${titulo}`,
     "",
     `Lo que **${empresa}** aprendió sobre ${titulo.toLowerCase()}, en ${ordenadas.length} lección(es).`,
-    "Lo escribieron los agentes trabajando. Si algo está mal, corregilo acá: se lee tal cual.",
+    // El aviso es honesto: esta nota se regenera desde la base y una edición a
+    // mano se pierde en el próximo espejo. Antes invitaba a "corregir acá" —
+    // una promesa que el sistema no cumplía: la corrección humana se pisaba en
+    // silencio, que es peor que no invitar.
+    "Nota generada por el orquestador: se reescribe sola con cada cambio. Para corregir",
+    "o refutar una lección usá la pantalla Memoria de la aplicación — lo editado acá a",
+    "mano se pierde en la próxima actualización.",
     "",
     `← [[00 - Índice|Índice del vault]]`,
     "",
@@ -359,6 +388,9 @@ export function notaDeAprendizajes(opciones: {
     // Las notas se separan con línea en blanco **antes** de cada `##`: sin ella
     // markdown no lo toma como encabezado y en Obsidian sale como texto suelto.
     ...cuerpo.flatMap((nota) => [nota, ""]),
+    ...(seccionRefutadas.length > 0
+      ? ["## Refutadas", "", "Se creyeron y una persona determinó que eran falsas. Quedan para no re-aprenderlas.", "", ...seccionRefutadas.flatMap((nota) => [nota, ""])]
+      : []),
   ].join("\n");
 }
 

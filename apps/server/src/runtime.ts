@@ -1288,16 +1288,46 @@ export class Runtime {
       const autor = this.store
         .listRoles(request.companyId)
         .find((role) => role.id === request.requestedByRoleId);
+      const pregunta = request.question ?? request.reason;
+      const respuesta = request.resolution.trim();
+
+      // La respuesta entra **recortada**: esta puerta metía respuestas de
+      // 5.570 caracteres como lecciones, y la memoria viaja en el prompt de
+      // cada turno — medimos que llegó a ser el 54% del prompt. Si la
+      // respuesta es larga, la versión completa va al vault, que existe justo
+      // para lo que no puede viajar en cada turno, y la lección apunta ahí.
+      const TOPE_RESPUESTA = 600;
+      const larga = respuesta.length > TOPE_RESPUESTA;
+      if (larga) {
+        const company = this.store.getCompany(request.companyId);
+        if (company) {
+          void this.contexto
+            .escribir(
+              { id: company.id, nombre: company.name },
+              `Consultas/${pregunta.slice(0, 60)}.md`,
+              `# ${pregunta}\n\n${respuesta}\n`,
+            )
+            .catch((error: unknown) => {
+              console.error("no se pudo guardar la respuesta completa en el vault:", error);
+            });
+        }
+      }
       this.store.saveLearning({
         id: ids.learning(),
         companyId: request.companyId,
-        topic: (request.question ?? request.reason).slice(0, 120),
+        topic: `consulta: ${pregunta}`.slice(0, 120),
         lesson:
-          `Pregunta de ${autor?.name ?? "un agente"}: ${request.question ?? request.reason}\n\n` +
-          `Respuesta: ${request.resolution.trim()}`.slice(0, 4000),
+          `Pregunta de ${autor?.name ?? "un agente"}: ${pregunta}\n\n` +
+          `Respuesta: ${respuesta.slice(0, TOPE_RESPUESTA)}` +
+          (larga ? `\n\n(La respuesta completa está en el vault, bajo Consultas.)` : ""),
         authorRoleId: null,
         runId: request.runId,
         timesConfirmed: 1,
+        // Procedencia honesta, sin gate: la escribió una persona.
+        evidencia: "respuesta de la persona a cargo a una consulta",
+        estado: "activa",
+        refutacion: null,
+        confirmaciones: [],
         createdAt: now,
         updatedAt: now,
       });

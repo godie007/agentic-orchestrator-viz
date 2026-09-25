@@ -1085,3 +1085,97 @@ describe("read_artifact: costo de leer", () => {
     expect(r.content).toContain("no van necesariamente seguidas");
   });
 });
+
+/**
+ * Una lección es un reclamo que requiere evidencia, no un hecho a guardar.
+ *
+ * El caso que lo motivó: un rol concluyó que `edit_artifact` estaba rota —era
+ * el índice de lectura el que le mostraba secciones duplicadas inexistentes—
+ * y la lección falsa entró a la memoria de la empresa, lista para degradar
+ * todas las corridas siguientes. El freno va en el ejecutor, no en el prompt.
+ */
+describe("record_lesson exige evidencia", () => {
+  const registrar = coordinationTools.find((t) => t.name === "record_lesson")!;
+
+  const conActividad = (
+    activity: Array<{ roleId: string; tick: number; tool: string; ok: boolean; detail: string }>,
+  ): ToolContext => ({
+    ...ctx,
+    workspace: {
+      ...strictWorkspace,
+      listActivity: () => activity,
+      recordLesson: async (input: { topic: string; lesson: string; evidencia?: string | null }) => ({
+        id: "lrn_1",
+        companyId: "cmp_1",
+        topic: input.topic,
+        lesson: input.lesson,
+        authorRoleId: ctx.actor.id,
+        runId: "run_test",
+        timesConfirmed: 1,
+        evidencia: input.evidencia ?? null,
+        estado: "activa" as const,
+        refutacion: null,
+        confirmaciones: [],
+        createdAt: 0,
+        updatedAt: 0,
+      }),
+    } as unknown as AgentWorkspace,
+  });
+
+  it("sin el argumento de evidencia, la llamada ni siquiera entra", async () => {
+    const r = await registrar.execute(
+      { topic: "herramientas", lesson: "edit_artifact está rota." },
+      conActividad([{ roleId: ctx.actor.id, tick: 1, tool: "edit_artifact", ok: false, detail: "x" }]),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.content).toContain("evidence");
+  });
+
+  it("un agente que sólo habló no puede registrar 'tal herramienta está rota'", async () => {
+    // Su actividad es puro mensaje: una lección que nace de una conversación
+    // es una opinión, y las opiniones no entran al prompt de todas las
+    // corridas futuras.
+    const r = await registrar.execute(
+      {
+        topic: "herramientas",
+        lesson: "edit_artifact está rota.",
+        evidence: "me lo dijo Gastón por mensaje",
+      },
+      conActividad([
+        { roleId: ctx.actor.id, tick: 1, tool: "send_message", ok: true, detail: "enviado" },
+        { roleId: ctx.actor.id, tick: 1, tool: "list_my_tasks", ok: true, detail: "2 tareas" },
+      ]),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.content).toContain("sólo mensajes");
+  });
+
+  it("quien sí trabajó puede: sus fallos son exactamente la evidencia que se pide", async () => {
+    // El caso Nora: nueve fallos de edit_artifact en su actividad. El gate no
+    // la bloquea — le exige citarlos, y la cita queda persistida.
+    const fallos = Array.from({ length: 9 }, (_, i) => ({
+      roleId: ctx.actor.id,
+      tick: 1,
+      tool: "edit_artifact",
+      ok: false,
+      detail: `no encontró el texto (${i + 1})`,
+    }));
+    const r = await registrar.execute(
+      {
+        topic: "herramientas",
+        lesson: "edit_artifact no encuentra textos multilínea.",
+        evidence: "edit_artifact falló 9 veces con 'no encontró el texto'",
+      },
+      conActividad(fallos),
+    );
+    expect(r.ok).toBe(true);
+  });
+
+  it("la actividad de otro rol no cuenta como evidencia propia", async () => {
+    const r = await registrar.execute(
+      { topic: "x", lesson: "algo que vi de lejos.", evidence: "lo hizo otro" },
+      conActividad([{ roleId: "rol_ajeno", tick: 1, tool: "export_pdf", ok: true, detail: "ok" }]),
+    );
+    expect(r.ok).toBe(false);
+  });
+});

@@ -1245,16 +1245,48 @@ const recordLesson: RegisteredTool = {
       lesson: stringProp(
         "La lección, autocontenida: alguien que no vio esta conversación tiene que poder aplicarla.",
       ),
+      evidence: stringProp(
+        "Qué hiciste en esta corrida que la respalda: nombrá la herramienta y el " +
+          "resultado. Ej: 'edit_artifact falló 9 veces con el mismo error de texto no encontrado'.",
+      ),
     },
-    required: ["topic", "lesson"],
+    required: ["topic", "lesson", "evidence"],
     additionalProperties: false,
   },
   async execute(args, ctx) {
-    const parsed = readRequired(args, ["topic", "lesson"]);
+    const parsed = readRequired(args, ["topic", "lesson", "evidence"]);
     if (!parsed.ok) return fail(`record_lesson: ${parsed.error}`);
+
+    // Una lección es un reclamo que requiere evidencia, no un hecho a guardar.
+    // El freno va acá, en el ejecutor, no en el prompt: lo pagamos con una
+    // lección falsa ("edit_artifact está rota") que entró a la memoria de la
+    // empresa lista para degradar todas las corridas siguientes.
+    //
+    // El gate es binario a propósito —¿el autor hizo algo observable en esta
+    // corrida, más allá de hablar?— sin validar semánticamente la cita: eso
+    // sería burocracia frágil. Leer también cuenta (`read_artifact` deja
+    // entrada en la actividad): un revisor que sólo leyó puede registrar lo
+    // que vio. El que no ejecutó nada, no — una lección que nace de una
+    // conversación es una opinión, y las opiniones no entran al prompt de
+    // todas las corridas futuras.
+    const hizo = ctx.workspace
+      .listActivity()
+      .some(
+        (entrada) => entrada.roleId === ctx.actor.id && !HABLAR_NO_ES_EVIDENCIA.has(entrada.tool),
+      );
+    if (!hizo) {
+      return fail(
+        `record_lesson: tu actividad en esta corrida no muestra ninguna herramienta que ` +
+          `pueda respaldar una lección — sólo mensajes. Trabajá primero (leé, ejecutá, ` +
+          `verificá) y registrá después lo que la evidencia demuestre. Si la lección te ` +
+          `llegó por un mensaje, que la registre quien lo comprobó.`,
+      );
+    }
+
     const learning = await ctx.workspace.recordLesson({
       topic: parsed.values.topic!,
       lesson: parsed.values.lesson!,
+      evidencia: parsed.values.evidence!.slice(0, 600),
     });
     return ok(
       learning.timesConfirmed > 1
@@ -1264,6 +1296,30 @@ const recordLesson: RegisteredTool = {
     );
   },
 };
+
+/**
+ * Herramientas que no cuentan como evidencia para `record_lesson`: son
+ * conversación y consulta de estado, no trabajo observable. La lista es por
+ * nombre y no por `origin` porque el corte no es ese: `edit_artifact` también
+ * es de coordinación y sus fallos son exactamente la clase de evidencia que
+ * el gate viene a exigir.
+ */
+const HABLAR_NO_ES_EVIDENCIA = new Set([
+  "send_message",
+  "reply",
+  "broadcast",
+  "escalate",
+  "record_lesson",
+  "list_my_tasks",
+  "list_artifacts",
+  "check_activity",
+  "estado_del_proceso",
+  "request_context",
+  "request_approval",
+  "request_new_role",
+  "request_tool_access",
+  "solicitar_servidor_mcp",
+]);
 
 
 /**

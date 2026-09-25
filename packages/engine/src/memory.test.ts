@@ -48,6 +48,10 @@ function learning(topic: string, lesson: string, overrides: Partial<Learning> = 
     authorRoleId: null,
     runId: null,
     timesConfirmed: 1,
+    evidencia: null,
+    estado: "activa",
+    refutacion: null,
+    confirmaciones: [],
     createdAt: now,
     updatedAt: now,
     ...overrides,
@@ -116,7 +120,7 @@ describe("memoria de la empresa", () => {
     expect(memoria).toContain("recortada");
   });
 
-  it("registrar la misma lección la refuerza en vez de duplicarla", async () => {
+  it("repetir la lección no la duplica, y confirmar exige otro autor", async () => {
     const saved: Learning[] = [];
     const persistence: Persistence = {
       saveMessage: () => {},
@@ -133,15 +137,27 @@ describe("memoria de la empresa", () => {
     const workspace = state.forActor(role.id);
 
     await workspace.recordLesson({ topic: "precios", lesson: "La tarifa senior es US$45/hora." });
-    // Misma idea con otra puntuación y mayúsculas: sigue siendo la misma.
+    // Misma idea con otra puntuación y mayúsculas: sigue siendo la misma. Pero
+    // repetirla el mismo autor en la misma corrida ya no la "confirma":
+    // `timesConfirmed` medía cuántas veces el mismo agente dijo lo mismo — un
+    // contador de insistencia con cara de verificación, que ordena el prompt.
     const second = await workspace.recordLesson({
       topic: "Precios",
       lesson: "la tarifa senior es us$45/hora",
     });
 
     expect(state.learnings).toHaveLength(1);
-    expect(second.timesConfirmed).toBe(2);
-    expect(saved).toHaveLength(2); // se persiste el refuerzo, no una fila nueva
+    expect(second.timesConfirmed).toBe(1);
+    expect(saved).toHaveLength(1); // la insistencia no re-persiste
+
+    // Otro rol sí confirma: eso es una verificación independiente, y queda
+    // registrado quién fue.
+    const tercera = await state
+      .forActor("rol_otro")
+      .recordLesson({ topic: "precios", lesson: "La tarifa senior es US$45/hora." });
+    expect(tercera.timesConfirmed).toBe(2);
+    expect(tercera.confirmaciones).toHaveLength(1);
+    expect(tercera.confirmaciones[0]!.roleId).toBe("rol_otro");
   });
 
   it("una lección registrada durante la corrida queda atribuida a su autor", async () => {
@@ -215,11 +231,16 @@ describe("la lección sobrevive a la corrida", () => {
       if (alreadyActed(req)) return { text: "Listo." };
       return {
         toolCalls: [
+          // El trabajo primero: una lección sin actividad que la respalde se
+          // rechaza en el ejecutor (una alucinación se persistía igual que un
+          // hecho). `calcular` deja la entrada en activity que el gate exige.
+          { name: "calcular", arguments: { expresion: "3 * 40" } },
           {
             name: "record_lesson",
             arguments: {
               topic: "estimación",
               lesson: "Los módulos de integración con POS se subestiman siempre.",
+              evidence: "calcular: la estimación dio 120 horas contra las 40 presupuestadas",
             },
           },
         ],
@@ -406,5 +427,56 @@ describe("la empresa crece durante la corrida", () => {
     expect(state.inbox(nuevo.id)).toHaveLength(1);
     expect(state.rolesWithWork()).toContain(nuevo.id);
     expect(bus).toBeDefined();
+  });
+});
+
+/**
+ * La refutación: cómo una lección falsa deja de degradar corridas sin
+ * perderse el registro de por qué se creyó.
+ */
+describe("refutación y procedencia", () => {
+  it("una refutada no entra al prompt, pero sigue en la lista", () => {
+    const { role, run, config } = scenario([
+      learning("herramientas", "edit_artifact está rota.", {
+        id: "lrn_falsa",
+        estado: "refutada",
+        refutacion: { motivo: "era el índice de lectura el que mentía", at: 1 },
+      }),
+      learning("precios", "La tarifa senior es US$45/hora.", { id: "lrn_valida" }),
+    ]);
+    const state = new RunState(run.id, config);
+    const prompt = buildSystemPrompt(state, role, "Objetivo");
+
+    expect(prompt).not.toContain("edit_artifact está rota");
+    expect(prompt).toContain("US$45/hora");
+    // No se borra: el tombstone —por qué era falsa— vale para quien la liste.
+    expect(state.learnings.some((l) => l.id === "lrn_falsa")).toBe(true);
+  });
+
+  it("cada lección viaja con su procedencia, y el prompt ya no dice 'dalo por válido'", () => {
+    const { role, run, config } = scenario([
+      learning("precios", "La tarifa senior es US$45/hora.", {
+        authorRoleId: "rol_1",
+        createdAt: new Date("2026-03-10").getTime(),
+        confirmaciones: [{ roleId: "rol_2", runId: "run_x", at: 2 }],
+      }),
+    ]);
+    // El autor tiene que estar en el organigrama para resolver su nombre.
+    const conRol = { ...config, roles: config.roles.map((r) => ({ ...r, id: "rol_1" })) };
+    const prompt = buildSystemPrompt(new RunState(run.id, conRol), { ...role, id: "rol_1" }, "Objetivo");
+
+    // Sin procedencia el agente no puede juzgar credibilidad: una lección de
+    // un rol en su primer turno llegaba con la misma voz que una confirmada.
+    expect(prompt).toContain("confirmada 1×");
+    expect(prompt).not.toContain("Dalo por válido");
+    expect(prompt).toContain("punto de partida");
+  });
+
+  it("una cuestionada entra marcada, no muda", () => {
+    const { role, run, config } = scenario([
+      learning("proceso", "Los deploys de viernes fallan más.", { estado: "cuestionada" }),
+    ]);
+    const prompt = buildSystemPrompt(new RunState(run.id, config), role, "Objetivo");
+    expect(prompt).toContain("(?) Los deploys de viernes fallan más.");
   });
 });

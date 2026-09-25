@@ -307,6 +307,20 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ topic, lesson }),
     }),
+  updateLearning: (
+    companyId: string,
+    id: string,
+    patch: {
+      topic?: string;
+      lesson?: string;
+      estado?: "activa" | "cuestionada" | "refutada";
+      motivoDeRefutacion?: string;
+    },
+  ) =>
+    request<Learning>(`/companies/${companyId}/learnings/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
   deleteLearning: (companyId: string, id: string) =>
     request<{ ok: boolean }>(`/companies/${companyId}/learnings/${id}`, { method: "DELETE" }),
   mcpHealth: (companyId: string) =>

@@ -1,10 +1,8 @@
-import Fastify from "fastify";
-import cors from "@fastify/cors";
 import { buildRegistry } from "@orq/llm";
 import { Store } from "./db.js";
 import { loadEnv } from "./env.js";
 import { Runtime } from "./runtime.js";
-import { registerRoutes } from "./routes.js";
+import { construirApp } from "./app.js";
 import { MisionScheduler } from "./misiones.js";
 
 const env = loadEnv();
@@ -13,14 +11,11 @@ const providers = buildRegistry(process.env);
 const runtime = new Runtime(store, providers, env);
 const misiones = new MisionScheduler(store, runtime, runtime.correo, env.appUrl, env.misionTickMs);
 
-const app = Fastify({
-  logger: { transport: { target: "pino-pretty", options: { translateTime: "HH:MM:ss" } } },
-  // Los entregables que escriben los agentes pueden ser grandes.
-  bodyLimit: 10 * 1024 * 1024,
-});
-
-await app.register(cors, { origin: true });
-await registerRoutes(app, { store, runtime, providers, misiones });
+// El armado del Fastify vive en `construirApp`, compartido con los tests.
+const app = await construirApp(
+  { store, runtime, providers, misiones },
+  { logger: { transport: { target: "pino-pretty", options: { translateTime: "HH:MM:ss" } } } },
+);
 
 // Una corrida no sobrevive al reinicio: su estado vivo está en memoria. Con un
 // apagado ordenado quedan en `stopped`, pero una caída dura las dejaba en

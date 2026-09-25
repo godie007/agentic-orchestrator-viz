@@ -81,6 +81,8 @@ export interface WriteArtifactInput {
 export interface RecordLessonInput {
   topic: string;
   lesson: string;
+  /** Qué respalda la lección: la herramienta y el resultado que la demuestran. */
+  evidencia?: string | null;
 }
 
 export interface AgentRequestInput {

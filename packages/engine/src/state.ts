@@ -1,4 +1,4 @@
-import { ids } from "@orq/shared";
+import { ids, normalizarLeccion } from "@orq/shared";
 import type {
   AgentRequest,
   ApprovalRequest,
@@ -424,7 +424,7 @@ export class RunState {
    * evitar. Repetir una lección sube su contador y la muestra antes.
    */
   async recordLesson(
-    input: { topic: string; lesson: string },
+    input: { topic: string; lesson: string; evidencia?: string | null },
     actorId: string | null = null,
   ): Promise<Learning> {
     const key = normalize(input.lesson);
@@ -435,9 +435,24 @@ export class RunState {
     );
 
     if (existing) {
-      existing.timesConfirmed += 1;
-      existing.updatedAt = Date.now();
-      this.persistence.saveLearning(existing);
+      // Confirmar es que **otro** la reafirme: otra corrida u otro autor.
+      // Antes cualquier repetición sumaba, y `timesConfirmed` terminaba
+      // midiendo cuántas veces el mismo agente dijo lo mismo en el mismo
+      // turno — un contador de insistencia con cara de verificación, que
+      // encima ordena el prompt.
+      const ultima = existing.confirmaciones.at(-1);
+      const esIndependiente =
+        ultima == null
+          ? existing.authorRoleId !== actorId || existing.runId !== this.runId
+          : ultima.roleId !== actorId || ultima.runId !== this.runId;
+      if (esIndependiente) {
+        existing.timesConfirmed += 1;
+        if (existing.confirmaciones.length < 20) {
+          existing.confirmaciones.push({ roleId: actorId, runId: this.runId, at: Date.now() });
+        }
+        existing.updatedAt = Date.now();
+        this.persistence.saveLearning(existing);
+      }
       return existing;
     }
 
@@ -450,6 +465,10 @@ export class RunState {
       authorRoleId: actorId,
       runId: this.runId,
       timesConfirmed: 1,
+      evidencia: input.evidencia ?? null,
+      estado: "activa",
+      refutacion: null,
+      confirmaciones: [],
       createdAt: now,
       updatedAt: now,
     };
@@ -904,16 +923,8 @@ export class RunState {
 }
 
 
-/** Normaliza para deduplicar lecciones escritas con distinta puntuación. */
-function normalize(text: string): string {
-  return text
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-z0-9 ]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
+/** La regla de dedupe es una sola y vive en `@orq/shared`. Ver `normalizarLeccion`. */
+const normalize = normalizarLeccion;
 
 /** Lo que sobrevive de un turno que se cortó, para poder continuarlo. */
 export interface TurnoInterrumpido {

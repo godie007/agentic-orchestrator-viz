@@ -714,10 +714,62 @@ export const learningSchema = z.object({
   runId: idSchema.nullable().default(null),
   /** Veces que se reafirmó. Las repetidas suben y se muestran primero. */
   timesConfirmed: z.number().int().positive().default(1),
+  /**
+   * Una lección es un **reclamo que requiere evidencia**, no un hecho a
+   * guardar. Lo pagamos: un rol concluyó que `edit_artifact` estaba rota
+   * —era el índice de lectura el que le mostraba secciones duplicadas
+   * inexistentes— y la lección falsa entró a la memoria de la empresa, lista
+   * para degradar todas las corridas siguientes. Los campos que siguen
+   * existen para que eso se note y se pueda deshacer.
+   */
+  /** Qué respalda la lección: la herramienta y el resultado que la demuestran. */
+  evidencia: z.string().max(600).nullable().default(null),
+  /**
+   * `refutada` no entra más al prompt pero **no se borra**: el registro de por
+   * qué se refutó vale tanto como la lección. `cuestionada` entra marcada.
+   */
+  estado: z.enum(["activa", "cuestionada", "refutada"]).default("activa"),
+  /** El tombstone: por qué se refutó y cuándo. Sólo lo pone una persona. */
+  refutacion: z
+    .object({ motivo: z.string().min(1).max(600), at: timestampSchema })
+    .nullable()
+    .default(null),
+  /**
+   * Quién la reafirmó de verdad. `timesConfirmed` solo contaba repetición
+   * textual —posiblemente del mismo rol en el mismo turno—; una confirmación
+   * vale cuando viene de otra corrida u otro autor.
+   */
+  confirmaciones: z
+    .array(
+      z.object({
+        roleId: idSchema.nullable(),
+        runId: idSchema.nullable(),
+        at: timestampSchema,
+      }),
+    )
+    .max(20)
+    .default([]),
   createdAt: timestampSchema,
   updatedAt: timestampSchema,
 });
 export type Learning = z.infer<typeof learningSchema>;
+
+/**
+ * Normaliza para deduplicar lecciones escritas con distinta puntuación.
+ *
+ * Vive acá y no en el motor porque la deduplicación tiene dos puertas —el
+ * `record_lesson` de un agente y el POST de una persona— y con dos copias de
+ * la regla, lo que una puerta consideraba repetido la otra lo creaba de nuevo.
+ */
+export function normalizarLeccion(text: string): string {
+  return text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9 ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
 // ---------------------------------------------------------------------------
 // Costos

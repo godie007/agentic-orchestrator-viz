@@ -1,4 +1,4 @@
-import type { Message, Role, Task } from "@orq/shared";
+import type { Learning, Message, Role, Task } from "@orq/shared";
 import type { RunState } from "./state.js";
 
 /**
@@ -115,6 +115,27 @@ function buildAuthoritySection(role: Role, state: RunState): string {
 }
 
 /**
+ * Quién registró la lección y cuándo, corto: `— Nora, mar 2026`.
+ *
+ * Sin esto el agente no puede juzgar credibilidad: una lección cargada a mano
+ * por la persona a cargo y una escrita por un rol en su primer turno llegaban
+ * con la misma voz. El formato es fijo (es-AR, mes corto) para que el prompt
+ * sea determinista y el caché de prefijo no se invalide por el locale.
+ */
+function procedencia(state: RunState, learning: Learning): string {
+  const autor = learning.authorRoleId
+    ? (state.roles.find((role) => role.id === learning.authorRoleId)?.name ?? "un rol que ya no está")
+    : "cargada a mano";
+  const fecha = new Date(learning.createdAt).toLocaleDateString("es-AR", {
+    month: "short",
+    year: "numeric",
+  });
+  const confirmada =
+    learning.confirmaciones.length > 0 ? `, confirmada ${learning.confirmaciones.length}×` : "";
+  return `— ${autor}, ${fecha}${confirmada}`;
+}
+
+/**
  * Memoria de la empresa: lo aprendido en corridas anteriores.
  *
  * Va en el prompt en vez de detrás de una herramienta a propósito. El objetivo
@@ -132,7 +153,11 @@ const TOPE_MEMORIA = 3_200;
 const TOPE_LECCION = 400;
 
 function buildMemorySection(state: RunState, limit = 25): string {
-  const learnings = state.learnings.slice(0, limit);
+  // Las refutadas no entran: una persona ya determinó que eran falsas, y una
+  // lección falsa en el prompt degrada todas las corridas que la lean. No se
+  // borran de la base —el motivo de la refutación vale— pero acá no viajan.
+  const vigentes = state.learnings.filter((learning) => learning.estado !== "refutada");
+  const learnings = vigentes.slice(0, limit);
   if (learnings.length === 0) return "";
 
   // La memoria se acota por **tamaño**, no sólo por cantidad.
@@ -147,10 +172,17 @@ function buildMemorySection(state: RunState, limit = 25): string {
   //
   // Se recorta lo largo en vez de descartarlo: el encabezado de una lección ya
   // dice si aplica, y lo que importa suele estar en la primera línea.
+  // "Dalo por válido" era el motor de la deuda cognitiva: una lección falsa
+  // recibía la misma autoridad que una confirmada por cinco corridas, y la
+  // única corrección ofrecida era *agregar* otra lección — las dos convivían.
+  // La confianza ahora se gradúa por confirmaciones y la procedencia viaja
+  // con cada lección, para que el agente pueda juzgar credibilidad.
   const lines = [
     `## Lo que esta empresa ya aprendió`,
-    `Esto viene de trabajos anteriores. Dalo por válido y no lo vuelvas a averiguar;`,
-    `si algo resulta estar mal, corregilo con record_lesson.`,
+    `Esto viene de trabajos anteriores. Usalo como punto de partida: lo confirmado por`,
+    `varias corridas pesa más que lo registrado una sola vez, y "(?)" marca lo todavía`,
+    `no verificado. Si lo que ves ahora lo contradice, registrá la corrección con`,
+    `record_lesson citando la evidencia — una persona resuelve la discrepancia.`,
     ``,
   ];
 
@@ -169,9 +201,13 @@ function buildMemorySection(state: RunState, limit = 25): string {
       lesson = `${lesson.slice(0, TOPE_LECCION).trimEnd()}… (recortada)`;
       recortadas += 1;
     }
-    usado += lesson.length + learning.topic.length;
+    // La procedencia va afuera del recorte: es lo que este sufijo garantiza,
+    // así que si hay que elegir se recorta la lección, nunca quién la firmó.
+    const marca = learning.estado === "cuestionada" ? "(?) " : "";
+    const linea = `${marca}${lesson} ${procedencia(state, learning)}`;
+    usado += linea.length + learning.topic.length;
     const list = byTopic.get(learning.topic) ?? [];
-    list.push(lesson);
+    list.push(linea);
     byTopic.set(learning.topic, list);
   }
 
@@ -180,7 +216,7 @@ function buildMemorySection(state: RunState, limit = 25): string {
     for (const lesson of lessons) lines.push(`- ${lesson}`);
   }
 
-  const sinMostrar = omitidas + (state.learnings.length - learnings.length);
+  const sinMostrar = omitidas + (vigentes.length - learnings.length);
   if (sinMostrar > 0 || recortadas > 0) {
     lines.push(
       ``,
