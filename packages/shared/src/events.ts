@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  agentRequestTypeSchema,
   idSchema,
   mcpConnectionStatusSchema,
   messageTypeSchema,
@@ -194,7 +195,9 @@ const agentRequestEvent = z.object({
   type: z.literal("request.created"),
   requestId: idSchema,
   requestedByRoleId: idSchema.nullable(),
-  requestType: z.enum(["create_role", "context", "tool_access", "mcp_server"]),
+  // El mismo enum del dominio: copiado a mano, un tipo nuevo de solicitud
+  // parseaba en la base y rompía el evento que la anuncia.
+  requestType: agentRequestTypeSchema,
   reason: z.string(),
   summary: z.string(),
 });
@@ -236,6 +239,24 @@ const logEvent = z.object({
   roleId: idSchema.nullable().default(null),
 });
 
+/**
+ * Un turno cerró con cambios en el código: el checkpoint que lo registra.
+ *
+ * Es el único rastro de lo que editó el CLI de Claude con su propio `Edit`, que
+ * no pasa por el puente del org: sin este evento, en la traza ese trabajo no
+ * existía.
+ */
+const codigoCheckpointEvent = z.object({
+  ...base,
+  type: z.literal("codigo.checkpoint"),
+  roleId: idSchema,
+  repoId: idSchema,
+  rama: z.string(),
+  sha: z.string(),
+  mensaje: z.string(),
+  archivos: z.number().int().nonnegative(),
+});
+
 export const traceEventSchema = z.discriminatedUnion("type", [
   runStatusEvent,
   tickStartEvent,
@@ -254,6 +275,7 @@ export const traceEventSchema = z.discriminatedUnion("type", [
   agentRequestEvent,
   costEvent,
   logEvent,
+  codigoCheckpointEvent,
 ]);
 
 export type TraceEvent = z.infer<typeof traceEventSchema>;

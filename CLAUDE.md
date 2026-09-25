@@ -599,7 +599,7 @@ los de corridas anteriores (`listArtifactsByCompany`), así un área lee lo que
 otra escribió y lo versiona en vez de reiniciar en v1. Los previos no se
 re-persisten y `list_artifacts` los marca como de otro trabajo.
 
-La salida va a `data/exports/<empresa>/`, en carpetas: la habilidad acepta
+La salida va a `data/proyectos/<Nombre>/salida/`, en carpetas: la habilidad acepta
 `folder` y la crea sola. Sobre ese directorio los agentes **crean, modifican y
 borran** (`write_output_file`, `delete_files`, `export_docx`, `export_pdf`,
 `list_output`). `delete_files` acepta `kind` para borrar un grupo entero —"borrá
@@ -1139,6 +1139,438 @@ desde `paused` y mira las dos cosas pendientes —solicitudes y aprobaciones—,
 porque resolver la última aprobación deja la corrida en `paused`: sin eso,
 aprobar no hacía nada visible y había que apretar "continuar" a mano, que es
 justo lo que esa función existe para evitar.
+
+**Una carpeta legible por proyecto, y la encuentra la marca, no el nombre.**
+`directorios.ts` es la única fuente de rutas: `data/proyectos/<Nombre legible>/`
+con `salida/`, `repos/`, `worktrees/` y `tmp/` adentro, y un `.empresa` con el
+id. Antes la salida iba por id (`data/exports/cmp_msw30yi82fdt1e`), el vault por
+nombre, y nadie podía decir desde el Finder qué carpeta era de qué proyecto. Se
+busca por la marca para que renombrar no cree una carpeta nueva al lado de la
+vieja; dos proyectos homónimos toman `Nombre (abc123)`, y una carpeta sin marca
+no se reclama nunca. `ExportStore` recibe la disposición (`porId` para tests y
+seeds, `porProyecto` en el servidor) y **leer ya no crea**: `tree` sobre una
+empresa sin salida devuelve vacío. Al arrancar, `Runtime.migrarLayout` muda
+`data/exports/<id>` **antes de levantar cualquier MCP** y reescribe los
+argumentos MCP que apuntaban a la ruta vieja —el Playwright de reconocimiento la
+lleva en `--output-dir`—; si una empresa tiene salida en los dos layouts no se
+fusiona sola. `publicar` conserva la subcarpeta y contesta 409 en vez de pisar
+una versión publicada.
+
+**Renombrar un proyecto no es un PATCH del nombre** (`Runtime.renombrarEmpresa`,
+`POST /companies/:id/renombrar`; el PATCH genérico lo deriva ahí si cambia
+`name`). La marca hace que no *haga falta* mudar la carpeta, pero una persona lee
+nombres, y el vault se resuelve **por nombre**: sin `ContextoStore.renombrar` el
+proyecto renombrado abría un vault vacío al lado del que tenía la memoria.
+Mudar la carpeta (`Directorios.mudar`) rompe lo que guardaba rutas absolutas, y
+son dos cosas: los **worktrees** —git anota la ruta en los dos lados, así que
+sin `git worktree repair` un `git status` dentro de la sesión falla; el test lo
+fija corriendo git *desde adentro* del worktree, que es como lo abre una
+persona— y los **servidores MCP** con la ruta en sus argumentos, que se
+reescriben con `reescribirRutasMcp` y se resincronizan. Por eso no se renombra
+con una corrida en curso. Un **repo** se renombra sólo de nombre: la carpeta
+`repos/<slug>` no se mueve —el slug es técnico y moverlo obligaría a reparar
+worktrees por nada— y como el repo también se encuentra por slug, un agente que
+todavía dice el nombre viejo en su turno sigue llegando; por eso ese renombre no
+pide detener la corrida. El nombre de repo no puede repetirse: es el argumento
+`repo=` de las herramientas.
+
+**El orquestador programa, sobre un clon y en una rama.** Una persona carga código
+desde la pestaña Código (ruta local o URL git) y el equipo trabaja sobre un
+**clon gestionado** en `repos/<slug>`, nunca sobre su carpeta: un `git worktree
+add` directo sobre su repo parece inofensivo y escribe en su `.git`, dispara sus
+hooks y le deja refs. Hay un test que hashea el `.git` original antes y después.
+Una carpeta sin git se **copia** y se versiona en `data/` —no se le hace `git
+init` a la carpeta de la persona— y al integrar se copian de vuelta sólo los
+archivos tocados, rechazando los que ella cambió desde la base. `.git/info/exclude`
+deja afuera `.env*`, `node_modules`, `dist`: sin eso el commit base se llevaba
+los secretos y los agentes los podían leer.
+
+La **sesión** (`sesiones_codigo`) es un worktree con su rama `orq/<fecha>-<x>`,
+una por repo, y **sobrevive a la corrida** como las tareas heredadas. Cada turno
+que escribe cierra con un **checkpoint** —commit con el rol como autor— en el
+mismo `finally` que `agent.turn_end` (`EspacioDeTurno.cerrar`). Es lo único que
+registra lo que editó el CLI con su propio `Edit`, y por eso emite
+`codigo.checkpoint`. Integrar y descartar son sólo de la persona, desde la UI:
+integrar absorbe la base **dentro del worktree** (un conflicto se le pide a un
+agente, nunca se resuelve en la carpeta de ella), crea la rama en su repo y
+avanza con `--ff-only` sólo si tiene la rama base abierta y limpia.
+
+**Git del servidor, endurecido** (`git.ts`): sin hooks (`core.hooksPath=/dev/null`),
+sin fsmonitor, sin config global ni de sistema, identidad fija, nunca pregunta
+(`GIT_TERMINAL_PROMPT=0`, SSH batch) y siempre con `--git-dir` explícito — el `.git`
+de un worktree es un archivo de texto que cualquier cosa que corra adentro puede
+reescribir. Una URL con `user:token@` se rechaza (misma regla que MCP), y `ext::`,
+`file://` y lo que empiece con `-` también. El ayudante de credenciales de la
+persona se lee aparte y se pasa explícito: sin él un repo privado no se clona.
+
+**Uno escribe por vez: el arriendo.** `TurnDeps.codigo.abrirTurno` le da a un rol
+con herramientas que escriben el arriendo del repo; el que no lo consigue va en
+sólo lectura **y el resumen del prompt lo dice**, así no intenta editar para
+chocar contra la negativa. Sin eso, dos agentes editan el mismo árbol y uno corre
+los tests sobre la edición a medias del otro. Vive en memoria (`ArriendosDeCodigo`)
+con vencimiento, porque es de un turno vivo.
+
+**Las herramientas de código** (`packages/tools/src/codigo/`, origin `skill`)
+toman los diseños que ya funcionan en otros harness: `editar_codigo` es el
+`str_replace` de Claude Code —match exacto y único; si hay varios, nombra las
+líneas—, `leer_codigo` numera y lee por ventanas (`LINEAS_POR_LECTURA`, acoplado a
+`TOPE_RESULTADO`; `desde` está en `ACOTADORES`), `buscar_codigo` es `git grep
+--untracked` (un archivo recién creado existe aunque no esté commiteado) y
+`mapa_del_codigo` es el repo map de Aider sin dependencias: regex por lenguaje y
+ranking por cuántos archivos nombran cada símbolo, acotado por caracteres y con
+caché por mtime —no se persiste índice, así las ediciones del CLI lo invalidan
+solas—. Dos reglas que no son estéticas: un bloque igual **salvo indentación**
+se informa y **no se aplica** (en Python o YAML la indentación es código), y las
+rutas se resuelven con `realpath` contra el worktree, sin `safePath` —que le saca
+el punto a `.gitignore` y rompe `[id].tsx`— y rechazando `.git/**`. Se registran
+en toda empresa aunque no haya repo, a propósito: la plantilla las otorga antes
+de que alguien cargue código, y sin repo cada una dice qué falta y quién lo carga.
+
+**Comandos: la allowlist decide qué, el sandbox contiene.** `ejecutar_comando`
+tokeniza a argv **sin shell** (`@orq/shared/argv.ts`, compartido con la UI: con dos
+copias, lo que una aceptaba la otra lo rechazaba), compara **por token** —`npm
+test` no habilita `npm testx`— y rechaza como entrada de la lista los prefijos que
+lo permiten todo (`npx`, `bash`, `node` solo, `npm run` sin script). Pero permitir
+`npm test` es permitir los tests que escribió el agente, así que la frontera de
+verdad es `sandbox-exec`: escribe sólo en el worktree, `tmp/` y los cachés de
+paquetes, **nunca** en el `.git` del clon ni en el archivo `.git` del worktree
+(un hook ahí corre fuera del sandbox en el próximo checkpoint), y no lee
+`~/.ssh`, `~/.aws` ni las credenciales de `gh`. Sin sandbox, el repo necesita el
+opt-in `sinAislamiento` de una persona. El entorno va sin `*_KEY`/`*_TOKEN` y con
+`CI=1` (sin eso vitest y jest arrancan en watch y no terminan), el corte mata el
+**grupo** de procesos (los nietos incluidos) y hay una fila por repo.
+**`exit ≠ 0` vuelve como `ok:true`**: si fuera un fallo, el ciclo corregir → testear
+chocaría contra `TOLERANCIA_IDENTICA` a la tercera corrida. Lo que falta se pide
+con `solicitar_comando` (tipo de solicitud `comando`): la persona lo aprueba
+**una vez** (argv exacto, se consume) o **siempre** (un prefijo que puede
+recortar), porque `requiresApproval` no sirve acá — aprobar sólo le mandaba un
+mensaje al agente y la herramienta volvía a pedir aprobación para siempre.
+
+**El CLI de Claude edita, pero no tiene `Bash`.** En modo código
+(`OrgToolsSession.codigo`) el `cwd` es el worktree y el turno con el arriendo
+recibe `Edit/MultiEdit/Write`; nadie recibe `Bash`, que además se niega explícito
+junto con `Edit(.git/**)`/`Write(.git/**)` (verificado contra el CLI 2.1.282).
+Los comandos van por `ejecutar_comando`, que es lo único con sandbox, entorno
+limpio y rastro. Lo que el CLI usa por su cuenta se parsea del stream-json
+(`herramientasPropiasDelCli`) y cuenta en `herramientas` y en `check_activity`:
+sin eso, un programador que sólo usa `Edit` cuenta cero y el scheduler lo deja de
+convocar a los dos turnos. Un turno de código usa `timeoutCodigoMs` (25 min en
+Claude Code). `entornoDelCli` saca `ANTHROPIC_API_KEY`: si no, `claude -p` factura
+por API en vez de por la suscripción, y el costo lo reportamos en 0. `opencode`
+va en sólo lectura también sobre código —no hay cómo negarle `.git` por patrón—
+y edita por las herramientas del org.
+
+**La pestaña Código es un IDE, y es el mismo worktree de los agentes.** Monaco
+—el editor de VS Code— empaquetado con Vite (`routes/codigo/monaco.ts`, sin CDN:
+un IDE que no abre archivos sin red no es un IDE) y cargado con `lazy` sólo al
+entrar. Explorador con estado git, pestañas, diff lado a lado contra la base de
+la sesión, búsqueda (`git grep` literal), control de código fuente y una
+terminal. Tres reglas que no son de diseño:
+
+- **Mientras un agente tiene el arriendo, el editor es de sólo lectura** y el
+  archivo abierto se refresca solo: es como se lo ve trabajar. Guardar contesta
+  409 con el nombre de quien escribe; la edición queda en el editor.
+- **Guardar lleva el hash de lo que se cargó.** Si el archivo cambió en disco
+  —lo tocó un agente—, 409 con `conflicto` y la persona elige qué versión
+  queda. Pisar el trabajo de un agente sin que nadie se entere es lo que el
+  arriendo evita entre agentes, y vale igual entre agente y persona.
+- **Lo que editó una persona se commitea a su nombre antes del próximo turno**
+  (`abrirTurnoDeCodigo`): sin eso el checkpoint del agente se llevaba su trabajo
+  firmado por el agente. La identidad es la de git de la máquina, leída aparte
+  porque `git.ts` no lee la config global.
+
+La terminal **no es una shell**: corre sólo la allowlist del repo, en el mismo
+sandbox que los agentes. La API escucha en localhost con CORS abierto, y un
+endpoint que corre lo que le pidan sería una puerta que cualquier página del
+navegador puede golpear. Las vistas laterales quedan montadas y se ocultan: si
+se desmontaran, ir a Buscar y volver cerraba todas las carpetas.
+
+**Cada repo es una raíz del explorador**, como un workspace de varias carpetas
+de VS Code: su árbol, su rama y sus acciones (archivo nuevo, configurar,
+sacarlo del proyecto). Las pestañas llevan el `repoId`; el "repo activo" —el de
+la pestaña abierta o el último que tocaste— es sobre el que operan el control
+de código, la búsqueda, la terminal y el chat.
+
+**El chat de IA es una corrida enfocada, no un sistema aparte.** `createRunSchema.foco`
+(`rolId`, `repoId`, `contexto`) arma una corrida con **un solo rol** —el
+organigrama se reduce a él y no adopta tareas ajenas: si no, "mejorá esta
+función" terminaba en una reunión de cuatro agentes—, pocos ciclos (4 por
+default) y el repo elegido como principal del turno (`abrirTurnoDeCodigo`,
+`repoPrincipalId`). El contexto que adjunta la persona (archivos con `@`, la
+selección del editor con ⌘L) viaja **en el mensaje**, con contenido y con
+presupuesto (`armarContexto`, 30k caracteres): se reenvía en cada vuelta de un
+turno delegado. Lo que cambió un pedido son sus checkpoints —de ahí salen "Ver
+cambios" (diff entre `primero^` y `último`) y "Deshacer" (`git revert`, no
+reescribir la historia)—. El "Mejorador de código" (`MEJORADOR_DE_CODIGO`) se
+crea con un click, con todas las tools de código y Opus si está `claude-code`.
+Las herramientas propias del CLI ahora emiten `tool.start`/`tool.end`
+(`cli:Edit`…) además de contar: sin eso el chat no podía mostrar qué editó.
+Llegan al final del turno, porque el CLI devuelve todo junto.
+
+**La vista previa corre código de un agente en tu navegador, y eso decidió tres
+cosas.** Se sirve por `/api/repos/:id/vista/*` con `Content-Security-Policy:
+sandbox allow-scripts` —el sandbox lo pone el servidor, así vale también si se
+abre en otra pestaña, donde ningún atributo `sandbox` la protege y correría con
+el origen de la app, con acceso a toda la API por el proxy—; con origen opaco
+los ES modules necesitan CORS, así que **sólo esas respuestas** van con
+`Access-Control-Allow-Origin: *`; y la API dejó de contestarle a cualquier
+origen (`construirApp({ origenes })`, antes `origin: true`): la UI va por el
+proxy de Vite y no lo nota, pero una página cualquiera —o la vista previa— ya
+no puede leer lo que devuelve. Se recarga sola con cada guardado y cada
+checkpoint.
+
+**Una grilla CSS sin columnas explícitas crece con su contenido.** El IDE es
+`grid-cols-[minmax(0,1fr)]`: con la columna `auto` implícita, abrir el chat
+corría la página entera de costado (Monaco mide 16M px de ancho interno).
+
+**Un turno delegado no puede esperar a una API saturada.** Medido en una
+corrida de cuatro agentes en Opus: 45 de sus 65 minutos fueron **huecos de
+quince minutos exactos** sin una sola llamada, y otra corrida perdió sus dos
+primeros turnos en diez reintentos de la API (esperas de hasta 38 s) con error
+desconocido —el binario del CLI trae el mensaje: "high demand for Opus"—. Lo
+que no es del agente se resuelve en el adaptador (`claude-code.ts`):
+
+- `--fallback-model` (`RESPALDO`: opus→sonnet, sonnet→opus, haiku→sonnet): si
+  el modelo está saturado responde otro, y **se dice**. `diagnosticoDelTurno`
+  lee `modelUsage` del `result` y el aviso va a la traza vía `ChatResult.avisos`;
+  el `modelSlug` del turno es el que respondió de verdad.
+- `CLAUDE_CODE_MAX_RETRIES=4` (el CLI trae 10) en `entornoDelCli`, respetando
+  lo que haya puesto quien corre el servidor.
+- **Vigilante de silencio** (`SILENCIO_MAX_MS`, 180 s, `CLAUDE_CODE_SILENCIO_MS`):
+  con `--include-partial-messages` el CLI emite un evento por trozo de texto, así
+  que el silencio no es "está pensando". Mientras corre una herramienta del org
+  no cuenta —`OrgToolsSession.ocupada()`, que lleva el puente—: un `npm test`
+  de cinco minutos no es un cuelgue. Los eventos parciales se usan de latido y
+  **no se guardan**: multiplicaban por diez la memoria de un turno.
+- El `rate_limit_event` del stream avisa cuando la suscripción pasa el 80% de
+  su ventana (5 horas o semanal).
+- Cada turno deja su transcripción en `CLAUDE_CODE_WORKDIR/transcripciones/`
+  (las últimas 300): cuando se colgó uno no había nada que mirar.
+
+Y en el motor: si un ciclo entero falla por el proveedor, `runContinuous`
+**espera** antes del siguiente (30 s, 60 s, 120 s; `ORQ_ESPERA_PROVEEDOR_MS`,
+cero en los tests) en vez de repetir al toque contra la misma API caída.
+
+**Un comando sobre el mismo árbol da el mismo resultado.** `ejecutar_comando`
+reutiliza el último resultado si la huella del árbol (HEAD + `git diff HEAD`
+con los archivos nuevos vía `--intent-to-add`) no cambió en 30 minutos, y lo
+dice; `repetir: true` lo fuerza. Medido: 24 `npm test` en una corrida, casi
+todos sobre el mismo código. La terminal del IDE siempre corre de verdad.
+
+**`npm run dev` reinicia el servidor con cada cambio, y un reinicio mata las
+corridas en memoria.** `tsx watch` recarga al tocar cualquier archivo que el
+servidor importa —`packages/` incluidos—: editar el motor con una corrida viva
+la corta con "Servidor detenido". Lo abierto se hereda, pero el turno en vuelo
+se pierde. Para trabajar sobre el orquestador con una corrida larga andando,
+esperar a que termine o correr el servidor sin `watch`.
+
+**Un programa nuevo va en un repo nuevo, y lo crea el equipo.** `crear_repositorio`
+(sólo `manager`/`executive`: un ejecutor que crea repos reparte el trabajo en
+tres) arma un repo con origen `creado` —README, `.gitignore`, y `npm test`,
+`node --test` y `node --check` ya permitidos, porque el primer paso de un equipo
+sin eso era pedir permiso para testear lo que acababa de crear—; integrar es
+avanzar su propio `main`. Sin ningún repo, `abrirTurnoDeCodigo` igual devuelve
+un resumen (`dir: null`) que dice dónde va el código, y `write_output_file`
+avisa si le llega código fuente. Lo medimos: un equipo entero escribió un
+simulador en la salida archivo por archivo y llamó a `listar_repositorios` 36
+veces esperando que apareciera un repo.
+
+**Sacar un repo con trabajo sin integrar deja un respaldo** en la salida
+(`respaldos/<repo>-<rama>.bundle` y `.patch`). El bundle lleva la historia
+entera: uno "delgado" necesita el repo de origen para abrirse, y el respaldo
+existe justo para cuando ya no está. Lo pagamos con un simulador de tres etapas
+que vivía sólo en la rama de la sesión y se fue con el clon.
+
+**Una dependencia se pide, se aprueba y aprobar instala.** Un agente no tiene red
+—`curl` no entra en ninguna allowlist— y eso dejó un simulador 3D sin dibujar:
+el código importaba Three.js y nadie podía traerlo. `instalar_dependencia` abre
+una solicitud tipo `dependencia` y **aprobarla instala** (`Runtime.instalarDependencias`):
+el gestor del repo (por lockfile) corre en el sandbox, con red, y el resultado se
+commitea a nombre de quien aprobó. Si falla, la aprobación falla y la solicitud
+queda pendiente —aprobar algo que no quedó instalado le mentiría al agente—. Dos
+reglas en `@orq/shared/dependencias.ts`, validadas en la herramienta **y otra vez
+al aprobar**: sólo paquetes del registro por nombre (nada de URLs, `git:`,
+`file:` ni rutas: la persona ve un nombre y cree que sabe qué instala) y siempre
+`--ignore-scripts` (un `postinstall` es código arbitrario corriendo al instalar).
+`node_modules` no entra al checkpoint; `package.json` y el lockfile sí.
+
+**Una subcarpeta de un repo más grande se carga como copia de esa carpeta**, no
+clonando el repo que la contiene: la persona señaló esa carpeta. Con la regla
+vieja, cargar un programa que estaba en `data/` clonó el orquestador entero.
+
+**Un monorepo son varios programas, y cada uno se levanta distinto.** Un repo
+como el de INSPIA es un solo git con backend (Express), frontend (Vite), app
+móvil (Expo) y un vault de Obsidian adentro. `servicioSchema` (en
+`repositorioSchema.servicios`) describe cada parte: carpeta, tipo
+(`api|web|movil|docs|otro`), comando de arranque con `{puerto}`, la variable del
+puerto, el **puerto que usa en la máquina de la persona**, la ruta de salud y
+sus `.env`. Se detecta al cargar (`detectarServicios` en `apps/server/src/servicios.ts`
+sobre la clasificación pura `clasificarServicio` de `@orq/shared/servicios.ts`):
+Expo gana a Vite aunque traiga `react-dom` —clasificado como web se arranca con
+el comando equivocado—, y la raíz cuenta como docs sólo si no hay una carpeta de
+notas propia (en INSPIA `.obsidian` está en la raíz pero las notas en
+`inspia-obsidian/`). Los comandos del monorepo llevan `carpeta` (`ejecutar_comando`,
+`instalar_dependencia`, la terminal del IDE): cada parte tiene su `package.json`.
+
+**La vista previa de un servicio le habla a la vista previa, no a la persona.**
+`ServiciosVivos` levanta cada servicio sobre el worktree de la sesión (así se ve
+lo que cambiaron los agentes, y Vite/`ts-node-dev` recargan solos), en el
+sandbox de los comandos, en un puerto propio del rango `PUERTOS` (4300-4399):
+el 3001 y el 5173 los está usando ella con su versión. Por eso las URLs a
+`localhost:<puerto original>` de los `.env` se **reescriben**
+(`redirigirUrlsLocales`): sin eso el frontend de la sesión le hablaba al backend
+de la persona, que es la peor falla de una vista previa — se ve bien y muestra
+otra cosa. La dependencia es circular (el CORS del backend necesita la URL del
+frontend y viceversa), así que el puerto de cada hermano se **reserva** aunque no
+esté levantado: el orden de arranque no importa. Las URLs de la propia app que
+apuntan afuera (`EXPO_PUBLIC_API_URL` a staging) se avisan —no las de Supabase ni
+las de un webhook, que son legítimas y tapaban el aviso que importa— y un click
+las pisa con `{url:backend}`.
+
+Los `.env` se leen **al arrancar** y se inyectan: no se copian al worktree (el
+clon los excluye y ahí los leería `leer_codigo`) ni se guardan en la base (el
+blueprint borra sus rutas). Sus valores secretos se tapan en los logs y en las
+respuestas de `probar_servicio`, que es lo que lee un agente. Sólo se aceptan
+archivos que se llaman `.env*`: el servidor los inyecta en un proceso que corre
+código de un agente. Sin `CI=1` (Expo apaga la recarga) y con `BROWSER=none`
+(`expo start --web` abre una pestaña en el Chrome de la persona).
+
+Las dependencias de un servicio se **clonan** del `node_modules` de la persona con
+`cp -c` (APFS, copy-on-write: instantáneo y sin ocupar disco) si su lockfile es
+idéntico al de la sesión; si no, `npm ci --ignore-scripts` en el sandbox. Los
+procesos van en su propio grupo, así que un reinicio de `tsx watch` los dejaría
+huérfanos ocupando puertos: se anotan en `data/proyectos/.servicios-vivos.json`
+(pid + hora de inicio, para no matar un pid reciclado) y se barren al arrancar;
+el `exit` y el `shutdown` los matan. Integrar, descartar o sacar el repo los
+detiene primero —corren sobre el worktree que se va— y renombrar el proyecto con
+servicios vivos se rechaza.
+
+Los agentes **ven y prueban, no levantan**: `servicios` (estado, URL, logs) y
+`probar_servicio` (un pedido HTTP sólo a un servicio del repo), y el resumen del
+prompt dice qué parte es qué y dónde está la documentación. Levantar es de la
+persona: es donde se inyectan sus credenciales.
+
+**Señalar en la vista previa, como en Cursor.** El iframe de un frontend es
+otro origen y el IDE no puede tocar su DOM, así que los servicios `web` y
+`movil` escuchan en un puerto interno (`PUERTOS_INTERNOS`, 4400-4499) y el
+público lo atiende un proxy propio (`proxy-vista.ts`) que reenvía todo —también
+el websocket de la recarga en caliente— y a las páginas HTML les inyecta el
+selector (`/__orq__/selector.js`). Es un puerto propio y no un prefijo del
+servidor porque Vite y Metro usan rutas absolutas. Tres cuidados que ya
+costaron: al reescribir el HTML hay que sacar `transfer-encoding` (con
+`content-length` al lado la respuesta es inválida y el navegador la descarta),
+**no se reenvían pedidos condicionales** de HTML (un 304 devuelve la página
+guardada, sin selector) y la salud se pide al puerto interno (el proxy contesta
+502 mientras arranca, y cualquier respuesta cuenta como lista). El selector
+duerme hasta que el IDE lo activa por `postMessage`, sólo le habla al origen que
+lo activó, se come los clics mientras está activo y manda la ruta, la cadena de
+componentes de React (leída de la fibra), el texto, los atributos y el HTML.
+El chat (`elemento.ts`, `buscarCandidatos`) busca en la carpeta del servicio
+dónde se **define** cada componente y dónde aparece el texto visible, y manda al
+agente los candidatos con el tramo de código de la línea que coincide: el
+agente va derecho al archivo en vez de buscarlo.
+
+**El chat tiene conversaciones** (`foco.conversacionId`). Cada pedido es una
+corrida nueva y el agente arranca sin memoria, así que los pedidos anteriores
+de la misma conversación viajan en el mensaje (`Runtime.historiaDeConversacion`:
+pedido y respuesta final, del más nuevo al más viejo, con presupuesto — no la
+traza, que se reenvía en cada vuelta del turno delegado). Sin eso "dejalo como
+estaba antes" no se refiere a nada. "Nueva conversación" arranca limpia; los
+pedidos de antes de esto se ven juntos como "Pedidos anteriores".
+
+**Dos gits sobre el mismo worktree se cruzan.** El IDE pide `git status` cada
+tres segundos, y `status` toma `index.lock` para refrescar el índice: el
+checkpoint de un turno falló con "index.lock: File exists" y el cambio del
+agente quedó sin commitear (el turno siguiente lo habría firmado como de la
+persona). `git.ts` corre con `GIT_OPTIONAL_LOCKS=0` —las lecturas no toman el
+lock— y reintenta unas pocas veces cuando el lock está ocupado.
+
+**El control de versiones del IDE es el de Cursor, sobre la sesión** (`scm.ts`,
+`/api/sesiones/:id/scm/*`): preparar y quitar por archivo, descartar (confirmado:
+lo nuevo se borra, sin papelera), commit con la identidad de git de la persona
+—sin nada preparado commitea todo, como el smart commit de VS Code— y amend sólo
+sobre commits de la sesión (modificar uno de la base reescribiría una historia
+que no es de acá), stash con y sin archivos nuevos, y ramas: crear, cambiar,
+fusionar y borrar. Cuatro reglas:
+
+- **Cambiar de rama mueve la sesión** (`RepoStore.cambiarRamaDeSesion`): integrar
+  lleva la rama abierta, y si la fila siguiera diciendo `orq/…` se integraría
+  una rama sin el trabajo. La base está abierta en el clon y git no deja abrirla
+  dos veces: se ofrece crear una rama desde ella.
+- **Una fusión con conflicto se aborta y nombra los archivos.** Un árbol con
+  marcas de conflicto que nadie mira es donde el próximo checkpoint de un agente
+  las commitea como código.
+- **Nada escribe mientras un agente tiene el arriendo**, y lo que mueve el árbol
+  entero (stash, ramas, fusión) espera además a que no haya corrida viva: su
+  próximo turno arrancaría sobre otra cosa sin saberlo.
+- **`--intent-to-add` rompe `git stash`** ("not uptodate. Cannot save the current
+  worktree state"), y el diff de la sesión, la huella de los comandos y el
+  mensaje generado marcan así los archivos nuevos. `soltarIntencionDeAgregar`
+  los devuelve a "nuevo sin seguimiento" antes de guardar un stash o cambiar de
+  rama, y el panel los muestra como nuevos, no como agregados.
+
+**El repo de la persona tiene su propia historia, y el IDE la muestra entera.**
+El clon trae todo (en INSPIA, 881 commits de `dev`), y las ramas locales de la
+persona quedan como `origin/*`. `RepoStore.sincronizarConOrigen` las actualiza
+—también los tags y, si el origen es una carpeta, las ramas de **su** remoto
+(GitHub) como `remoto/*`—: el panel lo pide en segundo plano (cada 45 s como
+mucho) y el botón lo fuerza, así lo que ella commiteó desde su editor aparece
+solo. El historial es el de la rama abierta **completo**, paginado, con las
+ramas y tags de cada commit y marcando lo que todavía no está en su base
+(`origin/dev`); la línea de la base dice cuánto lleva la sesión sin integrar y
+cuánto avanzó ella (↓N, con "Traer", que es fusionar `origin/<base>`). Abrir una
+rama suya crea la local que la sigue (`switch --track`, explícito: con la misma
+rama en `origin/` y `remoto/` git se niega a adivinar).
+
+**Integrar una rama con nombre propio nunca la pisa** (`integrarRamaPropia`).
+Las `orq/*` son nuestras y se actualizan con `+rama:rama`; con esa misma regla,
+una sesión abierta en `main` le habría reescrito el `main` a la persona. Una
+rama que no es `orq/*`: si la tiene abierta, fast-forward sobre su carpeta
+limpia; si no, `rama:rama` sin `+`, que git sólo acepta si avanza. Si no se
+puede, la sesión **no** se da por integrada y se explica cómo traer sus cambios.
+
+El ✨ del mensaje (`Runtime.generarMensajeDeCommit`) es **una sola llamada** al
+tier `cheap` del proveedor preferido, no una corrida: describe lo preparado (o
+todo, si no hay nada preparado) e imita los últimos commits del repo —idioma,
+`tipo(área): …`—, porque un mensaje correcto pero escrito distinto al historial
+es ruido que alguien reescribe. Se le sacan las firmas que agrega el CLI de
+Claude (`Co-Authored-By: Claude…`): es un commit de la persona.
+
+**`data/proyectos/package.json` existe a propósito** (`{"type": "commonjs"}`,
+`Directorios.prepararRaiz`). `data/` vive adentro del repo del orquestador, cuyo
+`package.json` dice `"type": "module"`, y Node decide cómo cargar un `.js` por el
+`package.json` más cercano: `ts-node-dev` escribe su hook en `TMPDIR` y lo carga
+con `require`, y el backend de INSPIA moría con "require is not defined". En la
+máquina de la persona el temporal está en `/var/folders` y por eso ahí andaba.
+
+**Una corrida que editó código no está vacía.** El detector de "pedido perdido"
+del scheduler contaba entregables y mensajes entre roles; un pedido del chat del
+IDE no produce ninguna de las dos cosas —su producción es la edición y el
+checkpoint— y terminaba `failed` aunque estuviera resuelto. Ahora cuenta las
+ediciones exitosas (`HERRAMIENTAS_QUE_ESCRIBEN_CODIGO` y `cli:Edit/Write`).
+
+**La documentación de Obsidian se lee en el IDE como en Obsidian** (`Nota.tsx`):
+`[[enlaces]]` que navegan (primero la nota de la misma carpeta), `![[imagen]]`
+servida por la vista estática, callouts y frontmatter como propiedades. El código
+entre backticks no se transforma: un `[[ejemplo]]` escrito como código no es un
+enlace.
+
+**`ENABLE_TOOL_SEARCH=false` en el CLI**: con las herramientas del org
+diferidas, Claude Code hacía un `ToolSearch` para cargar cada esquema —58 en una
+corrida, cada uno una vuelta entera del loop—. Son decenas y el caché de prompt
+las absorbe: van de entrada.
+
+**`git` con `--work-tree` necesita también `cwd`.** `grep --untracked` y
+`ls-files -o` trabajan sobre el directorio actual: sin `cwd`, buscar en la
+sesión devolvía archivos **del orquestador**. `git.ts` ahora usa el worktree como
+cwd por default. Y `vitest.config.ts` excluye `data/`: los tests de los repos de
+los proyectos son de ellos.
+
+Dos arreglos que salieron de acá y valen para todo: el memo de lecturas del
+puente delegado **no se vaciaba nunca** (leer → editar → leer devolvía el puntero
+a la versión vieja, también con `read_artifact`/`edit_artifact`); ahora comparte
+`invalidarMemo` con el loop. Y el enum de tipos de solicitud estaba copiado a mano
+en `events.ts`: ahora reusa `agentRequestTypeSchema`.
 
 ## Trampas conocidas
 

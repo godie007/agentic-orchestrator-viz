@@ -292,6 +292,160 @@ export const misionSchema = z.object({
 export type Mision = z.infer<typeof misionSchema>;
 
 // ---------------------------------------------------------------------------
+// Código: repositorios cargados y sesiones de trabajo
+// ---------------------------------------------------------------------------
+
+/**
+ * Un comando como argv, nunca como texto de shell.
+ *
+ * La allowlist se compara token por token: guardada como string, `npm test`
+ * habilitaba `npm testx` y `npm test; rm -rf ~` por prefijo.
+ */
+export const argvSchema = z.array(z.string().min(1).max(400)).min(1).max(40);
+export type Argv = z.infer<typeof argvSchema>;
+
+export const origenRepositorioSchema = z.discriminatedUnion("tipo", [
+  /** Una carpeta de esta máquina. Se clona (o se copia, si no tiene git): nunca se toca. */
+  z.object({ tipo: z.literal("local"), ruta: z.string().min(1).max(1000) }),
+  /** Una URL git. Sin credenciales adentro: las pone el helper de git de la máquina. */
+  z.object({ tipo: z.literal("git"), url: z.string().min(1).max(1000) }),
+  /**
+   * Un programa nuevo que creó la empresa (`crear_repositorio`). No tiene
+   * afuera: su casa es el clon, y integrar es avanzar su `main`.
+   */
+  z.object({ tipo: z.literal("creado"), descripcion: z.string().max(500).default("") }),
+]);
+export type OrigenRepositorio = z.infer<typeof origenRepositorioSchema>;
+
+export const comandosRepositorioSchema = z.object({
+  /** Prefijos de argv que un agente puede correr sin preguntar. */
+  permitidos: z.array(argvSchema).default([]),
+  /** Lo que deja un worktree nuevo listo para trabajar (`npm ci`). Lo aprueba una persona. */
+  preparar: argvSchema.nullable().default(null),
+  /** Cómo se corren los tests. Es lo primero que un agente necesita saber. */
+  test: argvSchema.nullable().default(null),
+  /** Typecheck, lint, build: lo que dice si el cambio está sano. */
+  verificar: argvSchema.nullable().default(null),
+  /**
+   * Correr sin `sandbox-exec`. Es un opt-in explícito de una persona: sin
+   * aislamiento, `npm test` corre como tu usuario el código que escribió un
+   * agente, con acceso a todo lo que vos tenés.
+   */
+  sinAislamiento: z.boolean().default(false),
+  /** Permisos de un solo uso, por argv exacto. Se consumen al ejecutarse. */
+  unaVez: z.array(argvSchema).default([]),
+});
+export type ComandosRepositorio = z.infer<typeof comandosRepositorioSchema>;
+
+export const tipoServicioSchema = z.enum(["web", "api", "movil", "docs", "otro"]);
+export type TipoServicio = z.infer<typeof tipoServicioSchema>;
+
+/**
+ * Una parte de un repo que se levanta por su cuenta: el backend, el frontend,
+ * la app móvil, la documentación.
+ *
+ * Un monorepo como el de INSPIA es un solo repo git con cuatro programas
+ * adentro, y cada uno se arranca distinto, en su carpeta, con su puerto y su
+ * `.env`. Sin esto la vista previa sólo podía servir archivos estáticos, y una
+ * app de Vite o de Expo no es un archivo estático: hay que levantarla.
+ */
+export const servicioSchema = z.object({
+  /** Slug estable dentro del repo (`backend`): es lo que nombran los agentes. */
+  id: z.string().min(1).max(60),
+  nombre: z.string().min(1).max(80),
+  /** Relativa a la raíz del repo. `""` es la raíz. */
+  carpeta: z.string().max(300).default(""),
+  tipo: tipoServicioSchema,
+  /**
+   * Cómo se levanta en desarrollo, como argv. `{puerto}` se reemplaza por el
+   * asignado. `null`: no se levanta (la documentación se lee, no corre).
+   */
+  arrancar: argvSchema.nullable().default(null),
+  /** La variable con la que el programa lee su puerto (`PORT`), si la usa. */
+  variablePuerto: z.string().max(60).nullable().default(null),
+  /**
+   * El puerto que usa en la máquina de la persona. Sirve para redirigir: si el
+   * `.env` del frontend dice `http://localhost:3001/api` y el backend usa el
+   * 3001, en la vista previa esa URL pasa a ser la del backend levantado acá.
+   */
+  puertoOriginal: z.number().int().min(1).max(65535).nullable().default(null),
+  /** Qué se consulta para saber que está listo (`/health`). Sin esto, `/`. */
+  salud: z.string().max(200).nullable().default(null),
+  /** Dónde abre la vista previa. */
+  inicio: z.string().max(300).default("/"),
+  /**
+   * Archivos `.env` de la persona, con ruta absoluta. Se leen **al arrancar** y
+   * no se copian al repo ni a la base: el clon excluye `.env*` a propósito, y
+   * un secreto guardado acá viajaría con cada blueprint exportado.
+   */
+  archivosEntorno: z.array(z.string().min(1).max(1000)).max(8).default([]),
+  /** Variables sin secretos que pisan a las de los archivos. `{url:backend}` es la URL de otro servicio. */
+  entorno: z.record(z.string().max(2000)).default({}),
+});
+export type Servicio = z.infer<typeof servicioSchema>;
+
+export const repositorioSchema = z.object({
+  id: idSchema,
+  companyId: idSchema,
+  nombre: z.string().min(1).max(120),
+  /** Nombre de carpeta del clon gestionado: `repos/<slug>`. */
+  slug: z.string().min(1).max(60),
+  origen: origenRepositorioSchema,
+  /** La rama sobre la que se abren las sesiones y a la que se integra. */
+  ramaBase: z.string().min(1).max(200).default("main"),
+  /** Commit del clon del que parten las sesiones. */
+  baseSha: z.string().nullable().default(null),
+  /** El origen local no tenía git: se integra copiando archivos, no con una rama. */
+  origenSinGit: z.boolean().default(false),
+  comandos: comandosRepositorioSchema.default({}),
+  /** Lo que se levanta adentro: ver `servicioSchema`. Se detecta al cargar y se edita en la UI. */
+  servicios: z.array(servicioSchema).max(20).default([]),
+  /**
+   * Llegó importado de un blueprint: la allowlist está pero nadie la confirmó
+   * en esta máquina. Hasta confirmarla no se ejecuta nada.
+   */
+  pendienteDeConfirmar: z.boolean().default(false),
+  createdAt: timestampSchema,
+  updatedAt: timestampSchema,
+});
+export type Repositorio = z.infer<typeof repositorioSchema>;
+
+export const estadoSesionCodigoSchema = z.enum(["abierta", "integrada", "descartada"]);
+export type EstadoSesionCodigo = z.infer<typeof estadoSesionCodigoSchema>;
+
+/**
+ * Una sesión de trabajo sobre un repo: un worktree con su rama `orq/…`.
+ *
+ * Hay una abierta por repo y **sobrevive a la corrida** que la abrió, igual que
+ * las tareas heredadas: un cambio grande no entra en una corrida, y la
+ * siguiente tiene que encontrar el trabajo donde quedó. La cierra una persona,
+ * integrándola o descartándola.
+ */
+export const sesionCodigoSchema = z.object({
+  id: idSchema,
+  companyId: idSchema,
+  repoId: idSchema,
+  rama: z.string().min(1).max(200),
+  /** Relativa a la carpeta del proyecto: `worktrees/<repo>/<rama>`. */
+  carpeta: z.string().min(1).max(500),
+  baseSha: z.string(),
+  estado: estadoSesionCodigoSchema.default("abierta"),
+  creadaEnRunId: idSchema.nullable().default(null),
+  /** Cómo terminó integrada: fast-forward, sólo la rama, copia de archivos. */
+  integracion: z
+    .object({
+      modo: z.enum(["fast-forward", "rama", "copia"]),
+      detalle: z.string().max(4000),
+      at: timestampSchema,
+    })
+    .nullable()
+    .default(null),
+  createdAt: timestampSchema,
+  updatedAt: timestampSchema,
+});
+export type SesionCodigo = z.infer<typeof sesionCodigoSchema>;
+
+// ---------------------------------------------------------------------------
 // Herramientas y MCP
 // ---------------------------------------------------------------------------
 
@@ -494,6 +648,20 @@ export const runSchema = z.object({
   stopReason: z.string().nullable().default(null),
   startedAt: timestampSchema,
   endedAt: timestampSchema.nullable().default(null),
+  /**
+   * Corrida enfocada: un solo agente sobre un repo, disparada desde el chat del
+   * IDE. Ausente o `null` en una corrida de toda la empresa —opcional y no
+   * `.default()` porque las filas viejas no lo tienen y se leen sin Zod—.
+   */
+  foco: z
+    .object({
+      rolId: idSchema,
+      repoId: idSchema,
+      /** La conversación del chat a la que pertenece el pedido. Ausente en los pedidos de antes. */
+      conversacionId: z.string().max(60).optional(),
+    })
+    .nullable()
+    .optional(),
 });
 export type Run = z.infer<typeof runSchema>;
 
@@ -631,6 +799,8 @@ export const agentRequestTypeSchema = z.enum([
   "context", // "necesito saber Y del negocio"
   "tool_access", // "necesito la herramienta Z"
   "mcp_server", // "necesito conectar un servidor MCP que la empresa no tiene"
+  "comando", // "necesito correr este comando en el repo"
+  "dependencia", // "necesito esta librería instalada en el repo"
 ]);
 export type AgentRequestType = z.infer<typeof agentRequestTypeSchema>;
 
@@ -680,6 +850,26 @@ export const agentRequestSchema = z.object({
   toolNames: z.array(z.string()).default([]),
   /** Servidores propuestos, si `type === "mcp_server"`. Ya sin secretos. */
   mcpProposal: z.array(servidorMcpPropuestoSchema).default([]),
+  /** El comando pedido, si `type === "comando"`: argv exacto y en qué repo. */
+  comando: z
+    .object({ repoId: idSchema, argv: z.array(z.string().min(1).max(400)).min(1).max(40) })
+    .nullable()
+    .default(null),
+  /**
+   * Los paquetes pedidos, si `type === "dependencia"`. Aprobar los instala en
+   * la sesión del repo (sin scripts de instalación) y commitea el resultado.
+   */
+  dependencia: z
+    .object({
+      repoId: idSchema,
+      gestor: z.enum(["npm", "pnpm", "yarn"]),
+      paquetes: z.array(z.string().min(1).max(260)).min(1).max(10),
+      dev: z.boolean().default(false),
+      /** Subcarpeta del repo donde está el `package.json` (monorepo). `""` es la raíz. */
+      carpeta: z.string().max(300).default(""),
+    })
+    .nullable()
+    .default(null),
   status: agentRequestStatusSchema.default("pending"),
   /** Lo que respondió la persona: texto libre, o el motivo del rechazo. */
   resolution: z.string().max(8000).nullable().default(null),
@@ -809,6 +999,12 @@ export const companyBlueprintSchema = z.object({
   mcpServers: z.array(mcpServerSchema),
   /** Solo tools built-in; las MCP se redescubren al conectar. */
   tools: z.array(toolSchema),
+  /**
+   * Repos del proyecto, **sin rutas locales**: una ruta de esta máquina no
+   * significa nada en otra. Las URL git viajan; la allowlist llega como
+   * `pendienteDeConfirmar`, porque importar un JSON no puede autorizar comandos.
+   */
+  repositorios: z.array(repositorioSchema).default([]),
 });
 export type CompanyBlueprint = z.infer<typeof companyBlueprintSchema>;
 
@@ -823,6 +1019,27 @@ export const createRunSchema = z.object({
   maxTicks: z.number().int().positive().max(500).optional(),
   budgetUsd: z.number().positive().max(1000).optional(),
   cronIntervalMs: z.number().int().min(1000).optional(),
+  foco: z
+    .object({
+      rolId: idSchema,
+      repoId: idSchema,
+      /**
+       * Lo que adjuntó la persona —archivos, la selección del editor, notas—,
+       * ya armado. Va en el mensaje al agente y no en `objective`, que es lo
+       * que se lista en la UI y tiene su propio tope.
+       */
+      contexto: z.string().max(40_000).default(""),
+      /**
+       * La conversación del chat. Los pedidos anteriores de la misma
+       * conversación viajan resumidos en el mensaje: sin eso "ahora hacelo
+       * azul" no se refiere a nada, porque cada pedido es una corrida nueva.
+       */
+      conversacionId: z
+        .string()
+        .regex(/^[a-z0-9_-]{4,60}$/i)
+        .optional(),
+    })
+    .optional(),
 });
 export type CreateRunInput = z.infer<typeof createRunSchema>;
 

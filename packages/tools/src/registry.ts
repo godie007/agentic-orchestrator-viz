@@ -24,6 +24,11 @@ export class ToolRegistry {
     this.tools.set(tool.name, tool);
   }
 
+  /** Quita una tool por nombre. Devuelve si estaba. */
+  unregister(name: string): boolean {
+    return this.tools.delete(name);
+  }
+
   /** Quita todas las tools de un servidor MCP (al desconectarse o recargar). */
   unregisterByMcpServer(serverId: string): string[] {
     const removed: string[] = [];

@@ -490,6 +490,34 @@ describe("Orchestrator", () => {
     expect(orchestrator.snapshot.stopReason).toContain("sin producir nada");
   });
 
+  it("un pedido de código que editó y no escribió entregables ni mensajes no es una corrida vacía", async () => {
+    const { ceo, run, state, bus } = buildScenario();
+    const provider = new FakeProvider(() => ({ text: "Cambié /health y lo verifiqué." }));
+    const providers = new ProviderRegistry();
+    providers.register(provider);
+    const orchestrator = new Orchestrator(run, state, {
+      bus,
+      providers,
+      tools: new ToolRegistry(),
+      ledger: new RunLedger(run.budgetUsd),
+    });
+    await state.forActor(null).sendMessage({
+      toRoleId: ceo.id,
+      toDepartmentId: null,
+      type: "human",
+      subject: "Pedido",
+      body: "Agregá un campo a /health.",
+      threadId: null,
+      inReplyTo: null,
+    });
+    // Lo que deja un turno delegado que editó con el Edit del CLI.
+    state.recordActivity({ roleId: ceo.id, tick: 0, tool: "cli:Edit", ok: true, detail: "1 vez: backend/src/index.ts" });
+
+    await orchestrator.runContinuous();
+
+    expect(orchestrator.snapshot.status).toBe("completed");
+  });
+
   it("corta la corrida cuando el proveedor rechaza todos los turnos varios ciclos seguidos", async () => {
     const { ceo, run, state, bus } = buildScenario();
 
@@ -519,11 +547,18 @@ describe("Orchestrator", () => {
 
     // Sin la guarda, esto seguiría quemando ciclos hasta maxTicks y terminaría
     // en "completed" sin haber producido nada.
+    const eventosDeEspera: TraceEvent[] = [];
+    bus.subscribe((e) => eventosDeEspera.push(e));
     await orchestrator.runContinuous();
 
     expect(orchestrator.snapshot.status).toBe("failed");
     expect(orchestrator.snapshot.stopReason).toContain("sin un solo turno completado");
     expect(orchestrator.snapshot.tick).toBeLessThan(run.maxTicks);
+    // Entre ciclo fallido y ciclo fallido se espera, y se dice: insistir al
+    // toque contra un proveedor saturado sólo quema los ciclos.
+    expect(
+      eventosDeEspera.some((e) => e.type === "log" && e.message.includes("Se reintenta en")),
+    ).toBe(true);
   });
 });
 

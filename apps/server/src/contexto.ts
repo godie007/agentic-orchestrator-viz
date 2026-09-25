@@ -1,5 +1,6 @@
-import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
+import { segmentoLegible } from "@orq/shared";
 import { ExportStore } from "./exports.js";
 
 /**
@@ -30,25 +31,8 @@ import { ExportStore } from "./exports.js";
  * adentro del vault y en ningún otro lado.
  */
 
-/**
- * Un nombre de archivo o carpeta **legible por una persona**.
- *
- * No se reusa `ExportStore.safeSegment` a propósito: ahí se sacan acentos y
- * espacios porque esos nombres viajan en URLs de descarga. Acá los nombres se
- * leen en Obsidian, y un vault que dice `inspia-checklist-items-no-expanden` en
- * vez de "Checklist: los ítems no se expanden" no se navega, se descifra. Lo que
- * sí se saca es lo que rompe un filesystem o esconde un archivo: separadores de
- * ruta, caracteres de control, y el punto inicial.
- */
-export function segmentoLegible(raw: string): string {
-  return raw
-    .replace(/[\\/:*?"<>|]/g, " ")
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\u0000-\u001f]/g, "")
-    .replace(/\s+/g, " ")
-    .replace(/^[.\s]+|[.\s]+$/g, "")
-    .slice(0, 80);
-}
+// La regla de nombres legibles es compartida con las carpetas de proyecto.
+export { segmentoLegible };
 
 /**
  * Convierte el tema de una lección en un título de nota.
@@ -143,6 +127,32 @@ export class ContextoStore {
       await mkdir(dir, { recursive: true });
       await writeFile(join(dir, MARCA), empresa.id, "utf8");
       return dir;
+    }
+    return null;
+  }
+
+  /**
+   * Lleva el vault al nombre nuevo de la empresa.
+   *
+   * El vault se resuelve por nombre, así que sin esto un renombre le abría uno
+   * vacío al lado del viejo: todo lo aprendido seguía en disco y ningún agente
+   * lo encontraba, y en Obsidian aparecían dos carpetas del mismo proyecto. Si
+   * el destino ya es de alguien, el viejo se queda donde está: mezclar dos
+   * vaults no se deshace.
+   */
+  async renombrar(companyId: string, nombreViejo: string, nombreNuevo: string): Promise<string | null> {
+    const viejo = await this.resolverDir({ id: companyId, nombre: nombreViejo }, false);
+    if (!viejo) return null;
+    const base = segmentoLegible(nombreNuevo) || companyId;
+    for (const candidato of [base, `${base} (${companyId.slice(-6)})`]) {
+      const destino = join(this.rootDir, candidato);
+      if (destino === viejo) return null;
+      // Mismo nombre salvo mayúsculas: en macOS es la misma carpeta y el
+      // `stat` diría que está ocupada.
+      const mismaCarpeta = destino.toLowerCase() === viejo.toLowerCase();
+      if (!mismaCarpeta && (await stat(destino).then(() => true, () => false))) continue;
+      await rename(viejo, destino);
+      return destino;
     }
     return null;
   }

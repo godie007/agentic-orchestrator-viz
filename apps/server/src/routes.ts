@@ -180,8 +180,33 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
       updatedAt: Date.now(),
     });
     if (!merged.success) return invalid(reply, merged.error);
+    // Un cambio de nombre por acá dejaría la carpeta y el vault con el viejo.
+    if (merged.data.name !== current.name) {
+      const renombre = await runtime.renombrarEmpresa(id, merged.data.name);
+      if (!renombre.ok) {
+        reply.code(409);
+        return { error: renombre.motivo };
+      }
+    }
     store.saveCompany(merged.data);
     return merged.data;
+  });
+
+  // Renombrar no es un PATCH más: se lleva detrás la carpeta del proyecto, el
+  // vault y las rutas que guardaban los worktrees y los servidores MCP.
+  app.post("/api/companies/:id/renombrar", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const { nombre } = (request.body ?? {}) as { nombre?: unknown };
+    if (typeof nombre !== "string") {
+      reply.code(400);
+      return { error: "Falta el nombre." };
+    }
+    const resultado = await runtime.renombrarEmpresa(id, nombre);
+    if (!resultado.ok) {
+      reply.code(resultado.motivo === "La empresa no existe." ? 404 : 409);
+      return { error: resultado.motivo };
+    }
+    return { company: resultado.company, carpeta: resultado.carpeta };
   });
 
   /**
@@ -214,6 +239,19 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
       mcpServers: store.listMcpServers(id),
       // Solo las built-in: las de MCP se redescubren al conectar el servidor.
       tools: store.listTools(id).filter((tool) => tool.origin !== "mcp"),
+      // Sólo los repos que se pueden volver a traer desde otra máquina: una
+      // ruta local de ésta no significa nada allá. Sin los permisos de una vez,
+      // que eran de una sesión.
+      repositorios: store
+        .listRepositorios(id)
+        .filter((repo) => repo.origen.tipo === "git")
+        .map((repo) => ({
+          ...repo,
+          baseSha: null,
+          comandos: { ...repo.comandos, unaVez: [] },
+          // Los `.env` son rutas de esta máquina, igual que un origen local.
+          servicios: repo.servicios.map((servicio) => ({ ...servicio, archivosEntorno: [] })),
+        })),
     };
   });
 
@@ -273,8 +311,35 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
       store.saveMcpServer({ ...server, id: ids.mcpServer(), companyId });
     }
 
+    // Los repos se vuelven a clonar en segundo plano —puede tardar minutos— y
+    // sus comandos llegan **pendientes de confirmar**: importar un JSON no puede
+    // autorizar a correr nada en esta máquina. El `.catch` es obligatorio: una
+    // promesa sin dueño que falla tira el servidor entero.
+    const reposImportados = blueprint.repositorios.filter((repo) => repo.origen.tipo === "git");
+    for (const importado of reposImportados) {
+      void runtime.repos
+        .cargar(companyId, {
+          nombre: importado.nombre,
+          origen: importado.origen,
+          ramaBase: importado.ramaBase,
+        })
+        .then(({ repo }) => {
+          store.saveRepositorio({
+            ...repo,
+            comandos: { ...importado.comandos, unaVez: [] },
+            pendienteDeConfirmar: true,
+          });
+          return runtime.registrarHerramientasDeCodigo(companyId);
+        })
+        .catch((error: unknown) => {
+          app.log.warn(
+            `No se pudo clonar ${importado.nombre} al importar: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
+    }
+
     reply.code(201);
-    return { companyId };
+    return { companyId, reposClonando: reposImportados.map((repo) => repo.nombre) };
   });
 
   // --- Sub-entidades de la empresa ----------------------------------------
@@ -504,6 +569,14 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
     resolution: z.string().max(8000).default(""),
     /** Permite editar la propuesta antes de aceptarla. */
     roleProposal: roleProposalSchema.nullable().default(null),
+    /** Para `comando`: permitirlo siempre (con un prefijo recortable) o sólo esta vez. */
+    comando: z
+      .object({
+        alcance: z.enum(["siempre", "una-vez"]),
+        prefijo: z.array(z.string().min(1).max(400)).max(40).optional(),
+      })
+      .nullable()
+      .default(null),
   });
 
   /**
@@ -529,7 +602,12 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
 
     if (aprobada) {
       try {
-        aplicado = await runtime.applyRequest(companyId, pedido, parsed.data.roleProposal);
+        aplicado = await runtime.applyRequest(
+          companyId,
+          pedido,
+          parsed.data.roleProposal,
+          parsed.data.comando,
+        );
       } catch (error) {
         reply.code(400);
         return { error: error instanceof Error ? error.message : String(error) };
@@ -806,10 +884,15 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
   app.post("/api/companies/:companyId/exports-publicar/*", async (request, reply) => {
     const { companyId } = request.params as { companyId: string };
     const ruta = (request.params as Record<string, string>)["*"] ?? "";
-    const resultado = await runtime.exports.publicar(companyId, ruta);
+    const { reemplazar } = request.query as { reemplazar?: string };
+    const resultado = await runtime.exports.publicar(companyId, ruta, {
+      reemplazar: reemplazar === "1" || reemplazar === "true",
+    });
     if (!resultado.ok) {
-      reply.code(400);
-      return { error: resultado.motivo };
+      // 409 cuando ya hay una versión publicada: la UI pregunta y reintenta
+      // con `?reemplazar=1`, en vez de pisarla sin avisar.
+      reply.code(resultado.existe ? 409 : 400);
+      return { error: resultado.motivo, existe: resultado.existe ?? false };
     }
     return resultado;
   });
@@ -1196,7 +1279,7 @@ function notFound(reply: FastifyReply, kind: string, id: string): { error: strin
   return { error: `No existe ${kind} con id "${id}".` };
 }
 
-function invalid(reply: FastifyReply, error: z.ZodError): { error: string; issues: unknown } {
+export function invalid(reply: FastifyReply, error: z.ZodError): { error: string; issues: unknown } {
   reply.code(400);
   return {
     error: "Los datos enviados no son válidos.",
@@ -1208,7 +1291,7 @@ function invalid(reply: FastifyReply, error: z.ZodError): { error: string; issue
 }
 
 /** Server-Sent Events con heartbeat, para que proxies no corten la conexión. */
-function openSse(reply: FastifyReply) {
+export function openSse(reply: FastifyReply) {
   reply.raw.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache, no-transform",

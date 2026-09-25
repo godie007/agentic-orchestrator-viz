@@ -12,6 +12,7 @@ export { ToastProvider, useToast, type ClaseDeToast } from "./Toast.js";
 export { Badge, Skeleton, IconButton, Tabs } from "./piezas.js";
 export { BotonDeTema, type Tema } from "./tema.js";
 export { PulsoDeCorrida } from "./PulsoDeCorrida.js";
+export { NombreEditable } from "./NombreEditable.js";
 export {
   ModeloBadge,
   familiaDeModelo,

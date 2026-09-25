@@ -2,7 +2,18 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { PlantillaEquipo } from "@orq/shared";
 import { api, type ResumenProyecto } from "../api.js";
-import { Button, Empty, Field, Panel, Status, inputClass, peso, relativeTime, useToast } from "../ui/index.js";
+import {
+  Button,
+  Empty,
+  Field,
+  NombreEditable,
+  Panel,
+  Status,
+  inputClass,
+  peso,
+  relativeTime,
+  useToast,
+} from "../ui/index.js";
 
 /**
  * Proyectos: la puerta de entrada.
@@ -125,6 +136,13 @@ export function Proyectos({
     },
   });
 
+  const renombrar = async (id: string, nombre: string) => {
+    const { carpeta } = await api.renombrarEmpresa(id, nombre);
+    refrescar();
+    void queryClient.invalidateQueries({ queryKey: ["company", id] });
+    if (carpeta) avisar(`Carpeta del proyecto: ${carpeta.split("/").at(-1)}.`, "ok");
+  };
+
   const lista = proyectos.data ?? [];
 
   return (
@@ -175,6 +193,7 @@ export function Proyectos({
                   confirmando={borrando === proyecto.id}
                   trabajando={borrar.isPending}
                   onAbrir={() => onAbrir(proyecto.id)}
+                  onRenombrar={(nombre) => renombrar(proyecto.id, nombre)}
                   onPedirBorrar={() => {
                     setError(null);
                     setBorrando(proyecto.id);
@@ -313,6 +332,7 @@ function Tarjeta({
   confirmando,
   trabajando,
   onAbrir,
+  onRenombrar,
   onPedirBorrar,
   onCancelar,
   onConfirmar,
@@ -322,6 +342,7 @@ function Tarjeta({
   confirmando: boolean;
   trabajando: boolean;
   onAbrir: () => void;
+  onRenombrar: (nombre: string) => Promise<unknown>;
   onPedirBorrar: () => void;
   onCancelar: () => void;
   onConfirmar: () => void;
@@ -334,7 +355,15 @@ function Tarjeta({
     >
       <header className="flex min-w-0 items-start justify-between gap-2">
         <div className="min-w-0">
-          <h3 className="truncate text-sm font-semibold text-ink">{proyecto.name}</h3>
+          <h3 className="flex min-w-0 text-sm font-semibold text-ink">
+            <NombreEditable
+              valor={proyecto.name}
+              onGuardar={onRenombrar}
+              etiqueta="Renombrar proyecto"
+              deshabilitado={proyecto.corridaViva}
+              motivoDeshabilitado="Tiene una corrida en curso: sus agentes trabajan sobre la carpeta actual. Detenela antes de renombrar."
+            />
+          </h3>
           <p className="line-clamp-2 text-[11px] leading-snug text-ink-faint">
             {proyecto.mission || "Sin misión declarada."}
           </p>

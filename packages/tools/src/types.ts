@@ -86,13 +86,17 @@ export interface RecordLessonInput {
 }
 
 export interface AgentRequestInput {
-  type: "create_role" | "context" | "tool_access" | "mcp_server";
+  type: "create_role" | "context" | "tool_access" | "mcp_server" | "comando" | "dependencia";
   reason: string;
   roleProposal: RoleProposal | null;
   question: string | null;
   toolNames: string[];
   /** Servidores MCP propuestos, ya saneados (sin secretos literales). */
   mcpProposal?: ServidorMcpPropuesto[];
+  /** El comando pedido, si `type === "comando"`. */
+  comando?: { repoId: string; argv: string[] };
+  /** Los paquetes pedidos, si `type === "dependencia"`. */
+  dependencia?: { repoId: string; gestor: "npm" | "pnpm" | "yarn"; paquetes: string[]; dev: boolean; carpeta: string };
 }
 
 export interface RequestApprovalInput {

@@ -492,6 +492,8 @@ export class RunState {
       question: string | null;
       toolNames: string[];
       mcpProposal?: AgentRequest["mcpProposal"];
+      comando?: { repoId: string; argv: string[] };
+      dependencia?: AgentRequest["dependencia"];
     },
     actorId: string | null = null,
   ): Promise<AgentRequest> {
@@ -501,6 +503,8 @@ export class RunState {
       question: string | null;
       toolNames: string[];
       mcpProposal?: AgentRequest["mcpProposal"];
+      comando?: { repoId: string; argv: string[] } | null;
+      dependencia?: AgentRequest["dependencia"];
     }): string =>
       normalize(
         [
@@ -512,6 +516,8 @@ export class RunState {
             .map((server) => server.name)
             .sort()
             .join(","),
+          candidate.comando ? `${candidate.comando.repoId}:${candidate.comando.argv.join(" ")}` : "",
+          candidate.dependencia ? `${candidate.dependencia.repoId}:${candidate.dependencia.carpeta ?? ""}:${[...candidate.dependencia.paquetes].sort().join(" ")}` : "",
         ].join("|"),
       );
 
@@ -531,6 +537,8 @@ export class RunState {
       question: input.question,
       toolNames: input.toolNames,
       mcpProposal: input.mcpProposal ?? [],
+      comando: input.comando ?? null,
+      dependencia: input.dependencia ?? null,
       status: "pending",
       resolution: null,
       createdAt: Date.now(),

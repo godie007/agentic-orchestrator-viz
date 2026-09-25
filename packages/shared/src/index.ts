@@ -5,3 +5,7 @@ export * from "./programacion.js";
 export * from "./mcp-config.js";
 export * from "./tienda-mcp.js";
 export * from "./plantillas.js";
+export * from "./nombres.js";
+export * from "./argv.js";
+export * from "./dependencias.js";
+export * from "./servicios.js";

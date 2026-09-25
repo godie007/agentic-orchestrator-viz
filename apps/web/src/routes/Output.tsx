@@ -49,6 +49,9 @@ export function Output({ company }: { company: CompanyBundle }) {
   const queryClient = useQueryClient();
   const [nuevaCarpeta, setNuevaCarpeta] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // Publicar no pisa en silencio una versión ya publicada: el servidor contesta
+  // 409 y acá se ofrece reemplazarla explícitamente.
+  const [aReemplazar, setAReemplazar] = useState<string | null>(null);
   /** Archivo abierto en la vista previa. */
   const [seleccion, setSeleccion] = useState<TreeFile | null>(null);
 
@@ -86,12 +89,17 @@ export function Output({ company }: { company: CompanyBundle }) {
   // Publicar es la decisión que cierra el circuito de una misión: el equipo
   // produjo y avisó por correo, y acá alguien dice que sí.
   const publicar = useMutation({
-    mutationFn: (path: string) => api.publishFile(companyId, path),
+    mutationFn: ({ path, reemplazar }: { path: string; reemplazar?: boolean }) =>
+      api.publishFile(companyId, path, reemplazar),
     onSuccess: () => {
       setError(null);
+      setAReemplazar(null);
       refrescar();
     },
-    onError: (e: Error) => setError(e.message),
+    onError: (e: Error, { path }) => {
+      setError(e.message);
+      setAReemplazar(e.message.includes("Ya hay una versión publicada") ? path : null);
+    },
   });
 
   const raiz = tree.data;
@@ -129,9 +137,18 @@ export function Output({ company }: { company: CompanyBundle }) {
           </div>
 
           {error && (
-            <p className="rounded border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn">
-              {error}
-            </p>
+            <div className="flex items-center gap-2 rounded border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn">
+              <p className="min-w-0 flex-1">{error}</p>
+              {aReemplazar && (
+                <Button
+                  variant="danger"
+                  onClick={() => publicar.mutate({ path: aReemplazar, reemplazar: true })}
+                  disabled={publicar.isPending}
+                >
+                  reemplazar
+                </Button>
+              )}
+            </div>
           )}
 
           {vacio ? (
@@ -161,7 +178,7 @@ export function Output({ company }: { company: CompanyBundle }) {
       <VistaPrevia
         companyId={companyId}
         archivo={seleccion}
-        onPublicar={(path) => publicar.mutate(path)}
+        onPublicar={(path) => publicar.mutate({ path })}
         publicando={publicar.isPending}
       />
     </div>

@@ -619,7 +619,9 @@ function crearEscritura(storage: SkillStorage): RegisteredTool {
       "Crea o reemplaza un archivo de texto en el directorio de salida —markdown, csv, " +
       "notas—. Usalo para modificar un documento que ya está ahí o para dejar uno que no " +
       "necesita ser Word ni PDF. Sobrescribe sin avisar: si querés conservar lo anterior, " +
-      "el historial va en write_artifact, no acá. Para Word o PDF usá export_docx/export_pdf.",
+      "el historial va en write_artifact, no acá. Para Word o PDF usá export_docx/export_pdf. " +
+      "NO es para código fuente: un programa va en un repo (crear_repositorio y escribir_codigo), " +
+      "donde tiene rama, tests, vista previa y alguien que lo integre.",
     inputSchema: {
       type: "object",
       properties: {
@@ -648,6 +650,16 @@ function crearEscritura(storage: SkillStorage): RegisteredTool {
       // directorio termina con v22, v23 y v25 conviviendo, sin saber cuál vale.
       const limpio = sinVersionEnNombre(path);
       const resultado = await storage.writeText(limpio, content);
+      // Código en la salida es código que nadie puede testear, integrar ni ver
+      // correr: lo medimos con un simulador entero escrito acá, archivo por
+      // archivo, porque el proyecto no tenía repo. Se escribe igual —puede ser
+      // un ejemplo en un informe— pero se dice dónde va.
+      const avisoCodigo = /\.(m?[jt]sx?|py|go|rs|java|kt|cs|rb|php|swift|c|cpp|h)$/i.test(limpio)
+        ? " Ojo: esto parece código fuente. Si es parte de un programa, va en un repo: crear_repositorio y después escribir_codigo."
+        : "";
+      if (resultado.ok && avisoCodigo) {
+        return ok(`Escrito ${resultado.path}.${avisoCodigo}`, resultado.path);
+      }
       if (resultado.ok && limpio !== path) {
         return ok(
           `Escrito ${resultado.path}. Le saqué la versión al nombre: el archivo es uno solo y ` +

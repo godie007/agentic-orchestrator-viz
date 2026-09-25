@@ -946,3 +946,98 @@ describe("escalado de modelo por dificultad", () => {
     expect(rol.authority).toBe("executor");
   });
 });
+
+describe("espacio de código del turno", () => {
+  /**
+   * El espacio de código se abre al empezar el turno y **se cierra siempre**:
+   * cerrar suelta el arriendo de escritura y hace el checkpoint. Un turno que
+   * falla y no cierra dejaría el repo bloqueado para los demás escritores y el
+   * trabajo del turno sin registrar.
+   */
+  function espacioEspia() {
+    const cierres: Array<string | null> = [];
+    return {
+      cierres,
+      codigo: {
+        abrirTurno: async () => ({
+          dir: "/tmp/wt",
+          escritura: true,
+          resumen: "## Código del proyecto\nRepo app, rama orq/x.",
+          cerrar: async (resumen: string | null) => {
+            cierres.push(resumen);
+          },
+        }),
+      },
+    };
+  }
+
+  it("el resumen del repo entra al prompt y el turno cierra con su resumen", async () => {
+    const { agente, state, bus, tools } = escenario();
+    const provider = new FakeProvider(() => ({ text: "Arreglé la suma y corrí los tests." }));
+    const providers = new ProviderRegistry();
+    providers.register(provider);
+    const espia = espacioEspia();
+
+    await runAgentTurn(state, agente, {
+      bus,
+      providers,
+      tools,
+      ledger: new RunLedger(10),
+      objective: "Arreglar la suma",
+      maxTicks: 5,
+      codigo: espia.codigo,
+    });
+
+    const sistema = provider.calls[0]!.messages[0]!.content;
+    expect(sistema).toContain("## Código del proyecto");
+    expect(espia.cierres).toEqual(["Arreglé la suma y corrí los tests."]);
+  });
+
+  it("cierra aunque el proveedor falle", async () => {
+    const { agente, state, bus, tools, eventos } = escenario();
+    const provider = new FakeProvider(() => {
+      throw new Error("proveedor caído");
+    });
+    const providers = new ProviderRegistry();
+    providers.register(provider);
+    const espia = espacioEspia();
+
+    await expect(
+      runAgentTurn(state, agente, {
+        bus,
+        providers,
+        tools,
+        ledger: new RunLedger(10),
+        objective: "Arreglar la suma",
+        maxTicks: 5,
+        codigo: espia.codigo,
+      }),
+    ).rejects.toThrow();
+
+    expect(espia.cierres).toHaveLength(1);
+    expect(eventos.some((event) => event.type === "agent.turn_end")).toBe(true);
+  });
+
+  it("si el espacio no se puede abrir, el turno sigue sin código", async () => {
+    const { agente, state, bus, tools, eventos } = escenario();
+    const provider = new FakeProvider(() => ({ text: "Listo." }));
+    const providers = new ProviderRegistry();
+    providers.register(provider);
+
+    const result = await runAgentTurn(state, agente, {
+      bus,
+      providers,
+      tools,
+      ledger: new RunLedger(10),
+      objective: "Algo",
+      maxTicks: 5,
+      codigo: {
+        abrirTurno: async () => {
+          throw new Error("worktree roto");
+        },
+      },
+    });
+    expect(result.summary).toBe("Listo.");
+    expect(eventos.some((event) => event.type === "log" && event.message.includes("worktree roto"))).toBe(true);
+  });
+});

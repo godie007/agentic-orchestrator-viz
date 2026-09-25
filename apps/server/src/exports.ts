@@ -1,7 +1,8 @@
 import { mkdirSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import type { SkillStorage } from "@orq/tools";
+import type { Directorios } from "./directorios.js";
 
 /**
  * El directorio de salida de la empresa.
@@ -78,16 +79,69 @@ export const esMultimedia = (nombre: string): boolean => {
   return EXTENSIONES_MULTIMEDIA.has(nombre.slice(punto + 1).toLowerCase());
 };
 
+/**
+ * Dónde cae la salida de cada empresa.
+ *
+ * El store no decide el layout: lo recibe. El de siempre es una carpeta por id
+ * (`porId`, que usan los tests y los seeds); el del servidor es la carpeta
+ * legible del proyecto (`porProyecto`), donde la salida es una subcarpeta al
+ * lado del código cargado.
+ */
+export interface DisposicionDeSalida {
+  /** Raíz de las carpetas de primer nivel: una por empresa. */
+  readonly raiz: string;
+  /** Dónde está o estaría la salida. No crea nada. */
+  salida(companyId: string): string;
+  /** La salida, creada si faltaba. */
+  asegurarSalida(companyId: string): string;
+  /** La carpeta de primer nivel de la empresa. Es lo que se borra con ella. */
+  carpetaDe(companyId: string): string;
+  /** De qué empresa es una carpeta de primer nivel, o `null` si de ninguna. */
+  duenioDe(carpeta: string): string | null;
+}
+
+export function disposicionPorId(raiz: string): DisposicionDeSalida {
+  const salida = (id: string) => join(raiz, ExportStore.safeSegment(id));
+  return {
+    raiz,
+    salida,
+    asegurarSalida: (id) => {
+      const dir = salida(id);
+      mkdirSync(dir, { recursive: true });
+      return dir;
+    },
+    carpetaDe: salida,
+    // En este layout el nombre de la carpeta *es* el id saneado.
+    duenioDe: (carpeta) => carpeta,
+  };
+}
+
+export function disposicionPorProyecto(directorios: Directorios): DisposicionDeSalida {
+  return {
+    raiz: directorios.raiz,
+    salida: (id) => directorios.sub(id, "salida"),
+    asegurarSalida: (id) => directorios.sub(id, "salida", true),
+    carpetaDe: (id) => directorios.ruta(id),
+    duenioDe: (carpeta) => directorios.duenioDe(carpeta),
+  };
+}
+
 export class ExportStore {
-  constructor(private readonly rootDir: string) {
-    mkdirSync(rootDir, { recursive: true });
+  private readonly disposicion: DisposicionDeSalida;
+  private readonly rootDir: string;
+
+  constructor(raizODisposicion: string | DisposicionDeSalida) {
+    this.disposicion =
+      typeof raizODisposicion === "string" ? disposicionPorId(raizODisposicion) : raizODisposicion;
+    this.rootDir = this.disposicion.raiz;
+    mkdirSync(this.rootDir, { recursive: true });
   }
 
   // --- Procedencia ---------------------------------------------------------
 
   private async leerManifiesto(companyId: string): Promise<Set<string>> {
     try {
-      const crudo = await readFile(join(this.dirFor(companyId), MANIFIESTO), "utf8");
+      const crudo = await readFile(join(this.pathFor(companyId), MANIFIESTO), "utf8");
       const datos = JSON.parse(crudo) as { paths?: string[] };
       return new Set(datos.paths ?? []);
     } catch {
@@ -161,13 +215,11 @@ export class ExportStore {
    * que use `dirFor` **produce los residuos que viene a buscar**.
    */
   private pathFor(companyId: string): string {
-    return join(this.rootDir, ExportStore.safeSegment(companyId));
+    return this.disposicion.salida(companyId);
   }
 
   private dirFor(companyId: string): string {
-    const dir = this.pathFor(companyId);
-    mkdirSync(dir, { recursive: true });
-    return dir;
+    return this.disposicion.asegurarSalida(companyId);
   }
 
   /**
@@ -175,9 +227,16 @@ export class ExportStore {
    *
    * La verificación final es sobre la ruta ya resuelta, que es lo único que no
    * se puede engañar con codificaciones ni enlaces.
+   *
+   * `crear` es sólo para quien escribe: leer, medir o borrar un archivo de una
+   * empresa sin salida no puede dejarle una carpeta vacía de recuerdo.
    */
-  private resolveDentro(companyId: string, relativa: string): { dir: string; destino: string } | null {
-    const dir = this.dirFor(companyId);
+  private resolveDentro(
+    companyId: string,
+    relativa: string,
+    crear = false,
+  ): { dir: string; destino: string } | null {
+    const dir = crear ? this.dirFor(companyId) : this.pathFor(companyId);
     const segmentos = ExportStore.safePath(relativa);
     if (segmentos.length === 0) return null;
 
@@ -205,7 +264,7 @@ export class ExportStore {
         // La carpeta se crea sola: pedirle al agente un paso aparte para
         // crearla solo agrega una llamada que a veces olvida.
         const segmentos = [...ExportStore.safePath(folder ?? ""), ExportStore.safeSegment(filename)];
-        const ubicacion = this.resolveDentro(companyId, segmentos.join("/"));
+        const ubicacion = this.resolveDentro(companyId, segmentos.join("/"), true);
         if (!ubicacion) throw new Error(`Ruta de salida inválida: "${folder ?? ""}/${filename}"`);
 
         await mkdir(dirname(ubicacion.destino), { recursive: true });
@@ -333,7 +392,7 @@ export class ExportStore {
     const segmentos = ExportStore.safePath(ruta);
     if (segmentos.length === 0) return { ok: false, motivo: "Ruta inválida." };
 
-    const ubicacion = this.resolveDentro(companyId, segmentos.join("/"));
+    const ubicacion = this.resolveDentro(companyId, segmentos.join("/"), true);
     if (!ubicacion) return { ok: false, motivo: "Ruta inválida." };
 
     const bytes = Buffer.from(content, "utf8");
@@ -372,11 +431,18 @@ export class ExportStore {
 
   /** Árbol completo del directorio de salida, carpetas primero. */
   async tree(companyId: string): Promise<TreeFolder> {
-    const raiz = this.dirFor(companyId);
+    // `pathFor` y no `dirFor`: la pestaña Salida pide el árbol cada cinco
+    // segundos, y con `dirFor` mirar una empresa sin salida se la creaba.
+    const raiz = this.pathFor(companyId);
     const generados = await this.leerManifiesto(companyId);
 
     const leer = async (absoluta: string, relativa: string): Promise<Array<TreeFolder | TreeFile>> => {
-      const entradas = await readdir(absoluta, { withFileTypes: true });
+      let entradas;
+      try {
+        entradas = await readdir(absoluta, { withFileTypes: true });
+      } catch {
+        return []; // todavía no produjo nada: un árbol vacío, no un error
+      }
       const hijos = await Promise.all(
         entradas
           // Los que empiezan con punto no se muestran: ahí vive el manifiesto.
@@ -417,7 +483,7 @@ export class ExportStore {
 
   /** Crea una carpeta vacía. Devuelve su ruta saneada. */
   async createFolder(companyId: string, ruta: string): Promise<string | null> {
-    const ubicacion = this.resolveDentro(companyId, ruta);
+    const ubicacion = this.resolveDentro(companyId, ruta, true);
     if (!ubicacion) return null;
     await mkdir(ubicacion.destino, { recursive: true });
     return ExportStore.safePath(ruta).join("/");
@@ -467,13 +533,6 @@ export class ExportStore {
   }
 
   /**
-   * Tamaño sin traer el contenido.
-   *
-   * Existe por el video: la vista previa sólo necesita saber que el archivo
-   * está y cuánto pesa, y cargar cien megas en memoria para después descartarlos
-   * es la diferencia entre una pestaña que abre y uno que tumba el servidor.
-   */
-  /**
    * Mueve un archivo a `publicado/`.
    *
    * Publicar es la única acción del circuito que **no** puede hacer un agente:
@@ -484,21 +543,33 @@ export class ExportStore {
   async publicar(
     companyId: string,
     ruta: string,
-  ): Promise<{ ok: true; path: string } | { ok: false; motivo: string }> {
+    opciones: { reemplazar?: boolean } = {},
+  ): Promise<{ ok: true; path: string } | { ok: false; motivo: string; existe?: boolean }> {
+    const segmentos = ExportStore.safePath(ruta);
     const origen = this.resolveDentro(companyId, ruta);
-    if (!origen) return { ok: false, motivo: "Ruta inválida." };
+    if (!origen || segmentos.length === 0) return { ok: false, motivo: "Ruta inválida." };
+    if (segmentos[0] === "publicado") return { ok: false, motivo: "Ya está publicado." };
 
-    const nombre = ExportStore.safePath(ruta).at(-1);
-    if (!nombre) return { ok: false, motivo: "Ruta inválida." };
-    if (ExportStore.safePath(ruta)[0] === "publicado") {
-      return { ok: false, motivo: "Ya está publicado." };
-    }
-
-    const relativa = `publicado/${nombre}`;
-    const destino = this.resolveDentro(companyId, relativa);
+    // Se conserva la subcarpeta: `campania/pieza.pdf` y `folleto/pieza.pdf` son
+    // dos piezas distintas, y aplanarlas a `publicado/pieza.pdf` hacía que la
+    // segunda pisara a la primera sin que nadie lo notara.
+    const relativa = ["publicado", ...segmentos].slice(0, 6).join("/");
+    const destino = this.resolveDentro(companyId, relativa, true);
     if (!destino) return { ok: false, motivo: "No se pudo resolver la carpeta publicado." };
 
+    if (!opciones.reemplazar) {
+      const yaEsta = await stat(destino.destino).then(() => true, () => false);
+      if (yaEsta) {
+        return {
+          ok: false,
+          existe: true,
+          motivo: `Ya hay una versión publicada en "${relativa}". Confirmá para reemplazarla.`,
+        };
+      }
+    }
+
     try {
+      await stat(origen.destino);
       await mkdir(dirname(destino.destino), { recursive: true });
       await rename(origen.destino, destino.destino);
     } catch (error) {
@@ -508,13 +579,20 @@ export class ExportStore {
 
     // La procedencia se muda con el archivo: sigue siendo material de la empresa.
     const paths = await this.leerManifiesto(companyId);
-    if (paths.delete(ExportStore.safePath(ruta).join("/"))) paths.add(relativa);
-    else paths.add(relativa);
+    paths.delete(segmentos.join("/"));
+    paths.add(relativa);
     await this.guardarManifiesto(companyId, paths);
 
     return { ok: true, path: relativa };
   }
 
+  /**
+   * Tamaño sin traer el contenido.
+   *
+   * Existe por el video: la vista previa sólo necesita saber que el archivo
+   * está y cuánto pesa, y cargar cien megas en memoria para después descartarlos
+   * es la diferencia entre una pestaña que abre y uno que tumba el servidor.
+   */
   async pesoDe(companyId: string, ruta: string): Promise<number | null> {
     const ubicacion = this.resolveDentro(companyId, ruta);
     if (!ubicacion) return null;
@@ -563,9 +641,15 @@ export class ExportStore {
     return { archivos, bytes };
   }
 
-  /** Qué ocupa en disco el directorio de una empresa. No lo crea. */
+  /**
+   * Qué ocupa en disco la carpeta de una empresa. No la crea.
+   *
+   * Mide la carpeta entera del proyecto —salida, clones de código, worktrees—
+   * y no sólo la salida: un repo clonado pesa más que todos los PDF juntos, y
+   * esconderlo haría que "cuánto ocupa este proyecto" mintiera.
+   */
   async medirEmpresa(companyId: string): Promise<{ archivos: number; bytes: number }> {
-    return this.pesar(this.pathFor(companyId));
+    return this.pesar(this.disposicion.carpetaDe(companyId));
   }
 
   /**
@@ -613,7 +697,14 @@ export class ExportStore {
   async removeCompany(
     companyId: string,
   ): Promise<{ ok: true; archivos: number; bytes: number } | { ok: false; motivo: string }> {
-    return this.removeCarpeta(ExportStore.safeSegment(companyId));
+    const carpeta = basename(this.disposicion.carpetaDe(companyId));
+    // Sólo la carpeta que la marca atribuye a esta empresa: el nombre que le
+    // *tocaría* puede ser el de otra cosa, y acá se borra recursivo.
+    const duenio = this.disposicion.duenioDe(carpeta);
+    if (duenio !== companyId && duenio !== ExportStore.safeSegment(companyId)) {
+      return { ok: false, motivo: "La carpeta no existe." };
+    }
+    return this.removeCarpeta(carpeta);
   }
 
   /**
@@ -626,7 +717,8 @@ export class ExportStore {
    * Ordenadas por peso: lo primero que uno quiere ver es qué ocupa lugar.
    */
   async carpetasResiduales(idsVivos: Iterable<string>): Promise<CarpetaResidual[]> {
-    const vivos = new Set([...idsVivos].map((id) => ExportStore.safeSegment(id)));
+    // Por id y por id saneado: según el layout, la marca guarda uno u otro.
+    const vivos = new Set([...idsVivos].flatMap((id) => [id, ExportStore.safeSegment(id)]));
 
     let entradas;
     try {
@@ -637,7 +729,9 @@ export class ExportStore {
 
     const residuales: CarpetaResidual[] = [];
     for (const entrada of entradas) {
-      if (!entrada.isDirectory() || vivos.has(entrada.name)) continue;
+      if (!entrada.isDirectory() || entrada.name.startsWith(".")) continue;
+      const duenio = this.disposicion.duenioDe(entrada.name);
+      if (duenio !== null && vivos.has(duenio)) continue;
       const absoluta = join(this.rootDir, entrada.name);
       const medida = await this.pesar(absoluta);
       const info = await stat(absoluta).catch(() => null);
@@ -687,7 +781,7 @@ export class ExportStore {
 
 /** Una carpeta de salida que ya no tiene empresa detrás. */
 export interface CarpetaResidual {
-  /** Nombre de la carpeta en `data/exports/`. Es el id de empresa saneado. */
+  /** Nombre de la carpeta de primer nivel: el nombre legible del proyecto. */
   carpeta: string;
   archivos: number;
   bytes: number;

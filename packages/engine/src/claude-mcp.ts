@@ -17,7 +17,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import type { EventBus } from "./events.js";
 import type { RunState } from "./state.js";
-import { executeOne, huellaDeFallo, huellaDeLectura, huellaDeMotivo } from "./loop.js";
+import { executeOne, huellaDeFallo, huellaDeLectura, huellaDeMotivo, invalidarMemo } from "./loop.js";
 import { acotarResultado, punteroDeRelectura } from "./acotar.js";
 
 /**
@@ -49,6 +49,12 @@ export interface ClaudeMcpDeps {
   ctx: ToolContext;
   /** Directorio de salida de la empresa, en sólo lectura. Ver `TurnDeps`. */
   dirDeTrabajo?: string;
+  /**
+   * El worktree del turno, si trabaja sobre código. Cuando está, es el
+   * directorio del CLI en vez de la salida, y `escritura` dice si el CLI recibe
+   * sus propias herramientas de edición. Ver `EspacioDeTurno`.
+   */
+  codigo?: { cwd: string; escritura: boolean };
   /**
    * Se llama por cada herramienta ejecutada. Alimenta el contador del turno:
    * el CLI no devuelve `tool_calls`, así que sin esto el motor ve un turno
@@ -97,6 +103,9 @@ export function createClaudeMcpBridge(deps: ClaudeMcpDeps): OrgToolsBridge {
   // Largo de la delegación. Vive acá, como `fallos` y `lecturas`: el CLI puede
   // reconectar su socket a mitad de turno y el freno tiene que seguir contando.
   const largo = { llamadas: 0 };
+  // Herramientas en vuelo: el vigilante de silencio del CLI no corta mientras
+  // hay una corriendo (ver `OrgToolsSession.ocupada`).
+  const enVuelo = { n: 0 };
   return {
     async open(): Promise<OrgToolsSession> {
       const socketPath = join(
@@ -118,7 +127,12 @@ export function createClaudeMcpBridge(deps: ClaudeMcpDeps): OrgToolsBridge {
             name: request.params.name,
             arguments: (request.params.arguments ?? {}) as Record<string, unknown>,
           };
-          return handleToolCall(deps, call, fallos, lecturas, largo);
+          enVuelo.n += 1;
+          try {
+            return await handleToolCall(deps, call, fallos, lecturas, largo);
+          } finally {
+            enVuelo.n -= 1;
+          }
         });
         void sdk.connect(new StdioServerTransport(socket, socket)).then(() => {
           socket.on("close", () => void sdk.close());
@@ -135,7 +149,8 @@ export function createClaudeMcpBridge(deps: ClaudeMcpDeps): OrgToolsBridge {
         socketPath,
         serverName,
         allowedTools: [...deps.byName.keys()].map((name) => `mcp__${serverName}__${name}`),
-        ...(deps.dirDeTrabajo ? { cwd: deps.dirDeTrabajo } : {}),
+        ...(deps.codigo ? { cwd: deps.codigo.cwd, codigo: deps.codigo } : deps.dirDeTrabajo ? { cwd: deps.dirDeTrabajo } : {}),
+        ocupada: () => enVuelo.n > 0,
         async close() {
           await new Promise<void>((resolve) => net.close(() => resolve()));
         },
@@ -228,6 +243,9 @@ async function handleToolCall(
 
   const result = await executeOne(call, deps.byName, deps.ctx, deps.state, deps.bus);
   deps.alEjecutar?.();
+  // Una escritura deja viejo lo leído —aunque haya fallado, pudo tocar algo a
+  // medias—: la misma regla del loop, compartida para que no se separen.
+  if (!esLectura) invalidarMemo(lecturas, call.name);
   let text = result.message.content;
   if (result.failure?.length) {
     for (const huella of result.failure) {

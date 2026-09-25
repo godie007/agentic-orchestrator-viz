@@ -133,6 +133,11 @@ const ACOTADORES = new Set([
   "tipo",
   "limit",
   "limite",
+  // `leer_codigo` lee por ventanas: `desde` es cómo se pide el tramo siguiente.
+  // Acoplado a `LINEAS_POR_LECTURA`, que está calculado para caber en el tope.
+  "desde",
+  "archivos",
+  "patron",
   "estado",
   "status",
 ]);

@@ -76,7 +76,44 @@ export interface TurnDeps {
    * verla en el 3. Se resuelve por turno, como la fecha.
    */
   mapaDeContexto?: () => Promise<string>;
+  /**
+   * El código del proyecto, si tiene repos cargados. Ver `EspacioDeTurno`.
+   *
+   * Lo implementa el servidor: el motor no sabe de git ni de worktrees, sólo
+   * que un turno puede abrir un espacio de código y que **tiene que cerrarlo**.
+   */
+  codigo?: {
+    abrirTurno(role: Role, runId: string): Promise<EspacioDeTurno | null>;
+  };
   signal?: AbortSignal;
+}
+
+/**
+ * El código sobre el que trabaja un turno.
+ *
+ * **Uno escribe por vez.** Abrir el turno pide el arriendo de escritura del
+ * repo; el que no lo consigue trabaja en sólo lectura —lee, revisa, deja
+ * notas— y escribe en el ciclo siguiente. Sin eso, dos agentes editan el mismo
+ * árbol a la vez, uno corre los tests sobre la edición a medias del otro, y el
+ * checkpoint de uno se lleva el trabajo sin terminar del otro.
+ *
+ * **Cerrar es obligatorio**, y va en el mismo `finally` que `agent.turn_end`:
+ * suelta el arriendo y hace el checkpoint del turno —un commit con el rol como
+ * autor—. El checkpoint es lo que registra también lo que el CLI de Claude
+ * editó con su propio `Edit`, que el org no ve pasar.
+ */
+export interface EspacioDeTurno {
+  /**
+   * Worktree del repo principal: el directorio de trabajo del CLI. `null` si el
+   * proyecto todavía no tiene repo —el turno recibe igual el resumen, que le
+   * dice cómo crear uno en vez de escribir código en la salida—.
+   */
+  dir: string | null;
+  /** Si este turno tiene el arriendo de escritura. */
+  escritura: boolean;
+  /** Lo que el agente tiene que saber del repo, para el prompt. */
+  resumen: string;
+  cerrar(resumenDelTurno: string | null): Promise<void>;
 }
 
 export interface TurnResult {
@@ -207,6 +244,26 @@ export async function runAgentTurn(
   // adentro del armado del prompt que corre en cada iteración.
   const mapa = deps.mapaDeContexto ? await deps.mapaDeContexto() : undefined;
 
+  // El espacio de código se abre acá —antes del prompt, que lleva su resumen—
+  // y se cierra en el `finally` del turno. Si no se pudo abrir, el turno sigue
+  // sin código: una sesión que no arranca no puede tirar abajo a un agente que
+  // tenía otras cosas que hacer.
+  let codigo: EspacioDeTurno | null = null;
+  if (deps.codigo) {
+    try {
+      codigo = await deps.codigo.abrirTurno(role, runId);
+    } catch (error) {
+      bus.emit({
+        type: "log",
+        runId,
+        tick: state.tick,
+        level: "warn",
+        roleId: role.id,
+        message: `${role.name}: no se pudo abrir el espacio de código (${error instanceof Error ? error.message : String(error)}). Trabaja sin él este turno.`,
+      });
+    }
+  }
+
   const conversation: ChatMessage[] = interrumpido
     ? [
         ...interrumpido.conversation,
@@ -222,7 +279,10 @@ export async function runAgentTurn(
         },
       ]
     : [
-        { role: "system", content: buildSystemPrompt(state, role, deps.objective, mapa) },
+        {
+          role: "system",
+          content: buildSystemPrompt(state, role, deps.objective, mapa, codigo?.resumen),
+        },
         {
           role: "user",
           content: buildTurnPrompt(
@@ -317,6 +377,7 @@ export async function runAgentTurn(
           byName,
           ctx,
           ...(deps.dirDeTrabajo ? { dirDeTrabajo: deps.dirDeTrabajo } : {}),
+          ...(codigo?.dir ? { codigo: { cwd: codigo.dir, escritura: codigo.escritura } } : {}),
           // El CLI ejecuta por el puente, no por `tool_calls`: sin este aviso el
           // contador del turno queda en cero, el scheduler lo toma por un rol
           // que habla sin hacer nada y deja de convocarlo por sus tareas — una
@@ -355,7 +416,11 @@ export async function runAgentTurn(
     // está pensado para una API que contesta en segundos, y `claude-code` delega
     // el turno entero a un CLI que corre su propio agent loop. Con 120 s ese
     // turno moría por tiempo **siempre**, justo mientras el agente trabajaba.
-    const timeoutMs = provider.timeoutMs ?? deps.llmTimeoutMs ?? 120_000;
+    const timeoutMs =
+      (codigo?.dir ? provider.timeoutCodigoMs : undefined) ??
+      provider.timeoutMs ??
+      deps.llmTimeoutMs ??
+      120_000;
 
     const result = await withRetry(
       () =>
@@ -421,6 +486,46 @@ export async function runAgentTurn(
 
     if (result.message.content.trim()) summary = result.message.content.trim();
     conversation.push(result.message);
+
+    // Lo que el proveedor avisó del turno —fallback de modelo, suscripción
+    // cerca del límite— va a la traza: si no, un turno que respondió Sonnet en
+    // lugar de Opus se leía como si lo hubiera hecho Opus.
+    for (const aviso of result.avisos ?? []) {
+      bus.emit({ type: "log", runId, tick: state.tick, level: "warn", roleId: role.id, message: `${role.name}: ${aviso}` });
+    }
+
+    // Lo que el CLI hizo con sus propias herramientas cuenta como trabajo y
+    // queda en la actividad: es lo que audita `check_activity` y lo que mira el
+    // scheduler para no dejar de convocar a quien sí trabajó.
+    const propias = result.herramientasPropias ?? [];
+    if (propias.length > 0) {
+      herramientas += propias.length;
+      const porNombre = new Map<string, string[]>();
+      for (const uso of propias) {
+        const rutas = porNombre.get(uso.nombre) ?? [];
+        if (uso.ruta) rutas.push(uso.ruta);
+        porNombre.set(uso.nombre, rutas);
+      }
+      // Y en la traza, un evento por uso: sin esto, lo que el CLI editó con su
+      // propio `Edit` no aparecía en la cronología ni en el chat del IDE, que
+      // es donde una persona mira qué está haciendo el agente.
+      propias.forEach((uso, i) => {
+        const callId = `cli-${state.tick}-${iterations}-${i}`;
+        const comun = { runId, tick: state.tick, roleId: role.id, callId, toolName: `cli:${uso.nombre}`, origin: "capability" as const, mcpServerId: null };
+        bus.emit({ type: "tool.start", ...comun, args: uso.ruta ? { ruta: uso.ruta } : {} });
+        bus.emit({ type: "tool.end", ...comun, durationMs: 0, ok: true, preview: uso.ruta ?? "", error: null });
+      });
+      for (const [nombre, rutas] of porNombre) {
+        const veces = propias.filter((uso) => uso.nombre === nombre).length;
+        state.recordActivity({
+          roleId: role.id,
+          tick: state.tick,
+          tool: `cli:${nombre}`,
+          ok: true,
+          detail: `${veces} vez/veces${rutas.length ? `: ${[...new Set(rutas)].slice(0, 12).join(", ")}` : ""}`,
+        });
+      }
+    }
 
     const calls = result.message.toolCalls ?? [];
     if (calls.length === 0) break; // el agente terminó su turno
@@ -535,6 +640,20 @@ export async function runAgentTurn(
     });
     throw error;
   } finally {
+    if (codigo) {
+      try {
+        await codigo.cerrar(summary);
+      } catch (error) {
+        bus.emit({
+          type: "log",
+          runId,
+          tick: state.tick,
+          level: "warn",
+          roleId: role.id,
+          message: `${role.name}: no se pudo cerrar el espacio de código (${error instanceof Error ? error.message : String(error)}).`,
+        });
+      }
+    }
     bus.emit({
       type: "agent.turn_end",
       runId,
@@ -739,6 +858,8 @@ const COMUNICACION = new Set([
   "request_new_role",
   "request_tool_access",
   "solicitar_servidor_mcp",
+  "solicitar_comando",
+  "instalar_dependencia",
 ]);
 
 async function executeCalls(
@@ -820,16 +941,27 @@ async function executeCalls(
     // servía: medimos a un agente ejecutar `list_artifacts` tres veces en el
     // mismo turno porque entre medio mandó un mensaje y asignó una tarea.
     // Lo único que un mensaje sí desactualiza es la traza de actividad.
-    if (COMUNICACION.has(call.name)) {
-      for (const clave of [...memo.keys()]) {
-        if (clave.startsWith("check_activity(")) memo.delete(clave);
-      }
-    } else {
-      memo.clear();
-    }
+    invalidarMemo(memo, call.name);
   }
 
   return { messages, awaitingApproval, failures };
+}
+
+/**
+ * Qué desactualiza una llamada que no es de lectura. La comparten el loop y el
+ * puente delegado (`claude-mcp.ts`): antes el puente no vaciaba nunca su memo,
+ * así que dentro de un turno de Claude Code un leer → editar → leer devolvía el
+ * puntero a la versión **anterior** a la edición. Con una sola regla para los
+ * dos caminos eso no se vuelve a separar.
+ */
+export function invalidarMemo(memo: Map<string, unknown>, nombreMutacion: string): void {
+  if (COMUNICACION.has(nombreMutacion)) {
+    for (const clave of [...memo.keys()]) {
+      if (clave.startsWith("check_activity(")) memo.delete(clave);
+    }
+  } else {
+    memo.clear();
+  }
 }
 
 /**

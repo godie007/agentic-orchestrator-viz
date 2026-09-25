@@ -22,6 +22,11 @@ export function buildSystemPrompt(
    * dónde vive ese árbol — lo inyecta el servidor, igual que la fecha.
    */
   mapaDeContexto?: string,
+  /**
+   * El repo sobre el que trabaja el turno: rama, comandos y si puede escribir.
+   * Lo arma el servidor (`EspacioDeTurno.resumen`); el motor no sabe de git.
+   */
+  resumenDeCodigo?: string,
 ): string {
   const sections: string[] = [];
 
@@ -55,6 +60,7 @@ export function buildSystemPrompt(
   sections.push(WORKING_AGREEMENT);
 
   if (mapaDeContexto?.trim()) sections.push(mapaDeContexto.trim());
+  if (resumenDeCodigo?.trim()) sections.push(resumenDeCodigo.trim());
 
   return sections.filter((section) => section.trim()).join("\n\n");
 }

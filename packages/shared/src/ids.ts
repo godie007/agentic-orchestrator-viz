@@ -33,4 +33,6 @@ export const ids = {
   request: () => newId("req"),
   event: () => newId("evt"),
   toolCall: () => newId("call"),
+  repositorio: () => newId("rep"),
+  sesionCodigo: () => newId("ses"),
 };

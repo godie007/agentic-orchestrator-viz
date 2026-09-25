@@ -2,6 +2,8 @@ import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type {
+  Repositorio,
+  SesionCodigo,
   AgentRequest,
   ApprovalRequest,
   Artifact,
@@ -19,7 +21,7 @@ import type {
   Tool,
   TraceEvent,
 } from "@orq/shared";
-import { learningSchema } from "@orq/shared";
+import { learningSchema, repositorioSchema, sesionCodigoSchema } from "@orq/shared";
 
 /**
  * Persistencia.
@@ -58,6 +60,16 @@ CREATE TABLE IF NOT EXISTS misiones (
   data TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS mcp_servers (
+  id TEXT PRIMARY KEY,
+  company_id TEXT NOT NULL,
+  data TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS repositorios (
+  id TEXT PRIMARY KEY,
+  company_id TEXT NOT NULL,
+  data TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sesiones_codigo (
   id TEXT PRIMARY KEY,
   company_id TEXT NOT NULL,
   data TEXT NOT NULL
@@ -132,6 +144,8 @@ CREATE INDEX IF NOT EXISTS idx_policies_company ON policies(company_id);
 CREATE INDEX IF NOT EXISTS idx_misiones_company ON misiones(company_id);
 CREATE INDEX IF NOT EXISTS idx_mcp_company ON mcp_servers(company_id);
 CREATE INDEX IF NOT EXISTS idx_tools_company ON tools(company_id);
+CREATE INDEX IF NOT EXISTS idx_repositorios_company ON repositorios(company_id);
+CREATE INDEX IF NOT EXISTS idx_sesiones_codigo_company ON sesiones_codigo(company_id);
 CREATE INDEX IF NOT EXISTS idx_runs_company ON runs(company_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_run ON messages(run_id, tick);
 CREATE INDEX IF NOT EXISTS idx_tasks_run ON tasks(run_id);
@@ -164,6 +178,8 @@ const TABLAS_POR_EMPRESA = [
   "learnings",
   "agent_requests",
   "artifacts",
+  "repositorios",
+  "sesiones_codigo",
 ] as const;
 
 const TABLAS_POR_CORRIDA = ["events", "messages", "tasks", "approvals", "ledger"] as const;
@@ -509,6 +525,41 @@ export class Store {
   }
   deleteMision(id: string): void {
     this.db.prepare("DELETE FROM misiones WHERE id = ?").run(id);
+  }
+
+  // --- Código ---------------------------------------------------------------
+  // Se leen con Zod: `many` hace JSON.parse crudo y los `.default()` no se
+  // aplican solos, así que un campo agregado después dejaría `undefined` en las
+  // filas viejas —la misma trampa de `listLearnings`.
+
+  saveRepositorio(repo: Repositorio): void {
+    this.upsertScoped("repositorios", repo.id, repo.companyId, repo);
+  }
+  listRepositorios(companyId: string): Repositorio[] {
+    return this.many<unknown>("SELECT data FROM repositorios WHERE company_id = ?", companyId).map(
+      (fila) => repositorioSchema.parse(fila),
+    );
+  }
+  getRepositorio(id: string): Repositorio | null {
+    const fila = this.one<unknown>("SELECT data FROM repositorios WHERE id = ?", id);
+    return fila ? repositorioSchema.parse(fila) : null;
+  }
+  deleteRepositorio(id: string): void {
+    this.db.prepare("DELETE FROM repositorios WHERE id = ?").run(id);
+    this.db.prepare("DELETE FROM sesiones_codigo WHERE json_extract(data, '$.repoId') = ?").run(id);
+  }
+
+  saveSesionCodigo(sesion: SesionCodigo): void {
+    this.upsertScoped("sesiones_codigo", sesion.id, sesion.companyId, sesion);
+  }
+  listSesionesCodigo(companyId: string): SesionCodigo[] {
+    return this.many<unknown>("SELECT data FROM sesiones_codigo WHERE company_id = ?", companyId)
+      .map((fila) => sesionCodigoSchema.parse(fila))
+      .sort((a, b) => b.createdAt - a.createdAt);
+  }
+  getSesionCodigo(id: string): SesionCodigo | null {
+    const fila = this.one<unknown>("SELECT data FROM sesiones_codigo WHERE id = ?", id);
+    return fila ? sesionCodigoSchema.parse(fila) : null;
   }
 
   deletePolicy(id: string): void {

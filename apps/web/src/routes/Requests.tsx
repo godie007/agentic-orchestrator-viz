@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { HelpCircle, KeyRound, Plug, UserPlus } from "lucide-react";
+import { HelpCircle, KeyRound, PackagePlus, Plug, Terminal, UserPlus } from "lucide-react";
 import type { AgentRequest, RoleProposal } from "@orq/shared";
 import { api, type CompanyBundle } from "../api.js";
 import { Button, Empty, Field, Panel, Status, inputClass, relativeTime } from "../lib/ui.js";
@@ -22,6 +22,8 @@ const ETIQUETA: Record<AgentRequest["type"], string> = {
   context: "consulta de negocio",
   tool_access: "acceso a herramientas",
   mcp_server: "conectar un servidor MCP",
+  comando: "correr un comando",
+  dependencia: "instalar dependencias",
 };
 
 const ICONO: Record<AgentRequest["type"], typeof UserPlus> = {
@@ -29,6 +31,8 @@ const ICONO: Record<AgentRequest["type"], typeof UserPlus> = {
   context: HelpCircle,
   tool_access: KeyRound,
   mcp_server: Plug,
+  comando: Terminal,
+  dependencia: PackagePlus,
 };
 
 function IconoDeSolicitud({ tipo }: { tipo: AgentRequest["type"] }) {
@@ -140,6 +144,8 @@ export function Requests({ company }: { company: CompanyBundle }) {
                 <p className="mt-0.5 text-[11px] text-ink-faint">
                   {item.roleProposal?.name ??
                     item.question ??
+                    (item.comando ? item.comando.argv.join(" ") : null) ??
+                    (item.dependencia ? item.dependencia.paquetes.join(", ") : null) ??
                     (item.mcpProposal.length > 0
                       ? item.mcpProposal.map((server) => server.name).join(", ")
                       : item.toolNames.join(", "))}
@@ -171,10 +177,25 @@ function RequestCard({
   // La propuesta es editable: el agente sugiere, la persona ajusta y acepta.
   const [propuesta, setPropuesta] = useState<RoleProposal | null>(request.roleProposal);
   const [respuesta, setRespuesta] = useState("");
+  // Un comando se aprueba sólo esta vez (el argv exacto) o siempre, como un
+  // prefijo que la persona puede recortar: pidieron `npm run e2e -- --grep x`
+  // y lo que tiene sentido permitir es `npm run e2e`.
+  const argvPedido = request.comando?.argv ?? [];
+  const [alcance, setAlcance] = useState<"una-vez" | "siempre">("una-vez");
+  const [largoPrefijo, setLargoPrefijo] = useState(argvPedido.length);
 
   const resolver = useMutation({
     mutationFn: (decision: "approve" | "reject") =>
-      api.resolveRequest(company.company.id, request.id, decision, respuesta, propuesta),
+      api.resolveRequest(
+        company.company.id,
+        request.id,
+        decision,
+        respuesta,
+        propuesta,
+        request.type === "comando"
+          ? { alcance, ...(alcance === "siempre" ? { prefijo: argvPedido.slice(0, largoPrefijo) } : {}) }
+          : null,
+      ),
     onSuccess: (result) => onResolved(result.entrega),
   });
 
@@ -301,6 +322,75 @@ function RequestCard({
         </div>
       )}
 
+      {request.type === "comando" && request.comando && (
+        <div className="space-y-2 rounded border border-line bg-canvas p-2 text-xs">
+          <div className="text-[10px] font-semibold tracking-wide text-ink-dim uppercase">Comando pedido</div>
+          <p className="font-mono text-[11px]">
+            {argvPedido.map((token, i) => (
+              <span key={i} className={alcance === "siempre" && i >= largoPrefijo ? "text-ink-faint line-through" : "text-ink"}>
+                {token}{" "}
+              </span>
+            ))}
+          </p>
+          <div className="flex flex-wrap gap-3">
+            <label className="flex items-center gap-1.5">
+              <input type="radio" checked={alcance === "una-vez"} onChange={() => setAlcance("una-vez")} />
+              sólo esta vez, exacto
+            </label>
+            <label className="flex items-center gap-1.5">
+              <input type="radio" checked={alcance === "siempre"} onChange={() => setAlcance("siempre")} />
+              permitir siempre, con el prefijo
+            </label>
+          </div>
+          {alcance === "siempre" && argvPedido.length > 1 && (
+            <label className="flex items-center gap-2 text-ink-dim">
+              Tokens del prefijo
+              <input
+                type="range"
+                min={1}
+                max={argvPedido.length}
+                value={largoPrefijo}
+                onChange={(e) => setLargoPrefijo(Number(e.target.value))}
+              />
+              <span className="font-mono text-[11px] text-ink">{argvPedido.slice(0, largoPrefijo).join(" ")}</span>
+            </label>
+          )}
+          <p className="text-[10px] text-ink-faint">
+            Permitir un comando es permitir lo que corre: con `npm test` corren los tests que escribió el agente. Lo contiene el
+            sandbox, no la lista. Prefijos que lo permiten todo (npx, bash, npm run a secas) se rechazan.
+          </p>
+        </div>
+      )}
+
+      {request.type === "dependencia" && request.dependencia && (
+        <div className="space-y-2 rounded border border-line bg-canvas p-2 text-xs">
+          <div className="text-[10px] font-semibold tracking-wide text-ink-dim uppercase">
+            Paquetes a instalar ({request.dependencia.gestor}
+            {request.dependencia.dev ? ", de desarrollo" : ""})
+          </div>
+          <ul className="space-y-0.5 font-mono text-[11px] text-ink">
+            {request.dependencia.paquetes.map((p) => (
+              <li key={p}>
+                <a
+                  href={`https://www.npmjs.com/package/${p.replace(/(?!^)@[^@/]*$/, "")}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="hover:text-accent hover:underline"
+                  title="Ver el paquete en npmjs.com antes de aprobar"
+                >
+                  {p}
+                </a>
+              </li>
+            ))}
+          </ul>
+          <p className="text-[10px] text-ink-faint">
+            Al aprobar se instala en la sesión del repo, en el sandbox y <strong>sin scripts de instalación</strong>{" "}
+            (--ignore-scripts), y queda commiteado en package.json. Mirá el paquete en npm antes de decir que sí: es código
+            de terceros que va a correr en los tests.
+          </p>
+        </div>
+      )}
+
       <Field
         label={request.type === "context" ? "Tu respuesta" : "Comentario (opcional)"}
         hint={
@@ -337,7 +427,13 @@ function RequestCard({
               ? "otorgar acceso"
               : request.type === "mcp_server"
                 ? "conectar el servidor"
-                : "responder"}
+                : request.type === "comando"
+                  ? "permitir"
+                  : request.type === "dependencia"
+                    ? resolver.isPending
+                      ? "instalando…"
+                      : "instalar"
+                    : "responder"}
         </Button>
         <Button variant="danger" onClick={() => resolver.mutate("reject")} disabled={resolver.isPending}>
           rechazar

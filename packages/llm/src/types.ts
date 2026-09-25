@@ -96,6 +96,21 @@ export interface OrgToolsSession {
    * borrado. Un `cwd` con permiso de escritura saltearía las tres cosas.
    */
   cwd?: string;
+  /**
+   * El turno trabaja sobre un repo: `cwd` es su worktree, no la salida.
+   *
+   * Es la excepción a la regla de sólo lectura, y por eso viene explícita: con
+   * `escritura` el CLI recibe `Edit`/`Write` —el turno tiene el arriendo del
+   * repo—, y **nunca** `Bash`: los comandos van por `ejecutar_comando` del org,
+   * que es lo único que aplica sandbox, entorno limpio y deja rastro.
+   */
+  codigo?: { cwd: string; escritura: boolean };
+  /**
+   * ¿Hay una herramienta del org ejecutándose ahora? Mientras corre —un
+   * `npm test` de cinco minutos— el CLI no emite nada, y el vigilante de
+   * silencio del proveedor tomaría ese silencio por un cuelgue.
+   */
+  ocupada?(): boolean;
   /** Cierra la sesión: detiene el listen del socket y libera recursos. */
   close(): Promise<void>;
 }
@@ -146,13 +161,39 @@ export type ChatEvent =
       finishReason: FinishReason;
       /** Slug que realmente respondió (OpenRouter puede hacer fallback). */
       modelSlug: string;
+      /** Ver `ChatResult.herramientasPropias`. */
+      herramientasPropias?: HerramientaPropia[];
+      /** Ver `ChatResult.avisos`. */
+      avisos?: string[];
     };
+
+/** Una herramienta que el CLI delegado usó por su cuenta (`Edit`, `Read`…). */
+export interface HerramientaPropia {
+  nombre: string;
+  /** El archivo que tocó, si la herramienta es de archivos. */
+  ruta: string | null;
+}
 
 export interface ChatResult {
   message: ChatMessage;
   usage: TokenUsage;
   finishReason: FinishReason;
   modelSlug: string;
+  /**
+   * Lo que un proveedor que delega hizo con **sus propias** herramientas.
+   *
+   * Las del org pasan por el puente y se cuentan solas; las del CLI no. Sin
+   * esto, un programador que sólo usa el `Edit` de Claude Code cuenta cero
+   * herramientas por turno, el scheduler lo toma por un rol que habla sin
+   * hacer nada y a los dos turnos lo deja de convocar — con el trabajo a medias.
+   */
+  herramientasPropias?: HerramientaPropia[];
+  /**
+   * Lo que el proveedor quiere que se sepa del turno y no es parte de la
+   * respuesta: que el modelo pedido estaba saturado y respondió otro, que la
+   * suscripción está cerca de su límite. El motor los vuelca a la traza.
+   */
+  avisos?: string[];
 }
 
 /**
@@ -175,6 +216,12 @@ export interface LlmProvider {
    * configura una empresa no tiene por qué saber cuánto tarda cada backend.
    */
   readonly timeoutMs?: number;
+  /**
+   * El corte cuando el turno trabaja sobre código. Un turno que lee, edita y
+   * corre tests tarda más que uno que redacta un mensaje, y con el corte común
+   * moría justo mientras corría la verificación.
+   */
+  readonly timeoutCodigoMs?: number;
   /**
    * El proveedor corre su **propio** agent loop y no devuelve `tool_calls`.
    *
@@ -221,6 +268,8 @@ export async function collect(
         usage: event.usage,
         finishReason: event.finishReason,
         modelSlug: event.modelSlug,
+        ...(event.herramientasPropias ? { herramientasPropias: event.herramientasPropias } : {}),
+        ...(event.avisos?.length ? { avisos: event.avisos } : {}),
       };
     }
   }

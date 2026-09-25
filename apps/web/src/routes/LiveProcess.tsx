@@ -455,6 +455,8 @@ function enCriollo(event: TraceEvent): string {
       return "se registra el gasto";
     case "log":
       return event.level === "error" ? "un error" : "un aviso";
+    case "codigo.checkpoint":
+      return "checkpoint de código";
   }
 }
 
@@ -926,6 +928,24 @@ function armarCronologia(
             </span>
           ),
           detalle: event.error,
+        });
+        break;
+
+      // El checkpoint es el único rastro de lo que editó el CLI con su propio
+      // `Edit`: sin dibujarlo, ese trabajo no aparece en la cronología.
+      case "codigo.checkpoint":
+        push(event.tick, {
+          id: event.id,
+          at: event.at,
+          nivel: 1,
+          punto: "bg-accent",
+          titulo: (
+            <span className="text-ink-dim">
+              checkpoint <span className="font-mono text-[10px] text-ink">{event.sha.slice(0, 8)}</span>{" "}
+              en {event.rama} · {event.archivos} archivo(s)
+            </span>
+          ),
+          detalle: event.mensaje,
         });
         break;
 

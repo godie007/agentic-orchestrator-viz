@@ -1,7 +1,23 @@
-import { esCorridaTerminal, ids, mcpServerSchema, plantillaEquipo } from "@orq/shared";
+import { existsSync } from "node:fs";
+import { join, relative } from "node:path";
+import {
+  MEJORADOR_DE_CODIGO,
+  argvATexto,
+  argvDeInstalacion,
+  validarPaquete,
+  esCorridaTerminal,
+  ids,
+  companySchema,
+  mcpServerSchema,
+  plantillaEquipo,
+  validarPrefijoPermitido,
+} from "@orq/shared";
 import type {
   AgentRequest,
+  Company,
   CreateRunInput,
+  Repositorio,
+  SesionCodigo,
   Department,
   McpServer,
   McpServerHealth,
@@ -23,14 +39,34 @@ import {
   createEmailTools,
   createSkillTools,
   crearHerramientasDeContexto,
+  crearHerramientasDeCodigo,
+  hayAislamiento,
+  resolverEnWorktree,
   mapaDeContextoEnPrompt,
   type Correo,
 } from "@orq/tools";
 import { EventBus, Orchestrator, RunState, type CompanyConfig } from "@orq/engine";
 import type { Store } from "./db.js";
 import type { Env } from "./env.js";
-import { resolveSecret } from "./env.js";
-import { ExportStore } from "./exports.js";
+import { repoRoot, resolveSecret } from "./env.js";
+import { ExportStore, disposicionPorProyecto } from "./exports.js";
+import {
+  Directorios,
+  migrarSalidasViejas,
+  reescribirRutasMcp,
+  type ResultadoMigracion,
+} from "./directorios.js";
+import { RepoStore, type EventoDeCodigo } from "./repos.js";
+import { ServiciosVivos, type EntornoDeArranque, type VistaDeServicio } from "./servicios.js";
+import { ControlDeVersiones } from "./scm.js";
+import { git } from "./git.js";
+import {
+  ArriendosDeCodigo,
+  abrirTurnoDeCodigo,
+  crearCodigoStorage,
+  espacioDePersona,
+  HERRAMIENTAS_DE_CODIGO,
+} from "./codigo-servidor.js";
 import { ContextoStore, notaDeAprendizajes, rutaDeTema } from "./contexto.js";
 
 /**
@@ -85,9 +121,30 @@ export class Runtime {
   /** Suscriptores SSE por corrida, más los del canal global de MCP. */
   private runSubscribers = new Map<string, Set<EventSink>>();
   private mcpSubscribers = new Set<(health: McpServerHealth) => void>();
+  /**
+   * Suscriptores de lo que pasa con el código de una empresa fuera de toda
+   * corrida: cargar un repo, integrar o descartar una sesión. La traza exige un
+   * `runId`, y estas cosas las hace una persona sin corrida de por medio.
+   */
+  private codigoSubscribers = new Map<string, Set<(evento: EventoDeCodigo) => void>>();
 
   /** Documentos que producen las habilidades, uno por empresa. */
   readonly exports: ExportStore;
+
+  /** Dónde vive en disco cada cosa de un proyecto. Ver `directorios.ts`. */
+  readonly directorios: Directorios;
+
+  /** El código cargado en cada proyecto y sus sesiones de trabajo. */
+  readonly repos: RepoStore;
+
+  /** Quién escribe en cada repo en este momento. Ver `ArriendosDeCodigo`. */
+  private readonly arriendos = new ArriendosDeCodigo();
+
+  /** Backend, frontend, app móvil: lo que está levantado para la vista previa. Ver `servicios.ts`. */
+  readonly servicios: ServiciosVivos;
+
+  /** Stage, commit, stash y ramas sobre la sesión, desde el IDE. Ver `scm.ts`. */
+  readonly scm: ControlDeVersiones;
 
   /**
    * El árbol de contexto de cada empresa, como vault de Obsidian.
@@ -106,9 +163,39 @@ export class Runtime {
     private readonly providers: ProviderRegistry,
     private readonly env: Env,
   ) {
-    this.exports = new ExportStore(env.exportsDir);
+    this.directorios = new Directorios(env.proyectosDir, (id) => store.getCompany(id)?.name ?? null);
+    this.exports = new ExportStore(disposicionPorProyecto(this.directorios));
+    this.repos = new RepoStore(store, this.directorios, (evento) => this.broadcastCodigo(evento));
+    this.servicios = new ServiciosVivos(join(env.proyectosDir, ".servicios-vivos.json"), (evento) =>
+      this.broadcastCodigo({
+        tipo: "servicio",
+        companyId: evento.companyId,
+        repoId: evento.repoId,
+        detalle: `${evento.servicioId}: ${evento.estado}`,
+        at: Date.now(),
+      }),
+    );
     this.contexto = new ContextoStore(env.contextoDir);
+    this.scm = new ControlDeVersiones(this.repos);
     this.correo = crearCorreo({ webhookUrl: env.emailWebhookUrl });
+  }
+
+  /**
+   * Muda la salida del layout viejo (`data/exports/<id>`) a la carpeta legible
+   * de cada proyecto. Corre al arrancar, **antes** de levantar cualquier MCP:
+   * un servidor que arranca con la ruta vieja en sus argumentos la volvería a
+   * crear.
+   */
+  migrarLayout(): ResultadoMigracion {
+    return migrarSalidasViejas({
+      exportsDir: this.env.exportsDir,
+      repoRoot,
+      directorios: this.directorios,
+      companyIds: this.store.listCompanies().map((company) => company.id),
+      segmentoDe: (id) => ExportStore.safeSegment(id),
+      servidoresMcp: (id) => this.store.listMcpServers(id),
+      guardarMcp: (server) => this.store.saveMcpServer(mcpServerSchema.parse(server)),
+    });
   }
 
   // --- Runtime de empresa (MCP + herramientas) -----------------------------
@@ -167,6 +254,9 @@ export class Runtime {
           resolver: (name) => tools.get(name),
         }),
       );
+      // Las de código, sólo si el proyecto tiene un repo: una herramienta que no
+      // se puede cumplir hace gastar turnos intentándola.
+      this.registrarCodigoEn(tools, companyId);
       const health = new Map<string, McpServerHealth>();
       const mcp = new McpBridge(tools, resolveSecret, (update) => {
         health.set(update.serverId, update);
@@ -178,6 +268,371 @@ export class Runtime {
     }
     await runtime.mcp.sync(this.store.listMcpServers(companyId));
     return runtime;
+  }
+
+  private depsDeCodigo(companyId: string) {
+    return {
+      store: this.store,
+      repos: this.repos,
+      directorios: this.directorios,
+      arriendos: this.arriendos,
+      servicios: this.servicios,
+      companyId,
+      emitirCheckpoint: (
+        runId: string,
+        evento: { roleId: string; repoId: string; rama: string; sha: string; mensaje: string; archivos: number },
+      ) => {
+        const activa = this.runs.get(runId);
+        activa?.bus.emit({ type: "codigo.checkpoint", runId, tick: activa.state.tick, ...evento });
+      },
+    };
+  }
+
+  /**
+   * Las herramientas de código se registran **aunque todavía no haya repo**.
+   *
+   * Es la excepción consciente a "la que no se puede cumplir no se registra":
+   * un proyecto nace de una plantilla antes de que alguien cargue su código, y
+   * `generarEquipo` sólo puede otorgar lo que está en el catálogo. Sin repo, el
+   * espacio de código del turno no se abre —el agente no las ve en su resumen—
+   * y cada una contesta qué falta y quién lo carga, que es un aviso y no un
+   * intento fallido que se repite.
+   */
+  private registrarCodigoEn(tools: ToolRegistry, companyId: string): void {
+    for (const nombre of HERRAMIENTAS_DE_CODIGO) tools.unregister(nombre);
+    for (const tool of crearHerramientasDeCodigo(crearCodigoStorage(this.depsDeCodigo(companyId)))) {
+      tools.register(tool);
+    }
+  }
+
+  /**
+   * Crea (o devuelve) el agente del chat del IDE: un rol con todas las
+   * herramientas de código y un prompt de mejora puntual. Idempotente por
+   * nombre. Prefiere `claude-code` con Opus —la suscripción, y el que mejor
+   * edita—; si no está, el proveedor preferido en su tier más alto.
+   */
+  async crearMejorador(companyId: string): Promise<Role> {
+    await this.registrarHerramientasDeCodigo(companyId);
+    const catalogo = this.store.listTools(companyId);
+    const toolIds = catalogo.filter((tool) => HERRAMIENTAS_DE_CODIGO.has(tool.name)).map((tool) => tool.id);
+
+    // Si ya existe, se lo pone al día: el Mejorador es "todas las herramientas
+    // de código", y una herramienta nueva (instalar_dependencia) no le llegaba.
+    const existente = this.store
+      .listRoles(companyId)
+      .find((role) => role.name === MEJORADOR_DE_CODIGO.nombre);
+    if (existente) {
+      const faltantes = toolIds.filter((id) => !existente.toolIds.includes(id));
+      if (faltantes.length === 0) return existente;
+      const actualizado = { ...existente, toolIds: [...existente.toolIds, ...faltantes] };
+      this.store.saveRole(actualizado);
+      this.actualizarRolEnCorridasVivas(companyId, actualizado);
+      return actualizado;
+    }
+
+    const departamentos = this.store.listDepartments(companyId);
+    let departamento =
+      departamentos.find((dep) => dep.name.toLowerCase() === MEJORADOR_DE_CODIGO.departamento.toLowerCase()) ??
+      departamentos[0];
+    if (!departamento) {
+      departamento = {
+        id: ids.department(),
+        companyId,
+        name: MEJORADOR_DE_CODIGO.departamento,
+        purpose: "Escribe y mejora el código.",
+        parentId: null,
+        position: { x: 120, y: 420 },
+      };
+      this.store.saveDepartment(departamento);
+    }
+
+    const conClaudeCode = this.providers.has("claude-code");
+    const providerId = conClaudeCode ? "claude-code" : this.proveedorPreferido();
+    if (!providerId) throw new Error("No hay ningún proveedor LLM configurado.");
+
+    const rol: Role = {
+      id: ids.role(),
+      companyId,
+      departmentId: departamento.id,
+      name: MEJORADOR_DE_CODIGO.nombre,
+      title: MEJORADOR_DE_CODIGO.titulo,
+      systemPrompt: MEJORADOR_DE_CODIGO.systemPrompt,
+      model: {
+        providerId,
+        modelSlug: conClaudeCode ? "claude-code/opus" : null,
+        tier: "smart",
+        escalado: null,
+        temperature: null,
+        maxOutputTokens: 8192,
+      },
+      toolIds,
+      authority: "executor",
+      reportsTo: null,
+      maxTurns: 20,
+      spendApprovalThresholdUsd: null,
+      position: { x: 120 + departamentos.length * 40, y: 560 },
+    };
+    this.store.saveRole(rol);
+    return rol;
+  }
+
+  /**
+   * Aprobar una solicitud de dependencias **instala**: corre el gestor en la
+   * sesión del repo (sandbox, sin scripts de instalación, con red) y commitea
+   * `package.json` y el lockfile a nombre de quien aprobó. Si falla, la
+   * aprobación falla con la salida del gestor y la solicitud sigue pendiente:
+   * aprobar algo que no quedó instalado le mentiría al agente.
+   *
+   * Todo se revalida acá aunque la herramienta ya lo validó: lo que llega a la
+   * base no se da por bueno.
+   */
+  private async instalarDependencias(companyId: string, request: AgentRequest): Promise<Record<string, unknown>> {
+    const pedido = request.dependencia;
+    if (!pedido) throw new Error("La solicitud no trae los paquetes.");
+    for (const paquete of pedido.paquetes) {
+      const v = validarPaquete(paquete);
+      if (!v.ok) throw new Error(v.motivo);
+    }
+    const repo = this.store.getRepositorio(pedido.repoId);
+    if (!repo || repo.companyId !== companyId) throw new Error("El repo de la solicitud ya no existe.");
+    const escritor = this.titularDeEscritura(repo.id);
+    if (escritor) {
+      throw new Error(`${escritor} está escribiendo en el repo en su turno. Aprobá cuando termine: instalar cambia package.json.`);
+    }
+    const argv = argvDeInstalacion(pedido.gestor, pedido.paquetes, { dev: pedido.dev });
+    const deps = this.depsDeCodigo(companyId);
+    const espacio = await espacioDePersona(deps, repo);
+    // La carpeta se vuelve a validar al aprobar: lo que llega a la base no se da por bueno.
+    let carpeta = "";
+    if (pedido.carpeta) {
+      const ruta = await resolverEnWorktree(espacio.dir, pedido.carpeta);
+      if (!ruta.ok || !existsSync(join(ruta.absoluta, "package.json"))) {
+        throw new Error(`La carpeta "${pedido.carpeta}" no existe en el repo o no tiene package.json.`);
+      }
+      carpeta = ruta.relativa;
+    }
+    const resultado = await crearCodigoStorage(deps).ejecutar(espacio, argv, {
+      corteMs: 5 * 60_000,
+      repetir: true,
+      ...(carpeta ? { carpeta } : {}),
+    });
+    const cola = (resultado.error ?? resultado.salida).slice(-1_500);
+    if (resultado.error || resultado.cortadoPorTiempo || resultado.codigo !== 0) {
+      throw new Error(`No se pudo instalar (${argvATexto(argv)}): ${cola}`);
+    }
+    const sesion = this.repos.sesionAbierta(repo.id, companyId);
+    const persona = await this.repos.identidadDePersona();
+    const sha = sesion
+      ? await this.repos.checkpoint(sesion, repo, { nombre: persona.nombre, id: "persona", email: persona.email }, request.reason, {
+          titulo: `Instala ${pedido.paquetes.join(", ")}`,
+        })
+      : null;
+    return { instalados: pedido.paquetes, comando: argvATexto(argv), checkpoint: sha, salida: cola.slice(-600) };
+  }
+
+  /**
+   * Lo que ya se habló en una conversación del chat, para el pedido que sigue.
+   *
+   * Cada pedido es una corrida nueva y el agente arranca sin memoria; en un
+   * chat eso se nota a la segunda frase ("ahora hacelo azul"). Viaja lo que se
+   * pidió y lo que respondió el agente al cerrar su turno —no la traza entera:
+   * se reenvía en cada vuelta del turno delegado—, con presupuesto y de lo más
+   * nuevo a lo más viejo, que es lo que más importa si hay que cortar.
+   */
+  historiaDeConversacion(companyId: string, repoId: string, conversacionId: string, excepto: string): string {
+    const previos = this.store
+      .listRuns(companyId)
+      .filter((r) => r.id !== excepto && r.foco?.repoId === repoId && r.foco.conversacionId === conversacionId)
+      .sort((a, b) => b.startedAt - a.startedAt);
+    if (previos.length === 0) return "";
+    const PRESUPUESTO = 8_000;
+    let restante = PRESUPUESTO;
+    const bloques: string[] = [];
+    for (const previo of previos.slice(0, 8)) {
+      const respuesta = this.store
+        .listEvents(previo.id)
+        .filter((e): e is Extract<TraceEvent, { type: "agent.turn_end" }> => e.type === "agent.turn_end" && Boolean(e.summary))
+        .at(-1)?.summary;
+      const bloque = [
+        `**Pedido:** ${previo.objective.slice(0, 1_500)}`,
+        `**Respuesta:** ${(respuesta ?? (previo.stopReason ? `(sin respuesta: ${previo.stopReason})` : "(sin respuesta)")).slice(0, 2_500)}`,
+      ].join("\n");
+      if (bloque.length > restante) break;
+      restante -= bloque.length;
+      bloques.push(bloque);
+    }
+    return [
+      "Esta conversación ya tuvo pedidos anteriores (el más reciente primero). Los cambios que se hicieron ya están en el código de la sesión:",
+      ...bloques,
+      "---",
+      "Pedido nuevo:",
+    ].join("\n\n");
+  }
+
+  /**
+   * Un mensaje de commit escrito a partir del diff, como el ✨ de Cursor.
+   *
+   * Es una sola llamada al modelo más barato del proveedor preferido, no una
+   * corrida: no hay nada que coordinar ni que auditar. Imita el estilo de los
+   * últimos commits del repo —idioma, `tipo(área): …`, largo—, porque un
+   * mensaje correcto pero escrito distinto al resto del historial es ruido
+   * que alguien después reescribe a mano. El diff se acota: lo que importa
+   * para describir un cambio está en los nombres de archivo y en las primeras
+   * líneas de cada hunk.
+   */
+  async generarMensajeDeCommit(sesion: SesionCodigo, repo: Repositorio): Promise<string> {
+    const { diff, archivos } = await this.scm.diffParaMensaje(sesion, repo);
+    if (!diff.trim() && archivos.length === 0) throw new Error("No hay cambios para describir.");
+    const providerId = this.proveedorPreferido();
+    if (!providerId) throw new Error("No hay ningún proveedor LLM configurado.");
+    const { provider, modelSlug } = await this.providers.resolveModel({
+      providerId,
+      modelSlug: null,
+      tier: "cheap",
+      escalado: null,
+      temperature: null,
+      maxOutputTokens: 400,
+    });
+    const historia = (await this.repos.log(sesion, repo).catch(() => []))
+      .map((c) => c.mensaje)
+      .concat(
+        (
+          await git(["log", "-15", "--format=%s", repo.ramaBase], { ...this.repos.contextoGit(sesion, repo), tolerar: true })
+        ).stdout
+          .split("\n")
+          .filter(Boolean),
+      )
+      .filter((m) => !/^(Cambios hechos desde el IDE|Turno de |Cambios pendientes al integrar)/.test(m))
+      .slice(0, 12);
+    const TOPE = 14_000;
+    const acotado = diff.length > TOPE ? `${diff.slice(0, TOPE)}\n[… diff recortado: ${diff.length - TOPE} caracteres más …]` : diff;
+    const pedido = [
+      "Write a git commit message for the change below. Reply with ONLY the message: no quotes, no code fences, no explanation.",
+      "Match the style of this repository's recent commits (language, conventional-commit prefix like `feat(area):` if they use one, capitalization, length). If there are no examples, write it in Spanish (castellano rioplatense).",
+      "First line: a summary of at most 72 characters saying WHAT changed and, if it fits, why. If the change is not trivial, add a blank line and up to 4 short bullet lines with the relevant details. Do not describe line-by-line edits; do not invent motivations that the diff does not show.",
+      historia.length ? `Recent commits in this repo:\n${historia.map((m) => `- ${m}`).join("\n")}` : "",
+      `Changed files: ${archivos.slice(0, 40).join(", ")}${archivos.length > 40 ? ` (+${archivos.length - 40})` : ""}`,
+      `Diff:\n${acotado}`,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+
+    let texto = "";
+    const corte = AbortSignal.timeout(120_000);
+    for await (const evento of provider.chat({
+      model: modelSlug,
+      messages: [{ role: "user", content: pedido }],
+      maxOutputTokens: 400,
+      temperature: 0.2,
+      signal: corte,
+    })) {
+      if (evento.type === "text_delta") texto += evento.text;
+      else if (evento.type === "done" && evento.message.content) texto = evento.message.content;
+    }
+    const limpio = texto
+      .trim()
+      .replace(/^```[a-z]*\n?|```$/g, "")
+      .replace(/^["'`]|["'`]$/g, "")
+      // El CLI de Claude firma lo que escribe ("Co-Authored-By: Claude…",
+      // "🤖 Generated with…"). Es un commit de la persona: esa firma no va.
+      .split("\n")
+      .filter((linea) => !/^\s*(co-authored-by:|signed-off-by:|🤖|generated with)/i.test(linea))
+      .join("\n")
+      .trim();
+    if (!limpio) throw new Error("El modelo no devolvió un mensaje.");
+    return limpio;
+  }
+
+  // --- Servicios (vista previa de un monorepo) ---------------------------------
+
+  /**
+   * Todo lo que hace falta para levantar un servicio: la sesión abierta (se
+   * levanta sobre lo que cambiaron los agentes), la carpeta de la persona (de
+   * ahí salen sus `.env` y su `node_modules`) y el mismo sandbox que los
+   * comandos, con su opt-in.
+   */
+  private async entornoDeArranque(repo: Repositorio, servicioId: string): Promise<EntornoDeArranque> {
+    const servicio = repo.servicios.find((s) => s.id === servicioId);
+    if (!servicio) throw new Error(`El repo ${repo.nombre} no tiene un servicio "${servicioId}".`);
+    const espacio = await espacioDePersona(this.depsDeCodigo(repo.companyId), repo);
+    const tmp = this.directorios.sub(repo.companyId, "tmp", true);
+    let aislamiento: EntornoDeArranque["aislamiento"] = null;
+    if (!repo.comandos.sinAislamiento) {
+      if (!hayAislamiento()) {
+        throw new Error("En esta máquina no hay sandbox-exec: para levantar servicios sin aislamiento, habilitalo en la configuración del repo.");
+      }
+      aislamiento = {
+        escribibles: [espacio.dir, tmp],
+        noEscribibles: [join(this.repos.rutaClon(repo), ".git"), join(espacio.dir, ".git")],
+      };
+    }
+    return {
+      companyId: repo.companyId,
+      repoId: repo.id,
+      servicio,
+      hermanos: repo.servicios,
+      dir: espacio.dir,
+      origen: repo.origen.tipo === "local" ? join(repo.origen.ruta, servicio.carpeta) : null,
+      tmp,
+      aislamiento,
+    };
+  }
+
+  async prepararServicio(repo: Repositorio, servicioId: string): Promise<void> {
+    await this.servicios.preparar(await this.entornoDeArranque(repo, servicioId));
+  }
+
+  async arrancarServicio(repo: Repositorio, servicioId: string): Promise<VistaDeServicio> {
+    return this.servicios.arrancar(await this.entornoDeArranque(repo, servicioId));
+  }
+
+  /** ¿Ya tiene sus dependencias en la sesión? Sin sesión abierta, no se sabe: `null`. */
+  serviciosPreparados(repo: Repositorio): Record<string, boolean | null> {
+    const sesion = this.repos.sesionAbierta(repo.id, repo.companyId);
+    const dir = sesion ? this.repos.rutaWorktree(sesion) : null;
+    return Object.fromEntries(
+      repo.servicios.map((s) => {
+        if (!dir) return [s.id, null];
+        const carpeta = join(dir, s.carpeta);
+        return [s.id, !existsSync(join(carpeta, "package.json")) || existsSync(join(carpeta, "node_modules"))];
+      }),
+    );
+  }
+
+  /** Qué rol escribe ahora en un repo, o `null`. El IDE no guarda mientras tanto. */
+  titularDeEscritura(repoId: string): string | null {
+    return this.arriendos.titular(repoId);
+  }
+
+  /**
+   * Corre un comando desde la terminal del IDE. Pasa por la misma allowlist y
+   * el mismo sandbox que un agente: la API escucha en localhost, pero una
+   * página cualquiera del navegador puede pegarle, y un endpoint que corre lo
+   * que le pidan sería una puerta abierta a la máquina.
+   */
+  async ejecutarComoPersona(repo: Repositorio, argv: string[], corteMs: number, carpeta = "") {
+    const deps = this.depsDeCodigo(repo.companyId);
+    const espacio = await espacioDePersona(deps, repo);
+    let relativa = "";
+    if (carpeta) {
+      const ruta = await resolverEnWorktree(espacio.dir, carpeta);
+      if (!ruta.ok) throw new Error(ruta.motivo);
+      relativa = ruta.relativa;
+    }
+    // Una persona que aprieta "npm test" quiere verlo correr: nada de reutilizar.
+    return crearCodigoStorage(deps).ejecutar(espacio, argv, { corteMs, repetir: true, ...(relativa ? { carpeta: relativa } : {}) });
+  }
+
+  /**
+   * Vuelve a registrar las herramientas de código después de cargar o borrar
+   * un repo, y siembra sus filas: sin fila en `tools`, `role.toolIds` no puede
+   * apuntarlas y nadie las puede recibir. El registro es el de la empresa, que
+   * comparten las corridas vivas, así que lo ejecutable les llega solo.
+   */
+  async registrarHerramientasDeCodigo(companyId: string): Promise<void> {
+    const { tools } = await this.companyRuntime(companyId);
+    this.registrarCodigoEn(tools, companyId);
+    await this.sembrarHerramientas(companyId);
   }
 
   /**
@@ -252,7 +707,10 @@ export class Runtime {
     const catalogo = this.store.listTools(companyId);
     const porNombre = new Map(catalogo.map((tool) => [tool.name, tool.id]));
 
-    const providerId = this.proveedorPreferido();
+    // La plantilla puede preferir un proveedor: el equipo de software prefiere
+    // `claude-code`, que es la suscripción y trae su propio harness de código.
+    const providerId =
+      (plantilla.proveedores ?? []).find((id) => this.providers.has(id)) ?? this.proveedorPreferido();
     if (!providerId) {
       throw new Error(
         "No hay ningún proveedor LLM configurado. Agregá una API key en .env y reiniciá.",
@@ -437,6 +895,69 @@ export class Runtime {
    * pertenecer — invisible desde la UI, porque la UI navega por empresa y la
    * empresa ya no está.
    */
+  /**
+   * Renombra un proyecto y lleva sus carpetas detrás.
+   *
+   * Cambiar la fila sola no alcanza: la carpeta de `data/proyectos/` seguiría
+   * con el nombre viejo (se encuentra por la marca, pero una persona lee
+   * nombres) y el vault, que se resuelve por nombre, abriría uno vacío al lado
+   * del que tiene todo lo aprendido. Mudar la carpeta, a su vez, rompe lo que
+   * guardaba rutas absolutas: los worktrees de git y los servidores MCP que
+   * escriben adentro (el Playwright con `--output-dir`). Por eso no se renombra
+   * con una corrida en curso: sus agentes tienen abiertos archivos y comandos
+   * en la ruta vieja.
+   */
+  async renombrarEmpresa(
+    companyId: string,
+    nombre: string,
+  ): Promise<{ ok: true; company: Company; carpeta: string | null } | { ok: false; motivo: string }> {
+    const actual = this.store.getCompany(companyId);
+    if (!actual) return { ok: false, motivo: "La empresa no existe." };
+    const limpio = nombre.trim();
+    const parsed = companySchema.safeParse({ ...actual, name: limpio, updatedAt: Date.now() });
+    if (!limpio || !parsed.success) return { ok: false, motivo: "El nombre no es válido." };
+    if (limpio === actual.name) return { ok: true, company: actual, carpeta: null };
+    if (this.tieneCorridaViva(companyId)) {
+      return {
+        ok: false,
+        motivo: "El proyecto tiene una corrida en curso: sus agentes trabajan sobre la carpeta actual. Detenela antes de renombrarlo.",
+      };
+    }
+
+    // Los servicios corren adentro de la carpeta que se va a mudar.
+    if (this.servicios.hayVivos({ companyId })) {
+      return {
+        ok: false,
+        motivo: "El proyecto tiene servicios levantados (vista previa): corren adentro de su carpeta. Detenelos antes de renombrarlo.",
+      };
+    }
+    this.store.saveCompany(parsed.data);
+    await this.contexto.renombrar(companyId, actual.name, limpio);
+
+    const mudanza = this.directorios.mudar(companyId);
+    if (mudanza) {
+      await this.repos.repararWorktrees(companyId);
+      const cambio = {
+        viejaAbs: mudanza.vieja,
+        nuevaAbs: mudanza.nueva,
+        viejaRel: relative(repoRoot, mudanza.vieja),
+        nuevaRel: relative(repoRoot, mudanza.nueva),
+      };
+      let reescritos = 0;
+      for (const server of this.store.listMcpServers(companyId)) {
+        const reescrito = reescribirRutasMcp(server, cambio);
+        if (reescrito) {
+          this.store.saveMcpServer(mcpServerSchema.parse(reescrito));
+          reescritos += 1;
+        }
+      }
+      // El sync reconecta los que cambiaron: un proceso MCP arrancado con la
+      // ruta vieja la recrearía al primer archivo que escriba.
+      if (reescritos > 0 && this.companies.has(companyId)) await this.companyRuntime(companyId);
+    }
+    return { ok: true, company: parsed.data, carpeta: mudanza?.nueva ?? null };
+  }
+
   async eliminarEmpresa(
     companyId: string,
   ): Promise<{ ok: true; archivos: number; bytes: number } | { ok: false; motivo: string }> {
@@ -447,10 +968,15 @@ export class Runtime {
       };
     }
 
+    this.servicios.detenerDeEmpresa(companyId);
     await this.olvidarEmpresa(companyId);
     this.store.deleteCompany(companyId);
 
+    // Se lleva la carpeta entera del proyecto: salida, clones y worktrees. Las
+    // ramas `orq/*` que ya se integraron al repo de la persona quedan: ese
+    // repo es suyo, y el diálogo de borrado lo dice.
     const disco = await this.exports.removeCompany(companyId);
+    this.directorios.olvidar(companyId);
     // Que no hubiera carpeta no es un error: una empresa que nunca produjo un
     // archivo se borra igual.
     return disco.ok ? disco : { ok: true, archivos: 0, bytes: 0 };
@@ -601,6 +1127,20 @@ export class Runtime {
       throw new Error("La empresa no tiene roles: definí al menos uno antes de arrancar.");
     }
 
+    // Corrida enfocada (el chat del IDE): un solo agente, sobre un repo, sin
+    // el trabajo abierto de los demás. El organigrama se reduce a ese rol
+    // —si quedaran los otros, el pedido se volvería un encargo de equipo y el
+    // "mejorá esta función" terminaba en una reunión de cuatro agentes—.
+    const foco = input.foco ?? null;
+    if (foco) {
+      const rol = config.roles.find((role) => role.id === foco.rolId);
+      if (!rol) throw new Error("El agente elegido ya no existe en la empresa.");
+      const repo = this.store.getRepositorio(foco.repoId);
+      if (!repo || repo.companyId !== company.id) throw new Error("El repo elegido no es de esta empresa.");
+      config.roles = [rol];
+      config.tasks = [];
+    }
+
     const run: Run = {
       id: ids.run(),
       companyId: company.id,
@@ -608,13 +1148,18 @@ export class Runtime {
       status: "idle",
       mode: input.mode,
       tick: 0,
-      maxTicks: input.maxTicks ?? this.env.defaultMaxTicks,
+      // Un pedido puntual no necesita cincuenta ciclos: si en cuatro no cerró,
+      // el pedido era otra cosa y conviene que lo vea una persona.
+      maxTicks: input.maxTicks ?? (input.foco ? 4 : this.env.defaultMaxTicks),
       budgetUsd: input.budgetUsd ?? company.budgetUsd ?? this.env.defaultBudgetUsd,
       spentUsd: 0,
       cronIntervalMs: input.cronIntervalMs ?? 60_000,
       stopReason: null,
       startedAt: Date.now(),
       endedAt: null,
+      foco: foco
+        ? { rolId: foco.rolId, repoId: foco.repoId, ...(foco.conversacionId ? { conversacionId: foco.conversacionId } : {}) }
+        : null,
     };
 
     const bus = new EventBus();
@@ -673,6 +1218,14 @@ export class Runtime {
       // Lo que la empresa produjo, para que un agente pueda **verlo**. Se presta
       // en sólo lectura; producir sigue yendo por las herramientas del org.
       dirDeTrabajo: this.exports.dirDeEmpresa(company.id),
+      // El código del proyecto: cada turno de un rol que programa abre su
+      // espacio (worktree, arriendo, resumen) y lo cierra con un checkpoint.
+      codigo: {
+        abrirTurno: (role, runId) =>
+          abrirTurnoDeCodigo(this.depsDeCodigo(company.id), role, runId, {
+            ...(foco ? { repoPrincipalId: foco.repoId } : {}),
+          }),
+      },
       // El mapa del árbol de contexto, resuelto por turno: un agente escribe
       // una nota en un ciclo y el resto la ve en el siguiente.
       mapaDeContexto: async () =>
@@ -693,16 +1246,23 @@ export class Runtime {
 
     // El encargo entra como un mensaje de la persona a cargo al rol de mayor
     // autoridad: la empresa arranca porque alguien pidió algo, no por magia.
-    const entryPoint =
-      config.roles.find((role) => role.authority === "executive" && !role.reportsTo) ??
-      config.roles.find((role) => !role.reportsTo) ??
-      config.roles[0]!;
+    const entryPoint = foco
+      ? config.roles[0]!
+      : (config.roles.find((role) => role.authority === "executive" && !role.reportsTo) ??
+        config.roles.find((role) => !role.reportsTo) ??
+        config.roles[0]!);
     await state.forActor(null).sendMessage({
       toRoleId: entryPoint.id,
       toDepartmentId: null,
       type: "human",
-      subject: "Encargo",
-      body: input.objective,
+      subject: foco ? "Pedido desde el IDE" : "Encargo",
+      body: [
+        foco?.conversacionId ? this.historiaDeConversacion(company.id, foco.repoId, foco.conversacionId, run.id) : "",
+        input.objective,
+        foco?.contexto ?? "",
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
       threadId: null,
       inReplyTo: null,
     });
@@ -906,7 +1466,36 @@ export class Runtime {
     companyId: string,
     request: AgentRequest,
     override: RoleProposal | null,
+    comando: { prefijo?: string[]; alcance: "siempre" | "una-vez" } | null = null,
   ): Promise<Record<string, unknown>> {
+    if (request.type === "dependencia") {
+      return this.instalarDependencias(companyId, request);
+    }
+
+    if (request.type === "comando") {
+      if (!request.comando) throw new Error("La solicitud no trae el comando.");
+      const repo = this.store.getRepositorio(request.comando.repoId);
+      if (!repo || repo.companyId !== companyId) throw new Error("El repo de la solicitud ya no existe.");
+      const alcance = comando?.alcance ?? "una-vez";
+      if (alcance === "una-vez") {
+        this.repos.actualizarComandos(repo, { unaVez: [...repo.comandos.unaVez, request.comando.argv] });
+        return { comando: argvATexto(request.comando.argv), alcance };
+      }
+      // "Siempre" permite un prefijo, que la persona puede recortar: pidieron
+      // `npm run e2e -- --grep login` y lo que tiene sentido permitir es
+      // `npm run e2e`. El prefijo pasa por la misma validación que la UI.
+      const prefijo = comando?.prefijo?.length ? comando.prefijo : request.comando.argv;
+      const pedido = request.comando.argv;
+      if (!prefijo.every((token, i) => pedido[i] === token)) {
+        throw new Error("El prefijo tiene que ser el principio del comando pedido.");
+      }
+      const validacion = validarPrefijoPermitido(prefijo);
+      if (!validacion.ok) throw new Error(validacion.motivo);
+      const ya = repo.comandos.permitidos.some((p) => p.join("\u0000") === prefijo.join("\u0000"));
+      if (!ya) this.repos.actualizarComandos(repo, { permitidos: [...repo.comandos.permitidos, prefijo] });
+      return { comando: argvATexto(prefijo), alcance };
+    }
+
     if (request.type === "create_role") {
       const propuesta = override ?? request.roleProposal;
       if (!propuesta) throw new Error("La solicitud no trae una propuesta de rol.");
@@ -1368,6 +1957,27 @@ export class Runtime {
       return "bandeja";
     }
 
+    // Una instalación se cuenta como lo que es: qué quedó instalado y cómo se
+    // usa desde el código, no un volcado de JSON.
+    if (request.type === "dependencia" && request.dependencia) {
+      const paquetes = request.dependencia.paquetes.join(", ");
+      void active.state.forActor(null).sendMessage({
+        toRoleId: request.requestedByRoleId,
+        toDepartmentId: null,
+        type: aprobada ? "approval_grant" : "approval_deny",
+        subject: aprobada ? `Instalado: ${paquetes}` : `No se instaló: ${paquetes}`,
+        body: aprobada
+          ? `Quedó instalado ${paquetes} en node_modules y anotado en package.json` +
+            `${typeof aplicado["checkpoint"] === "string" ? ` (checkpoint ${String(aplicado["checkpoint"]).slice(0, 8)})` : ""}. ` +
+            `Importalo por su nombre de paquete; en una página sin build, apuntá el import map a ./node_modules/<paquete>/…` +
+            `\n\nSalida del gestor:\n${String(aplicado["salida"] ?? "")}`
+          : `La persona no aprobó instalar ${paquetes}.\n\n${request.resolution ?? ""}\n\nBuscá una alternativa sin esa dependencia o explicá por qué hace falta.`,
+        threadId: null,
+        inReplyTo: null,
+      });
+      return "bandeja";
+    }
+
     const detalle = aprobada ? `Aplicado: ${JSON.stringify(aplicado)}` : (request.resolution ?? "");
 
     void active.state.forActor(null).sendMessage({
@@ -1404,6 +2014,23 @@ export class Runtime {
     return () => set.delete(sink);
   }
 
+  subscribeCodigo(companyId: string, sink: (evento: EventoDeCodigo) => void): () => void {
+    const sinks = this.codigoSubscribers.get(companyId) ?? new Set();
+    sinks.add(sink);
+    this.codigoSubscribers.set(companyId, sinks);
+    return () => sinks.delete(sink);
+  }
+
+  private broadcastCodigo(evento: EventoDeCodigo): void {
+    for (const sink of this.codigoSubscribers.get(evento.companyId) ?? []) {
+      try {
+        sink(evento);
+      } catch {
+        // Un suscriptor caído no puede cortar a los demás.
+      }
+    }
+  }
+
   subscribeMcp(sink: (health: McpServerHealth) => void): () => void {
     this.mcpSubscribers.add(sink);
     return () => this.mcpSubscribers.delete(sink);
@@ -1430,6 +2057,7 @@ export class Runtime {
   }
 
   async shutdown(): Promise<void> {
+    this.servicios.detenerTodos();
     for (const active of this.runs.values()) active.orchestrator.stop("Servidor detenido.");
     await Promise.all([...this.companies.values()].map((runtime) => runtime.mcp.disconnectAll()));
   }

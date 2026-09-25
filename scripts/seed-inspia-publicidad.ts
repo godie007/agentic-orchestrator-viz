@@ -49,7 +49,9 @@ import type {
 } from "@orq/shared";
 import { ToolRegistry, createSkillTools } from "@orq/tools";
 import { Store } from "../apps/server/src/db.js";
-import { loadEnv } from "../apps/server/src/env.js";
+import { loadEnv, repoRoot } from "../apps/server/src/env.js";
+import { Directorios } from "../apps/server/src/directorios.js";
+import { join, relative } from "node:path";
 
 const env = loadEnv();
 const store = new Store(env.databaseUrl);
@@ -585,7 +587,9 @@ const mcpServers: McpServer[] = [
         "-y",
         "@playwright/mcp@latest",
         "--output-dir",
-        `./data/exports/${company.id}/reconocimiento`,
+        // La salida vive en la carpeta legible del proyecto (ver
+        // `apps/server/src/directorios.ts`), no en data/exports/<id>.
+        relative(repoRoot, join(new Directorios(env.proyectosDir, () => company.name).sub(company.id, "salida"), "reconocimiento")),
       ],
       envRefs: {},
       cwd: null,

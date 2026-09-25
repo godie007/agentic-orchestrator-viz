@@ -28,6 +28,7 @@ function envDePrueba(base: string): Env {
   return {
     port: 0,
     databaseUrl: join(base, "db.sqlite"),
+    proyectosDir: join(base, "proyectos"),
     exportsDir: join(base, "exports"),
     musicaDir: join(base, "musica"),
     contextoDir: join(base, "contexto"),

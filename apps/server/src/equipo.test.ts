@@ -24,6 +24,7 @@ function envDePrueba(base: string): Env {
   return {
     port: 0,
     databaseUrl: join(base, "db.sqlite"),
+    proyectosDir: join(base, "proyectos"),
     exportsDir: join(base, "exports"),
     musicaDir: join(base, "musica"),
     contextoDir: join(base, "contexto"),
@@ -158,5 +159,23 @@ describe("generarEquipo", () => {
       expect(condicionadas.has(faltante), `"${faltante}" no existe en el registro`).toBe(true);
     }
     expect(resultado.mcpSugeridos.length).toBeGreaterThan(0);
+  });
+
+  it("el equipo de software recibe las herramientas de código aunque todavía no haya repo", async () => {
+    // Un proyecto nace de la plantilla antes de que alguien cargue su código:
+    // si las herramientas de código no estuvieran en el catálogo, el equipo
+    // nacería sin poder programar y nadie lo notaría hasta la primera corrida.
+    const companyId = await empresaVacia();
+    const resultado = await runtime.generarEquipo(companyId, "desarrollo-software");
+    expect(resultado.herramientasFaltantes).toEqual([]);
+
+    const catalogo = new Map(store.listTools(companyId).map((tool) => [tool.id, tool.name]));
+    const nombres = (rol: string) =>
+      (resultado.roles.find((r) => r.name === rol)?.toolIds ?? []).map((id) => catalogo.get(id));
+    expect(nombres("Tomás")).toContain("editar_codigo");
+    expect(nombres("Tomás")).toContain("ejecutar_comando");
+    // QA verifica, no edita: sin herramientas que escriban no pide el arriendo.
+    expect(nombres("Irene")).toContain("ejecutar_comando");
+    expect(nombres("Irene")).not.toContain("editar_codigo");
   });
 });

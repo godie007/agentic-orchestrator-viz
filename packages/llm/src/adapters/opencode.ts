@@ -121,6 +121,8 @@ const CORTE_MS = Number(process.env["OPENCODE_TIMEOUT_MS"] ?? 1_200_000);
 const CORTE_CATALOGO_MS = 30_000;
 
 export class OpenCodeProvider implements LlmProvider {
+  /** Un turno que programa corre la verificación entera: más aire que el común. */
+  readonly timeoutCodigoMs = Math.round(CORTE_MS * 1.5);
   readonly id: ProviderId = "opencode";
   readonly label = "opencode (suscripción)";
   readonly timeoutMs = CORTE_MS;
@@ -217,12 +219,17 @@ export class OpenCodeProvider implements LlmProvider {
     orgTools: OrgToolsBridge | undefined,
   ): Promise<{ texto: string; uso: Consumo; costoUsd: number | null }> {
     const session = orgTools ? await orgTools.open() : null;
+    // Sobre un repo también va en sólo lectura, a diferencia de Claude Code: no
+    // tenemos cómo negarle a opencode editar `.git` por patrón de ruta, y un
+    // hook escrito ahí es código que corre fuera del sandbox en el próximo
+    // checkpoint. Edita por las herramientas del org (`editar_codigo`), que
+    // resuelven cada ruta y rechazan `.git`.
     const soloLectura = Boolean(session?.cwd);
     const trabajo = session?.cwd ?? nuevoDir(this.workspace);
     const configPath = escribirConfig(
       configDelTurno({ soloLectura, ...(session ? { session } : {}) }),
     );
-    const completo = orgTools ? prompt + cierre(soloLectura) : prompt;
+    const completo = orgTools ? prompt + cierre(soloLectura, Boolean(session?.codigo)) : prompt;
 
     try {
       const { stdout, cortado } = await correr(
@@ -575,7 +582,16 @@ function render(messages: ChatMessage[]): string {
  * está en sólo lectura lo manda a pelear con un permiso negado en vez de usar
  * la herramienta del org que sí puede.
  */
-function cierre(soloLectura: boolean): string {
+function cierre(soloLectura: boolean, codigo = false): string {
+  if (codigo) {
+    return (
+      "\n\nEl directorio actual es el worktree del repo. Tus herramientas propias son de " +
+      "lectura: para **editar** usá editar_codigo / escribir_codigo / aplicar_parche de la " +
+      "organización, y para correr tests o builds, ejecutar_comando. No declares terminado " +
+      "nada sin haber corrido la verificación y leído su salida." +
+      "\nTerminá el turno con un resumen en texto, para la organización."
+    );
+  }
   const donde = soloLectura
     ? "\n\nEl directorio actual es el de salida de la empresa y lo tenés en modo " +
       "lectura: abrí con tus propias herramientas lo que necesites mirar. Para **producir** " +

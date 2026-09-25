@@ -603,8 +603,8 @@ function Mantenimiento({
                   </div>
                   {carpetas.length === 0 ? (
                     <p className="text-[11px] text-ink-faint">
-                      Cada carpeta de <code className="text-ink-dim">data/exports/</code> tiene su
-                      empresa. No hay nada que limpiar.
+                      Cada carpeta de <code className="text-ink-dim">data/proyectos/</code> tiene su
+                      proyecto. No hay nada que limpiar.
                     </p>
                   ) : (
                     <>

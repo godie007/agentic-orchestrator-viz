@@ -20,7 +20,15 @@ export function fromRoot(path: string): string {
 export interface Env {
   port: number;
   databaseUrl: string;
-  /** Dónde se guardan los Word y PDF que producen las habilidades. */
+  /**
+   * Una carpeta legible por proyecto: su salida, el código que cargó una
+   * persona, los worktrees de los agentes. Ver `directorios.ts`.
+   */
+  proyectosDir: string;
+  /**
+   * El layout viejo de la salida (`data/exports/<id>`). Ya no se escribe: se
+   * lee una vez al arrancar para mudarlo a `proyectosDir`.
+   */
   exportsDir: string;
   /**
    * Carpeta con las pistas de música de fondo de los videos.
@@ -57,6 +65,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
   return {
     port: numeric(source.PORT, 3001, "PORT"),
     databaseUrl: fromRoot(source.DATABASE_URL?.trim() || "./data/orquestador.db"),
+    proyectosDir: fromRoot(source.PROYECTOS_DIR?.trim() || "./data/proyectos"),
     exportsDir: fromRoot(source.EXPORTS_DIR?.trim() || "./data/exports"),
     musicaDir: fromRoot(source.MUSICA_DIR?.trim() || "./data/musica"),
     contextoDir: fromRoot(source.CONTEXTO_DIR?.trim() || "./data/contexto"),

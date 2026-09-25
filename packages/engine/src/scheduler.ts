@@ -1,9 +1,9 @@
 import { esCorridaTerminal, type Run, type RunStatus } from "@orq/shared";
 import { BudgetExceededError, type ProviderRegistry, type RunLedger } from "@orq/llm";
-import type { ToolRegistry } from "@orq/tools";
+import { HERRAMIENTAS_QUE_ESCRIBEN_CODIGO, type ToolRegistry } from "@orq/tools";
 import type { EventBus } from "./events.js";
 import type { RunState } from "./state.js";
-import { runAgentTurn } from "./loop.js";
+import { runAgentTurn, type TurnDeps } from "./loop.js";
 
 /**
  * Scheduler: el motor de "la empresa opera sola".
@@ -38,6 +38,8 @@ export interface OrchestratorDeps {
   dirDeTrabajo?: string;
   /** Mapa del árbol de contexto de la empresa. Ver `TurnDeps.mapaDeContexto`. */
   mapaDeContexto?: () => Promise<string>;
+  /** Código del proyecto. Ver `TurnDeps.codigo`. */
+  codigo?: TurnDeps["codigo"];
   onRunUpdate?: (run: Run) => void;
 }
 
@@ -180,7 +182,7 @@ export class Orchestrator {
         // escribir es un pedido perdido. Nos pasó con el encargo de auditoría:
         // cerró en dos ciclos, sin un mensaje ni un entregable, informando que
         // no quedaba trabajo.
-        if (this.state.artifacts.length === 0 && this.mensajesEntreRoles() === 0) {
+        if (this.state.artifacts.length === 0 && this.mensajesEntreRoles() === 0 && !this.escribioCodigo()) {
           const reason =
             `La corrida terminó sin producir nada: ningún entregable escrito y ningún ` +
             `mensaje entre roles. El encargo llegó a destino pero no se ejecutó. ` +
@@ -282,6 +284,31 @@ export class Orchestrator {
       }
       const { advanced } = await this.tick();
       if (!advanced) break;
+      // Un ciclo entero fallido es el proveedor, no los agentes: reintentar al
+      // toque contra una API saturada sólo quema ciclos —cada uno falla igual—
+      // y termina cortando la corrida por una demanda que en un minuto baja.
+      if (this.ticksSinTurnosOk > 0 && !isTerminal(this.status)) {
+        const espera = Math.min(ESPERA_MAXIMA_MS, ESPERA_BASE_MS * 2 ** (this.ticksSinTurnosOk - 1));
+        this.deps.bus.emit({
+          type: "log",
+          runId: this.run.id,
+          tick: this.state.tick,
+          level: "warn",
+          roleId: null,
+          message:
+            `Ningún turno del ciclo terminó: el proveedor no está respondiendo. ` +
+            `Se reintenta en ${Math.round(espera / 1000)} s en vez de insistir enseguida.`,
+        });
+        await this.esperarCancelable(espera);
+      }
+    }
+  }
+
+  /** Espera que se corta si alguien detiene o pausa la corrida. */
+  private async esperarCancelable(ms: number): Promise<void> {
+    const hasta = Date.now() + ms;
+    while (Date.now() < hasta && !this.stopRequested && !this.pauseRequested) {
+      await new Promise((resolve) => setTimeout(resolve, Math.min(500, hasta - Date.now())));
     }
   }
 
@@ -379,6 +406,22 @@ export class Orchestrator {
    */
   private mensajesEntreRoles(): number {
     return this.state.messages.filter((message) => message.fromRoleId !== null).length;
+  }
+
+  /**
+   * Si alguien cambió código en esta corrida. Un pedido del chat del IDE lo
+   * atiende un solo rol, que no escribe entregables ni le manda mensajes a
+   * nadie: su producción son las ediciones y el checkpoint. Sin esto, cada
+   * pedido de código bien resuelto terminaba "failed — sin producir nada".
+   * Cuentan sólo las ediciones que salieron bien, por las herramientas del org
+   * o por el `Edit`/`Write` propio del CLI.
+   */
+  private escribioCodigo(): boolean {
+    return this.state.activity.some(
+      (entrada) =>
+        entrada.ok &&
+        (HERRAMIENTAS_QUE_ESCRIBEN_CODIGO.has(entrada.tool) || /^cli:(Edit|MultiEdit|Write|NotebookEdit)$/.test(entrada.tool)),
+    );
   }
 
   /** Si todavía hay algo que dependa de una persona: una aprobación o una consulta. */
@@ -523,6 +566,7 @@ export class Orchestrator {
             ...(this.deps.fechaHoy ? { fechaHoy: this.deps.fechaHoy() } : {}),
             ...(this.deps.dirDeTrabajo ? { dirDeTrabajo: this.deps.dirDeTrabajo } : {}),
             ...(this.deps.mapaDeContexto ? { mapaDeContexto: this.deps.mapaDeContexto } : {}),
+            ...(this.deps.codigo ? { codigo: this.deps.codigo } : {}),
             ...(this.abort ? { signal: this.abort.signal } : {}),
           });
           // El contador se reinicia en cuanto hace algo: lo que se persigue es
@@ -628,6 +672,15 @@ export class Orchestrator {
  * sin crédito consuma los 50 ciclos de la corrida.
  */
 const TICKS_FALLIDOS_TOLERADOS = 3;
+
+/**
+ * Espera entre ciclos enteros fallidos en modo continuo: 30 s, 60 s, 120 s.
+ * Con tres tolerados, una corrida aguanta unos dos minutos de proveedor caído
+ * antes de cortar, en vez de los segundos que tardaban tres fallos seguidos.
+ * Se ajusta con `ORQ_ESPERA_PROVEEDOR_MS` (los tests la ponen en cero).
+ */
+const ESPERA_BASE_MS = Number(process.env["ORQ_ESPERA_PROVEEDOR_MS"] ?? 30_000);
+const ESPERA_MAXIMA_MS = Math.max(ESPERA_BASE_MS, 120_000);
 
 /**
  * Turnos seguidos sin ejecutar nada antes de dejar de convocar a un rol por sus

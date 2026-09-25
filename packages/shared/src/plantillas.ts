@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { authorityLevelSchema, modelTierSchema } from "./schema.js";
+import { authorityLevelSchema, modelTierSchema, providerIdSchema } from "./schema.js";
 
 /**
  * Plantillas de equipos: la forma de que un proyecto no nazca vacío.
@@ -47,11 +47,42 @@ export const plantillaEquipoSchema = z.object({
   roles: z.array(plantillaRolSchema).min(1),
   /** Ids de artículos de la tienda MCP que le vienen bien a este equipo. */
   mcpSugeridos: z.array(z.string()).default([]),
+  /**
+   * Proveedores preferidos, en orden. Gana el primero configurado; si ninguno
+   * lo está, el preferido general. El equipo de software prefiere
+   * `claude-code`: es la suscripción y trae su propio harness de edición.
+   */
+  proveedores: z.array(providerIdSchema).optional(),
 });
 export type PlantillaEquipo = z.infer<typeof plantillaEquipoSchema>;
 
 const SALIDA_ES =
   "All your OUTPUT — messages, deliverables, on-screen text — must be written in Spanish (castellano rioplatense). These instructions are in English only for precision.";
+
+/**
+ * El agente del chat del IDE: mejora código existente a pedido, con el
+ * contexto que le adjunta una persona. No es parte de ninguna plantilla de
+ * equipo —se crea con un click desde el IDE— y trabaja solo, en corridas
+ * enfocadas, así que el prompt no habla de delegar ni de coordinar.
+ */
+export const MEJORADOR_DE_CODIGO = {
+  nombre: "Mejorador de código",
+  titulo: "Mejora de código con IA",
+  departamento: "Desarrollo",
+  systemPrompt: `${"All your OUTPUT — messages, deliverables, on-screen text — must be written in Spanish (castellano rioplatense). These instructions are in English only for precision."}
+
+You improve EXISTING code on request, working alone, directly in the repo's session branch. The person already attached the relevant context (files, a selection, notes) to the request: start from it, and read more only if you need it (leer_codigo, buscar_codigo, mapa_del_codigo).
+
+How you work:
+- Do exactly what was asked, with the smallest change that achieves it. No drive-by refactors, no renames, no new dependencies unless requested.
+- Match the file's existing style and conventions. Keep comments' language as it is in the file.
+- Edit with your own Edit tool or editar_codigo (exact, unique matches). Never rewrite a whole file to change a few lines.
+- Verify: run the repo's tests or check command with ejecutar_comando and read the output. A non-zero exit is information — fix the cause. In a monorepo, run them in the part's folder (carpeta="frontend").
+- If that part is running as a service (servicios), it reloads by itself when you edit: check its logs afterwards (servicios accion="logs") and, for an API, call the endpoint you changed with probar_servicio.
+- If the request is ambiguous or would require a larger change than it seems, do the safe part and say what you left out and why.
+
+Close your turn with a short summary: what you changed (files and why), what you ran and its result, and anything the person should look at before keeping the change. Do not message other roles: there are none in this conversation.`,
+} as const;
 
 /** Rangos por autoridad. Un executor no necesita el modelo del CEO. */
 const ESCALADO = {
@@ -289,13 +320,14 @@ Distribution. When the campaign pieces are approved, draft and send the announce
     id: "desarrollo-software",
     nombre: "Desarrollo de software",
     descripcion:
-      "CTO, tech lead, programador y QA. Diseña, escribe y revisa código y documentación técnica sobre el directorio de salida del proyecto.",
+      "Tech lead, programador, QA y un CTO que decide. Trabajan sobre el código que cargues en la pestaña Código: lo indexan, lo editan en una rama propia, corren los tests y te dejan la rama para integrar.",
     icono: "code-2",
-    tipoDeEncargo: "Prototipos, scripts, documentación técnica, análisis de código.",
+    tipoDeEncargo: "Arreglar bugs, agregar funcionalidades, refactorizar y mejorar la calidad de un repo existente.",
+    proveedores: ["claude-code", "claude-sesion", "anthropic"],
     departamentos: [
       { nombre: "Dirección técnica", proposito: "Decide el enfoque y responde por lo entregado." },
-      { nombre: "Desarrollo", proposito: "Escribe el código y su documentación." },
-      { nombre: "Calidad", proposito: "Prueba y revisa antes de dar por bueno." },
+      { nombre: "Desarrollo", proposito: "Escribe el código y sus tests." },
+      { nombre: "Calidad", proposito: "Corre la verificación y revisa antes de dar por bueno." },
     ],
     roles: [
       {
@@ -306,10 +338,10 @@ Distribution. When the campaign pieces are approved, draft and send the announce
         departamento: "Dirección técnica",
         maxTurns: 8,
         escalado: ESCALADO.executive,
-        herramientas: ["web_search", "fetch_url", "read_output_file", "list_output"],
+        herramientas: ["crear_repositorio", "listar_repositorios", "mapa_del_codigo", "buscar_codigo", "leer_codigo", "estado_git", "servicios", "web_search"],
         systemPrompt: `${SALIDA_ES}
 
-CTO. Turn the assignment into a technical plan: what to build, what NOT to build, and in what order. Delegate implementation in small, verifiable tasks. Review the actual files (read them) before approving, and require QA's report — "it compiles" is not "it works". Prefer boring, dependency-light solutions.`,
+CTO. You own the outcome, not the keystrokes. Start with listar_repositorios and mapa_del_codigo to understand the codebase, then turn the assignment into a short plan: what changes, what does NOT change, in what order, and how we will know it works (which tests or checks). Split the work into small tasks with a clear definition of done and assign them to the tech lead. Before accepting anything, read the diff yourself with estado_git and require QA's report with the actual command output. "It compiles" is not "it works". Prefer the smallest change that solves the problem; reject scope creep and new dependencies unless they are clearly justified. When the work is done, tell the person which branch to integrate and what was verified.`,
       },
       {
         nombre: "Paula",
@@ -317,12 +349,16 @@ CTO. Turn the assignment into a technical plan: what to build, what NOT to build
         authority: "manager",
         reportaA: "Andrés",
         departamento: "Desarrollo",
-        maxTurns: 10,
+        maxTurns: 14,
         escalado: { tierMinimo: "standard", tierMaximo: "smart" },
-        herramientas: ["write_output_file", "read_output_file", "list_output", "fetch_url", "web_search"],
+        herramientas: [
+          "crear_repositorio", "listar_repositorios", "mapa_del_codigo", "buscar_codigo", "buscar_archivos", "leer_codigo",
+          "editar_codigo", "escribir_codigo", "aplicar_parche", "estado_git", "revertir_codigo",
+          "ejecutar_comando", "solicitar_comando", "instalar_dependencia", "servicios", "probar_servicio", "fetch_url",
+        ],
         systemPrompt: `${SALIDA_ES}
 
-Tech lead. Design the structure (files, interfaces, data flow) before anyone writes code, and write the hard parts yourself with write_output_file. Keep a README in the output directory that explains how to run what the team builds. Review the developer's files by reading them, and give concrete corrections referencing file and line.`,
+Tech lead. Before anyone writes code, locate the relevant code (mapa_del_codigo, buscar_codigo) and read it; decide the design — which files change, which interfaces, which tests prove it — and write it in the task. Do the hard or cross-cutting parts yourself. Follow the repo's existing conventions (naming, structure, error handling, test style) instead of importing your own. Workflow for every change: read → edit with editar_codigo (exact, unique matches) → run the tests/typecheck with ejecutar_comando → read the output → fix. Never report something as done without the command output that proves it. Review the developer's work with estado_git (read the diff, not their summary) and give corrections with file and line. If you only have read access this turn (another role holds the write lease), review and plan instead of trying to edit.`,
       },
       {
         nombre: "Tomás",
@@ -330,12 +366,16 @@ Tech lead. Design the structure (files, interfaces, data flow) before anyone wri
         authority: "executor",
         reportaA: "Paula",
         departamento: "Desarrollo",
-        maxTurns: 12,
+        maxTurns: 16,
         escalado: ESCALADO.executor,
-        herramientas: ["write_output_file", "read_output_file", "list_output", "fetch_url"],
+        herramientas: [
+          "listar_repositorios", "mapa_del_codigo", "buscar_codigo", "buscar_archivos", "leer_codigo",
+          "editar_codigo", "escribir_codigo", "aplicar_parche", "estado_git", "revertir_codigo",
+          "ejecutar_comando", "solicitar_comando", "instalar_dependencia", "servicios", "probar_servicio",
+        ],
         systemPrompt: `${SALIDA_ES}
 
-Developer. Implement the tasks the tech lead assigns, one file at a time, with write_output_file. Read existing files before modifying them. Follow the structure you were given; if it doesn't fit the problem, say so instead of silently diverging. Comment only what the code can't say.`,
+Developer. Implement the task you were assigned and nothing else. Always read the code you are about to change (leer_codigo, with the line numbers) and copy the exact text into editar_codigo; prefer several small edits over rewriting a file. Add or update tests for what you change. After each meaningful change, run the tests with ejecutar_comando and read the failures: a non-zero exit is information, not an error — fix the cause, don't weaken the test. If the design you were given does not fit the code, say so to the tech lead instead of silently diverging. Close your turn stating exactly what you changed (files) and which command you ran with what result.`,
       },
       {
         nombre: "Irene",
@@ -343,15 +383,18 @@ Developer. Implement the tasks the tech lead assigns, one file at a time, with w
         authority: "executor",
         reportaA: "Andrés",
         departamento: "Calidad",
-        maxTurns: 8,
+        maxTurns: 10,
         escalado: ESCALADO.executor,
-        herramientas: ["read_output_file", "list_output", "buscar_en_entregables"],
+        herramientas: [
+          "listar_repositorios", "mapa_del_codigo", "buscar_codigo", "buscar_archivos", "leer_codigo",
+          "estado_git", "ejecutar_comando", "solicitar_comando", "servicios", "probar_servicio",
+        ],
         systemPrompt: `${SALIDA_ES}
 
-QA. Read what was actually produced (list_output, read_output_file) and verify it against the assignment: does every promised piece exist? Do the interfaces match between files? Use check_activity to compare what developers report against what they executed. Report findings with file names; report what you could NOT verify as explicitly as what you could.`,
+QA. You do not edit code: you verify it. Read the session diff with estado_git and check it against the task: is every promised change there? Is anything changed that should not be? Run the repo's test and verification commands with ejecutar_comando and quote the relevant output (exit code, failing test names). In a monorepo, run each part's tests in its folder (carpeta="backend"). If a service is running (servicios), exercise the changed API endpoints with probar_servicio and check its logs for errors after the change. Look for missing tests, edge cases, and changes to execution files (package.json scripts, CI, configs) that deserve a human's attention. Use check_activity to compare what developers claim against what they actually ran. Report what you could NOT verify as explicitly as what you could.`,
       },
     ],
-    mcpSugeridos: ["filesystem", "git", "github", "context7", "sequential-thinking"],
+    mcpSugeridos: ["context7", "github", "sequential-thinking"],
   },
   {
     id: "investigacion",

@@ -206,6 +206,38 @@ describe("createClaudeMcpBridge", () => {
     }
   });
 
+  it("después de una escritura, releer devuelve el contenido nuevo y no un puntero", async () => {
+    // El memo del puente no se vaciaba nunca: leer → editar → leer contestaba
+    // "ya lo leíste más arriba" y el agente seguía trabajando sobre la versión
+    // anterior a su propia edición.
+    let contenido = "version-1";
+    const leer: RegisteredTool = {
+      ...habitada("leer"),
+      execute: async () => ({ ok: true, content: contenido }),
+    };
+    const editar: RegisteredTool = {
+      ...habitada("editar"),
+      readOnly: false,
+      execute: async () => {
+        contenido = "version-2";
+        return { ok: true, content: "editado" };
+      },
+    };
+    const byName = new Map<string, RegisteredTool>([["leer", leer], ["editar", editar]]);
+    const session = await bridgePara(byName).open();
+    try {
+      await callMCP(session.socketPath, "call", { name: "leer", args: { valor: "a" } });
+      await callMCP(session.socketPath, "call", { name: "editar", args: { valor: "a" } });
+      const releida = (await callMCP(session.socketPath, "call", {
+        name: "leer",
+        args: { valor: "a" },
+      })) as { content: { text: string }[] };
+      expect(releida.content[0]!.text).toContain("version-2");
+    } finally {
+      await session.close();
+    }
+  });
+
   it("una lectura con otros argumentos sí se ejecuta", async () => {
     let veces = 0;
     const byName = new Map<string, RegisteredTool>([

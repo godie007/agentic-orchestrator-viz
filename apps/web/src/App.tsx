@@ -1,3 +1,4 @@
+import { lazy, Suspense } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   BrowserRouter,
@@ -13,6 +14,7 @@ import {
 import {
   Activity,
   Brain,
+  Code2,
   FolderOutput,
   Inbox,
   KanbanSquare,
@@ -34,6 +36,8 @@ import { Memory } from "./routes/Memory.js";
 import { Requests } from "./routes/Requests.js";
 import { Output } from "./routes/Output.js";
 import { Tienda } from "./routes/Tienda.js";
+// El IDE carga Monaco (varios MB): se trae recién cuando alguien abre Código.
+const Codigo = lazy(() => import("./routes/Codigo.js"));
 
 /**
  * El shell de la aplicación: header global + sidebar por proyecto, con la
@@ -52,6 +56,7 @@ const SECCIONES = [
   { path: "solicitudes", etiqueta: "Solicitudes", icono: Inbox, title: "Lo que los agentes te piden: roles, datos, accesos, servidores." },
   { path: "tienda", etiqueta: "Tienda", icono: Store, title: "Catálogo de servidores MCP, instalables en un click." },
   { path: "mcp", etiqueta: "MCP", icono: Plug, title: "Servidores MCP conectados: salud, reconexión y probador." },
+  { path: "codigo", etiqueta: "Código", icono: Code2, title: "Los repos del proyecto: la rama de los agentes, su diff, integrar o descartar." },
   { path: "salida", etiqueta: "Salida", icono: FolderOutput, title: "Los archivos que la empresa produjo." },
   { path: "memoria", etiqueta: "Memoria", icono: Brain, title: "Lo que la empresa aprendió entre corridas." },
   { path: "costos", etiqueta: "Costos", icono: Receipt, title: "Cuánto gastó cada corrida, por agente y por modelo." },
@@ -74,6 +79,18 @@ export function App() {
               <Route path="solicitudes" element={<Pantalla render={(c) => <Requests key={c.company.id} company={c} />} />} />
               <Route path="tienda" element={<Pantalla render={(c) => <Tienda key={c.company.id} company={c} />} />} />
               <Route path="mcp" element={<Pantalla render={(c) => <McpHub key={c.company.id} company={c} />} />} />
+              <Route
+                path="codigo"
+                element={
+                  <Pantalla
+                    render={(c) => (
+                      <Suspense fallback={<div className="p-4 text-sm text-ink-faint">Abriendo el IDE…</div>}>
+                        <Codigo key={c.company.id} company={c} />
+                      </Suspense>
+                    )}
+                  />
+                }
+              />
               <Route path="salida" element={<Pantalla render={(c) => <Output company={c} />} />} />
               <Route path="memoria" element={<Pantalla render={(c) => <Memory key={c.company.id} company={c} />} />} />
               <Route path="costos" element={<Pantalla render={(c) => <Costs key={c.company.id} company={c} />} />} />
